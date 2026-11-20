@@ -64,7 +64,7 @@ What is certain: the receive path (inputs) does not depend on this, so first lig
 ## 6. Analogue audio inputs and outputs
 Choosing mic / line-in RCA / balanced TRS / FlexWire input, headphone / powered speaker / line-out outputs, and their levels are
 **radio-side codec registers** (`WRITE_CODEC_REG`), not host mixer settings: the Windows driver only mirrors them as a mixer.
-Register map: see `opcode-reference.md` (WRITE_CODEC_REG) and `fwcmixform.cs:852-1039`. This corrects an earlier note that called the
+Register map: see protocol/04-opcodes.md (WRITE_CODEC_REG) and `fwcmixform.cs:852-1039`. This corrects an earlier note that called the
 mux "just the Windows mixer": the Windows mixer is the driver's face for the same radio commands.
 
 ## 7. Linux mapping and first-contact experiments (all read-only unless stated)

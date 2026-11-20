@@ -10,7 +10,7 @@ without RF), power/SWR meters from the EEPROM calibration, closed-loop power, TX
 by DK0ULR. Full story: `analysis/transmit-stage2.md`; GUI: app/README.md "Radio transmit on the Radio screen".
 
 ## Map
-- `app/` C++17/Qt 6: `cmake -S app -B build -G Ninja && cmake --build build && ctest --test-dir build` (23 CTest groups, ~2.5 min). `app/README.md` is the feature and architecture reference (start at "Daily use").
+- `app/` C++17/Qt 6: `cmake -S app -B build -G Ninja && cmake --build build && ctest --test-dir build` (24 CTest groups, ~8 min). `app/README.md` is the feature and architecture reference (start at "Daily use").
 - `tools/` Python reference implementation (`firesidectl-cli`, `hardware-day`) and its tests: `python3 -m unittest discover -s tools/tests` (107 tests). `tools/compare_ft8.py`, `tools/ft8bench.py`: decoder comparison against WSJT-X's jt9.
 - `analysis/` findings: `audio-stream-layout.md` (radio streams, direct-stream spike and results), `ft8-vs-wsjtx-*.md` (decoder numbers), `startup-review.md` (the safety review of every write), `opcode-reference.md`.
 - `system/` udev rules (radio node AND the controller's local node, group `audio`), WirePlumber rule (PipeWire leaves the radio's sound card alone), `setup-system.sh`, `fireside-system-check.sh`.
@@ -18,7 +18,7 @@ by DK0ULR. Full story: `analysis/transmit-stage2.md`; GUI: app/README.md "Radio 
 - Ignored by git: `docs/`, `software/`, `upstream/`, `hardware-day/`, `backups/` (EEPROM backups: contain the radio's calibration; keep copies elsewhere), `recordings/`, `winvm.md`, build output.
 
 ## Robustness checks (sanitizers)
-Last run 2026-11-18, all clean: ASan + UBSan on all 404 core tests and on the 16 GUI test groups; TSan on the threaded code (engine, direct FireWire stream, session, decoder thread): 0 reports.
+Last run 2026-11-18, all clean: ASan + UBSan on all 404 core tests (523 now) and on the 16 GUI test groups; TSan on the threaded code (engine, direct FireWire stream, session, decoder thread): 0 reports.
 Repeat after threaded or low-level changes (separate build dirs, git ignores `build*/`):
 `cmake -S app -B build-asan -G Ninja -DFLEX_BUILD_GUI=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" -DCMAKE_C_FLAGS="<same>" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"`
 then `build-asan/tests/fireside_tests` (~4 min); for TSan use `-fsanitize=thread` and `FIRESIDE_TEST_FILTER=engine,fw_iso,session,ft8_streams,...` (TSan is 5-15x slower: the real-time engine test
@@ -36,9 +36,9 @@ then `build-asan/tests/fireside_tests` (~4 min); for TSan use `-fsanitize=thread
 - A killed `firesidecapture` (SIGKILL) leaves the radio's stream on: restore by hand: DICE ENABLE = 0, TX[0] iso channel = 0xFFFFFFFF, CLOCK_SELECT = 0x020C (SIGINT/SIGTERM are handled and restore it).
 
 ## What is done
-Receive (see above) plus transmit: PAL logging proxy + PowerSDR capture (`tools/pal-logger`, `hardware-day/capture-20261118-powersdr`), TxGate / TxControl / ATU / meters / image
+Receive (see above) plus transmit: the ATU sequence observed from PowerSDR on the radio, TxGate / TxControl / ATU / meters / image
 correction / FT8-FT4 send (core, shared by the GUI card and `build/firesidekey`), simulated radio (`fireside/sim_radio.h`, `fireside --simulate` practises transmit), GUI Transmit card
-right of the decoder. Tests: 23 CTest groups + 122 Python; the GUI smoke test runs arm / measure / tune / FT4 send / stop on the simulated radio.
+right of the decoder. Tests: 24 CTest groups (523 core tests) + 124 Python; the GUI smoke test runs arm / measure / tune / FT4 send / stop on the simulated radio.
 
 ## Open / next
 1. ~~FT8 reply / auto-sequence~~ DONE 2026-11-19 (click to reply, `qso_seq`, auto log; tested on the simulated radio, not yet on the air) (double-click a CQ or a call to M0OML: report, RR73, 73, then log to Wavelog). The user has not made a complete QSO yet.

@@ -3,7 +3,6 @@ HERE = os.path.dirname(os.path.abspath(__file__)); TOOLS = os.path.dirname(HERE)
 sys.path.insert(0, TOOLS)
 from firesidectl.opcodes import OPCODES
 from opcode_notes import NOTES
-SRC = os.path.join(TOOLS, "..", "upstream", "powersdr-2.7.2", "Source")
 
 
 class Notes(unittest.TestCase):
@@ -16,36 +15,35 @@ class Notes(unittest.TestCase):
             self.assertRegex(NOTES[k].upper(), r"BLOCK|NEVER|DANGEROUS|CALIBRATION")
 
 
-@unittest.skipUnless(os.path.isdir(SRC), "PowerSDR source tree not present")
 class Generated(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.out = os.path.join(tempfile.mkdtemp(), "ref.md")
-        r = subprocess.run([sys.executable, "-I", os.path.join(TOOLS, "gen_opcode_docs.py"), SRC, cls.out],
-                           capture_output=True, text=True)
-        assert r.returncode == 0, r.stderr
-        with open(cls.out) as f:
-            cls.text = f.read()
-        cls.rows = [l for l in cls.text.splitlines() if re.match(r"^\| \d+ \|", l)]
+    def test_protocol_opcode_page_is_up_to_date(self):
+        import gen_protocol_opcodes
+        page = os.path.join(TOOLS, "..", "protocol", "04-opcodes.md")
+        with open(page) as f:
+            self.assertEqual(f.read(), gen_protocol_opcodes.build(), "regenerate: python3 -I tools/gen_protocol_opcodes.py")
+        for name, text in (("opcodes.json", gen_protocol_opcodes.build_json()), ("opcodes.csv", gen_protocol_opcodes.build_csv())):
+            with open(os.path.join(TOOLS, "..", "protocol", name)) as f:
+                self.assertEqual(f.read(), text, "regenerate: python3 -I tools/gen_protocol_opcodes.py")
 
-    def test_all_opcodes_once_and_well_formed(self):
-        nums = [int(re.match(r"^\| (\d+) ", l).group(1)) for l in self.rows]
-        self.assertEqual(sorted(nums), sorted(v[0] for v in OPCODES.values()))
-        for l in self.rows:
-            self.assertEqual(len(re.split(r"(?<!\\)\|", l)), 9, l[:80])     # 7 columns, escaped pipes allowed
+    def test_every_opcode_is_listed_once(self):
+        import gen_protocol_opcodes
+        text = gen_protocol_opcodes.build()
+        rows = [int(m.group(1)) for m in re.finditer(r"^\| (\d+) \|", text, re.M)]
+        bare = [int(n) for n in re.findall(r"\((\d+)\)", text.split("## Opcodes with no documented use")[1])]
+        self.assertEqual(sorted(rows + bare), sorted(v[0] for v in OPCODES.values()))
 
-    def test_key_rows_carry_the_researched_facts(self):
-        row = lambda n: next(l for l in self.rows if l.startswith(f"| {n} "))
-        self.assertIn("0xFFFFFFFF * f_MHz / 500.0", row(1347))
-        self.assertIn("SetRX1FreqTW(uint tw, float freq)", row(1347))
-        self.assertIn("WriteCodecReg", row(1243)); self.assertIn("0x16 mic", row(1243))
-        self.assertIn("(cmd<<8)\\|arg1", row(1294))
-        self.assertIn("BLOCKED", row(1227))                                   # WRITE_TRX_EEPROM_UINT32
+    def test_dangerous_opcodes_are_not_called_safe(self):
+        text = gen_protocol_opcodes_text()
+        for name in ("SET_MOX", "SET_PA_BIAS", "ATU_SEND_CMD", "WRITE_CODEC_REG"):
+            row = next(l for l in text.splitlines() if f"`{name}`" in l)
+            self.assertIn("dangerous", row)
+        row = next(l for l in text.splitlines() if "`WRITE_TRX_EEPROM_UINT32`" in l)
+        self.assertIn("never", row)
 
-    def test_every_called_opcode_has_a_wrapper_column(self):
-        called = [OPCODES[n][0] for n in OPCODES if OPCODES[n][1] != "?"]
-        for v in called:
-            self.assertNotIn("(not called by PowerSDR", next(l for l in self.rows if l.startswith(f"| {v} ")))
+
+def gen_protocol_opcodes_text():
+    import gen_protocol_opcodes
+    return gen_protocol_opcodes.build()
 
 
 if __name__ == "__main__":

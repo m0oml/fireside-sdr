@@ -39,7 +39,8 @@ your signal.** There is no warranty (see the licence).
 
 ## Where to read more
 - [app/USER-GUIDE.md](app/USER-GUIDE.md): using the app. [app/README.md](app/README.md): features and architecture.
-- [HANDOFF.md](HANDOFF.md) and [NOTES.md](NOTES.md): project state, rules and a running log. `analysis/`: findings (the PAL mailbox protocol, the audio stream
+- [protocol/](protocol/README.md): the FLEX-5000 control and stream protocol for anyone writing their own software (mailbox, MIDI SysEx, DICE streams, audio format).
+- [HANDOFF.md](HANDOFF.md) and [NOTES.md](NOTES.md): project state, rules and a running log. `analysis/`: findings (the audio stream
   layout, transmit, decoder comparisons with WSJT-X). [UPSTREAM.md](UPSTREAM.md): the PowerSDR source this learned from.
 
 ## Licence

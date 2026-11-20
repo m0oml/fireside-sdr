@@ -74,7 +74,7 @@ real QRZ server.
   wins, no refill within 10 min of logging them). Log smoke covers it against the fake Wavelog.
 
 ## 2026-11-18 evening / 2026-11-19: transmit, on the air
-PowerSDR capture with our pal.dll logger (ATU sequence; PowerSDR cleared EEPROM 0x3F via a checksum-read race: restored, identical to the backup); transmit research
+PowerSDR run for the ATU sequence (PowerSDR cleared EEPROM 0x3F via a checksum-read race: restored, identical to the backup); transmit research
 (TX I/Q on out ch0/1, PA bias pots, drive table, carrier null, image correction); TxGate / ATU / meters / TxControl; firesidekey steps on the radio (relays without RF: Hi-Z = SET_IND
 bit 7; bias; silent key-down ~0 W; ramp to 2 W; ATU tunes at 3/5/10 W all pass); GUI Transmit card; TX sign mirrored (WebSDR); FT8/FT4 send with closed-loop power; first FT8 CQ
 answered by DK0ULR. Decoder fixed to survive the receive pause during an over. Details: analysis/transmit-stage2.md, app/README.md.
@@ -96,11 +96,11 @@ Open items and rules: `HANDOFF.md`. Feature reference: `app/README.md`. Decoder 
 | Radio control API | `Console/FWC/fwc.cs`: every function is `WriteOp/ReadOp(opcode, data1, data2)` | GPL |
 | Opcode list | `PowerSDR.Shared/OpCode.cs` (`RDAL_OP_*`, e.g. SET_RX1_FREQ=1244, SET_TX_FREQ=1246, READ_PTT=1266, SET_ANT=1277) | GPL |
 | EEPROM / calibration layout | `Console/FWC/fwc_eeprom.cs` | GPL |
-| Transport | `pal.dll`: closed, built on TC Applied (TCAT) DICE SDK, opens `\\.\FlexRadio`, uses plain 1394 async `ohci_read`/`ohci_write` | closed |
+| Transport | plain IEEE 1394 asynchronous reads and writes to the DICE register window: see protocol/02-control-transports.md | standard |
 | I/Q + audio | Standard DICE isochronous audio, 8 ch, via ASIO/PortAudio (`audio.cs`, callback8) | standard |
 | Firmware | DICE ARM firmware in radio | closed (don't need to touch) |
 
-## Control route 1: MIDI SysEx (documented in GPL source, no reverse engineering needed)
+## Control route 1: MIDI SysEx (documented in PowerSDR's GPL source)
 `Console/FWC/fwc_midi.cs`. The radio exposes a MIDI port named "...FLEX..."/"...Flex...".
 - Request: `F0 00 00 41` + 32 ASCII-hex chars + `F7` (37 bytes).
   Payload before hex-encoding (16 bytes, little-endian):
@@ -112,7 +112,7 @@ Open items and rules: `HANDOFF.md`. Feature reference: `app/README.md`. Decoder 
 - Caveat: PowerSDR 2.x mostly uses PAL; only GetModelMidi/paddles/MOX use MIDI. Whether firmware
   accepts *all* opcodes over SysEx needs testing on hardware.
 
-## Control route 2: FireWire PAL mailbox (interoperability analysis, 2026-11-14; see analysis/pal-mailbox-protocol.md)
+## Control route 2: FireWire mailbox (see protocol/02-control-transports.md)
 The PAL mailbox is plain 1394 async transactions into the DICE register window:
 - CMD    0xFFFF_E000_1000: write {opcode|0x80000000, data1, data2} as one 12-byte block; bit 31 = busy
 - RESULT 0xFFFF_E000_1004: read after bit 31 clears
@@ -163,7 +163,7 @@ This host has no FireWire controller (no /sys/bus/firewire). Need a PCIe card wi
   Windows driver extracted (innoextract installed) to scratch only; FlexRadio.inf shows the driver covers FLEX-5000 and FLEX-3000.
 - analysis/audio-stream-layout.md: 8-ch stream, 48/96/192 kHz, RX1 I/Q on in ch0/1, mic/RX2 shared on ch2/3, 3-thread DttSP model, 1 s dead-stream watchdog.
   **OPEN:** FlexRadio's two output-channel tables disagree (RX1/TX/RX2 vs QSE/headphone/ext-spkr); do not transmit until the output experiment settles it.
-- analysis/opcode-reference.md: generated for all 263 opcodes (wrapper signature, data1/data2 mapping, usage counts, safety class) + 51 hand notes (tools/opcode_notes.py).
+- protocol/04-opcodes.md: generated for all 263 opcodes (types, safety class, in-use flag) + 51 hand notes (tools/opcode_notes.py).
 - analysis/front-panel-events.md: EVENT bitmap, MIDI notes, CW keyer (closed FlexCW.dll: we write our own). **Mic UP/DOWN/FAST are FLEX-3000 only**: the 5000 mic connector has no such pins.
 - Corrections made: the audio 'mux' is the Windows face of radio codec registers (WRITE_CODEC_REG map documented), not a no-op.
 

@@ -1,8 +1,8 @@
 # firesidectl: FLEX-5000 control tool (prototype, Python, no dependencies)
 
 Talks the PowerSDR opcode protocol over either the radio's MIDI SysEx port (default) or the
-FireWire PAL mailbox (`--fw /dev/fwN`; see ../analysis/pal-mailbox-protocol.md).
-**Untested on real hardware.** The simulator uses assumed values.
+FireWire PAL mailbox (`--fw /dev/fwN`; see ../protocol/02-control-transports.md).
+Verified on a real FLEX-5000A over the FireWire mailbox (`--fw`); the MIDI route is only used for read-only identification. The simulator (`--fake`) uses assumed values.
 
     ./firesidectl-cli list                         # ALSA rawmidi devices
     ./firesidectl-cli probe                        # read-only identification sweep
@@ -32,4 +32,4 @@ Layout: protocol.py (framing), transport.py (ALSA rawmidi + SysEx parser), clien
 firewire.py (/dev/fw* via firewire-cdev), pal.py (mailbox link), startup.py (init/power sequence), eeprom.py (backup + decode),
 fake.py (simulator), cli.py, opcodes.py (generated).
 
-Docs generated from source: `python3 -I gen_opcode_docs.py ../upstream/powersdr-2.7.2/Source ../analysis/opcode-reference.md` (hand notes in opcode_notes.py).
+Opcode page: `python3 -I gen_protocol_opcodes.py` writes ../protocol/04-opcodes.md (hand notes in opcode_notes.py; a test fails if the page is stale).

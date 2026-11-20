@@ -4,8 +4,7 @@
 //   * meter readings fed to report() unkey it above cfg.max_fwd_w, or above cfg.max_swr once there is enough power to judge
 //   * unkey() always sends SET_MOX 0, also after an error, and the destructor unkeys
 //   * while keyed it holds the safety gate's transmit grant (safety.h): without it SET_MOX 1 and ATU tune requests are refused everywhere
-// Stage 1 (2026-11-18): tested on the simulated radio only. Not connected to the GUI or a real radio yet: that is a reviewed step of its own
-// (the PC-to-radio I/Q stream has to exist first, and the first RF is a supervised low-power test).
+// In use on a real radio since 2026-11-19 (RadioSession::transmit() -> TxControl): see analysis/transmit-stage2.md and protocol/06-transmit-and-atu.md.
 #pragma once
 #include <functional>
 #include <optional>
@@ -17,7 +16,7 @@
 
 namespace fireside {
 struct GateConfig {
-    double max_key_s = 15.0;                                      // hard limit for any single key-down (a full ATU tune took 8.9 .. 9.9 s in the capture)
+    double max_key_s = 15.0;                                      // hard limit for any single key-down (a full ATU tune took 8.9 .. 9.9 s on the radio)
     double max_fwd_w = 20.0;                                      // unkey above this forward power (PowerSDR tunes at 15 W)
     double max_swr = 5.0, swr_min_fwd_w = 2.0;                    // unkey above this SWR once forward power is at least swr_min_fwd_w
     double max_rev_w = 1e9;                                       // unkey above this reflected power (used during ATU tunes, where SWR is no guide)
@@ -48,7 +47,7 @@ private:
     void note(const std::string& s);
 };
 
-// One complete ATU tune the way PowerSDR does it on the FLEX-5000 (capture of 2026-11-18): TX DSP mode CWU, key, threshold + tune request,
+// One complete ATU tune the way PowerSDR does it on the FLEX-5000 (as seen on the radio): TX DSP mode CWU, key, threshold + tune request,
 // poll the tuner and the PA meter (~35 ms), unkey, restore the mode. The tune carrier itself must already be on the I/Q stream: `carrier_ready`
 // is asked first and the tune is refused without it. Returns nullopt if the gate refused to key (reason in *why_not).
 struct TuneMeter { std::vector<txm::Reading> readings; double max_fwd_w = 0; };

@@ -93,5 +93,5 @@ Bands in order: 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 m. Checksum = XOR of 
 1. `INITIALIZE (0,0)`: PowerSDR calls it every start, but its firmware effect is unknown (cannot be read from source). Order matters little but it should run first.
 2. Whether SET_RX1_FREQ_TW before audio streaming is needed/harmful (PowerSDR does standby-off, antenna, frequency, then audio).
 3. `SET_STANDBY` polarity (PowerSDR: `SetStandby(false)` when powering on) and `SET_MOX 0` at shutdown.
-4. Byte order of the FireWire mailbox (see analysis/pal-mailbox-protocol.md) and that MIDI route answers all of these opcodes.
+4. Byte order of the FireWire mailbox (see protocol/02-control-transports.md) and that MIDI route answers all of these opcodes.
 5. First hardware session plan: `list` -> `identify` (read-only) -> `eeprom-dump` (read-only) -> only then `startup --dry-run` and `startup --allow-write`.

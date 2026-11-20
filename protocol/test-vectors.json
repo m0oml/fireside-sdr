@@ -1,0 +1,163 @@
+{
+ "_about": "Byte-exact test vectors for protocol/*.md. Checked by tools/tests/test_vectors.py (independent implementation of the documented rules) and app/tests/test_vectors.cpp (the C++ code). Hex strings are upper case, no separators.",
+ "mailbox_read_firmware": {
+  "page": "02",
+  "address": "FFFFE0001000",
+  "opcode": 1200,
+  "data1": 0,
+  "data2": 0,
+  "cmd_block": "800004B00000000000000000",
+  "result": "0201040C",
+  "firmware": "2.1.4.12"
+ },
+ "mailbox_write_standby": {
+  "page": "02",
+  "address": "FFFFE0001000",
+  "opcode": 1320,
+  "data1": 1,
+  "data2": 0,
+  "cmd_block": "800005280000000100000000"
+ },
+ "sysex_read_firmware": {
+  "page": "02",
+  "msg_id": 1,
+  "opcode": 1200,
+  "data1": 0,
+  "data2": 0,
+  "frame": "F00000413031303030303030423030343030303030303030303030303030303030303030F7"
+ },
+ "sysex_standby": {
+  "page": "02",
+  "msg_id": 4660,
+  "opcode": 1320,
+  "data1": 1,
+  "data2": 0,
+  "frame": "F00000413334313230303030323830353030303030313030303030303030303030303030F7"
+ },
+ "tuning_word_14_074": {
+  "page": "05",
+  "mhz": 14.074,
+  "dds_clock_mhz": 500.0,
+  "tuning_word": "0734B513",
+  "f32_bits": "41612F1B"
+ },
+ "serial_decode": {
+  "page": "05",
+  "raw": "11D71701",
+  "text": "0123-4567"
+ },
+ "eeprom_xor": {
+  "page": "05",
+  "bytes": "01020408",
+  "checksum": "0F"
+ },
+ "bias_pots": {
+  "page": "06",
+  "eeprom_row0": "EB7AE878EB7FE57C",
+  "pots": "EB85E887EB80E583"
+ },
+ "cip_packets_48k": {
+  "page": "03",
+  "sid": 1,
+  "channels": 8,
+  "fdf": "02",
+  "syt": "1234",
+  "note": "two data packets of 8 blocks, then a NO-DATA packet",
+  "headers": [
+   "0109000090021234",
+   "0109000890021234",
+   "0109001090FFFFFF"
+  ],
+  "first_block_sample_ch0_s32": "12345678",
+  "first_audio_quadlet": "40123456",
+  "midi_quadlet": "80000000"
+ },
+ "audio_quadlet": {
+  "page": "03",
+  "cases": [
+   {
+    "s32": "12345678",
+    "quadlet": "40123456"
+   },
+   {
+    "s32": "FFFFFF00",
+    "quadlet": "40FFFFFF"
+   },
+   {
+    "s32": "80000000",
+    "quadlet": "40800000"
+   }
+  ]
+ },
+ "dual_wire_block_192k": {
+  "page": "03",
+  "dbs": 17,
+  "quadlets": [
+   "40000001",
+   "40000002",
+   "40000003",
+   "40000004",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "40000000",
+   "80000000"
+  ],
+  "ch0_at_t": 1,
+  "ch0_at_t_plus_1": 2,
+  "ch1_at_t": 3,
+  "ch1_at_t_plus_1": 4
+ },
+ "atu_result": {
+  "page": "06",
+  "cases": [
+   {
+    "raw": "00FFFFFF",
+    "pending": false
+   },
+   {
+    "raw": "00001D01",
+    "pending": true,
+    "queue": 0,
+    "code": 1,
+    "b2": 29,
+    "b3": 0,
+    "meaning": "inductor 29"
+   },
+   {
+    "raw": "00A60205",
+    "pending": true,
+    "queue": 0,
+    "code": 5,
+    "b2": 2,
+    "b3": 166,
+    "meaning": "forward power 6.78 W"
+   }
+  ]
+ },
+ "pa_meter": {
+  "page": "06",
+  "bridge_volts_at_1_2_5_10_20_90W": [
+   0.2,
+   0.3,
+   0.45,
+   0.65,
+   0.9,
+   1.9
+  ],
+  "reverse_factor": 0.5,
+  "adc_forward": 1000,
+  "adc_reflected": 300,
+  "forward_w": 8.8643,
+  "reflected_w": 0.4191,
+  "swr": 1.5557
+ }
+}

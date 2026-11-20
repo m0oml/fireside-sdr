@@ -1,5 +1,6 @@
 """Hand-researched semantics, keyed by opcode name without the RDAL_OP_/FWC_OP_ prefix.
-Every entry cites where it came from (PowerSDR 2.7.2 paths relative to Source/Console/). Unverified on hardware."""
+The text is published as protocol/04-opcodes.md (tools/gen_protocol_opcodes.py), which strips source-file references. Entries marked in use
+in that page are exercised on a real radio; the rest is reported from PowerSDR's open-source code."""
 
 ANT = "0 N/C, 1 ANT1, 2 ANT2, 3 ANT3, 4 RX1 IN, 5 RX2 IN, 6 RX1 TAP, 7 SIG GEN, 8 VHF, 9 UHF (enum FWCAnt, console_small.cs)"
 DSPMODE = "enum DSPMode: 0 LSB, 1 USB, 2 DSB, 3 CWL, 4 CWU, 5 FM, 6 AM, 7 DIGU, 8 SPEC, 9 DIGL, 10 SAM, 11 DRM"

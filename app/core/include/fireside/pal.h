@@ -1,7 +1,7 @@
-// The FlexRadio "PAL" mailbox (analysis/pal-mailbox-protocol.md). Port of tools/firesidectl/pal.py.
+// The FlexRadio "PAL" mailbox (protocol/02-control-transports.md). Port of tools/firesidectl/pal.py.
 // DICE register space starts at 0xFFFF'E000'0000; Flex adds CMD/RESULT/EVENT at +0x1000/+0x1004/+0x1008.
-// PowerSDR's ReadOp: wait idle, write CMD block {opcode|BUSY, d1, d2}, poll until BUSY clears, read RESULT. WriteOp: write only.
-// We wait for idle before EVERY command and time out (PowerSDR's library has none). Byte order on the wire is TO VERIFY on hardware.
+// A read command: wait idle, write CMD block {opcode|BUSY, d1, d2}, poll until BUSY clears, read RESULT. A write command: write only.
+// We wait for idle before EVERY command and time out. Byte order on the wire is big-endian (verified on the radio).
 #pragma once
 #include <atomic>
 #include <map>

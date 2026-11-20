@@ -1,18 +1,18 @@
-"""The FlexRadio 'PAL' mailbox, (see analysis/pal-mailbox-protocol.md).
+"""The FlexRadio 'PAL' mailbox, (see protocol/02-control-transports.md).
 
 DICE register space starts at FireWire address 0xFFFF_E000_0000. Flex's firmware adds:
   0xFFFF_E000_1000  CMD    write {opcode|0x80000000, data1, data2} as one 12-byte block.
                            Bit 31 = busy; firmware clears it when the command has run.
-  0xFFFF_E000_1004  RESULT read after CMD bit 31 clears (ReadOp's return value).
+  0xFFFF_E000_1004  RESULT read after CMD bit 31 clears (the result of a read command).
   0xFFFF_E000_1008  EVENT  paddle/PTT/mic-button bitmap (see EVENT_BITS).
 DICE notification bits (vendor area, delivered via the driver's notification mechanism):
   0x01000000 command complete, 0x02000000 EVENT changed, 0x04000000 (nothing waits on it).
 
-PowerSDR's ReadOp: lock; poll CMD until bit31 clear; write CMD block; poll (10 ms)
-until bit31 clear (no timeout there); read RESULT; unlock. WriteOp just writes the
-CMD block without waiting at all. We wait for idle before every command and time out.
-Byte order: FireWire quadlets are big-endian on the bus, the convention Linux snd-dice
-and FFADO use for DICE registers. TO VERIFY on hardware (`byteorder` switch exists for that).
+A read command: lock; wait for CMD bit 31 clear; write the CMD block; wait for bit 31 clear again
+(poll, with a timeout); read RESULT; unlock. A write command stops after the CMD block. We wait for idle
+before every command.
+Byte order: FireWire quadlets are big-endian on the bus, the convention Linux snd-dice and FFADO use for
+DICE registers, and verified on the radio (`byteorder` switch kept for other hardware).
 """
 import struct, threading, time
 
@@ -20,6 +20,7 @@ DICE_BASE = 0xFFFF_E000_0000
 CMD, RESULT, EVENT = DICE_BASE + 0x1000, DICE_BASE + 0x1004, DICE_BASE + 0x1008
 BUSY = 0x8000_0000
 NOTIFY_CMD_DONE, NOTIFY_EVENT, NOTIFY_UNUSED = 0x0100_0000, 0x0200_0000, 0x0400_0000
+# Bits 0x10, 0x20 and 0x40 exist for the FLEX-3000 only: their mic-connector pins are not wired on a FLEX-5000 (protocol/07-events.md).
 EVENT_BITS = {0x01: "dot", 0x02: "dash", 0x04: "rca_ptt", 0x08: "mic_ptt",
               0x10: "mic_down", 0x20: "mic_up", 0x40: "mic_fast"}
 

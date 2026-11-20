@@ -35,3 +35,6 @@ __pycache__/
 
 # ctest output
 Testing/
+
+# Claude Code per-user settings and local state (never commit)
+/.claude/

@@ -1,0 +1,597 @@
+#include "TransmitCard.h"
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDateTime>
+#include <QDir>
+#include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileInfo>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QSpinBox>
+#include <QMessageBox>
+#include <QProgressBar>
+#include <QRegularExpression>
+#include <QPushButton>
+#include <QSettings>
+#include <QTextStream>
+#include <QStandardPaths>
+#include <QTimer>
+#include <QElapsedTimer>
+#include <QTimeZone>
+#include <QVBoxLayout>
+#include <chrono>
+#include <cmath>
+#include <fstream>
+#include <sstream>
+#include "PowerMeter.h"
+#include "AudioPanel.h"
+#include <QApplication>
+#include <QKeyEvent>
+#include <QPlainTextEdit>
+#include <QAbstractSpinBox>
+#include "RadioPanel.h"
+#include "ReceiverPanel.h"
+#include "Theme.h"
+#include "fireside/fw_iso.h"
+#include "fireside/logbook.h"
+#include "fireside/session.h"
+#include "fireside/tx_dsp.h"
+#include "fireside/tx_render.h"
+#include "fireside/tx_meter.h"
+
+using namespace fireside;
+namespace {
+bool no_settings() { return qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS"); }
+QString cfg_dir() { return QDir::homePath() + "/.config/fireside"; }
+QString mem_path() { return cfg_dir() + "/atu-memory.txt"; }
+QString drive_path() { return cfg_dir() + "/tx-drive.txt"; }
+// The simulated radio has no FireWire stream: a playback device that takes everything (at about real time).
+struct NullPcm : IPcmOut {                               // ... and tells the simulated PA the level on ch0 (QSE I)
+    double r; std::atomic<double>* level; NullPcm(double rate, std::atomic<double>* l) : r(rate), level(l) {}
+    int channels() const override { return 8; } double rate() const override { return r; } std::string describe() const override { return "simulated playback"; }
+    size_t write(const int32_t* x, size_t n) override {
+        if (level) { double pk = 0; for (size_t f = 0; f < n; ++f) pk = std::max(pk, std::fabs(double(x[f * 8]) / 2147483647.0)); level->store(pk); }
+        std::this_thread::sleep_for(std::chrono::microseconds(int64_t(1e6 * double(n) / r))); return n;
+    }
+};
+QString dice_card() {                                    // "MyProduct" from /proc/asound/cards ("2 [MyProduct ]: DICE - MyProduct")
+    QFile f("/proc/asound/cards"); if (!f.open(QIODevice::ReadOnly)) return {};
+    for (const QString& l : QString::fromUtf8(f.readAll()).split('\n')) if (l.contains("DICE") || l.contains("FLEX-5000")) {
+        const int a = l.indexOf('['), b = l.indexOf(']'); if (a >= 0 && b > a) return l.mid(a + 1, b - a - 1).trimmed(); }
+    return {};
+}
+QString fmt_w(double w) { return QString::number(w, 'f', w < 10 ? 2 : 1) + " W"; }
+}  // namespace
+
+TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated, QWidget* parent) : QFrame(parent), radio_(radio), rx_(rx), simulated_(simulated) {
+    auto* g = new QGridLayout; g->setHorizontalSpacing(10); g->setVerticalSpacing(6);
+    arm_ = new QPushButton("Retry transmit check"); arm_->setCheckable(true); arm_->setVisible(false); auto_arm_ = !simulated_;
+    arm_->setToolTip("Reads the radio's calibration EEPROM (read-only, ~16 s), compares it with your backup byte for byte, then sets the PA bias from it. Nothing transmits.");
+    lamp_ = new QLabel("TX"); lamp_->setAlignment(Qt::AlignCenter); lamp_->setMinimumWidth(44);
+    power_ = new QDoubleSpinBox; power_->setRange(1, 15); power_->setDecimals(0); power_->setValue(3); power_->setSuffix(" W"); power_->setToolTip("ATU tune power. 3 W (about 4 W into a match) tuned as well as 15 W on 2026-11-19.");
+    thr_ = new QComboBox; for (double t : atu::kThresholds) thr_->addItem(QString("SWR %1").arg(t, 0, 'f', 1), t); thr_->setCurrentIndex(2);
+    thr_->setToolTip("The tuner's good-tune threshold (sent right before every tune)");
+    tune_ = new QPushButton("Tune ATU"); tune_->setToolTip("Transmits a carrier (up to 15 s) while the ATU searches. Asks first: listen to the frequency.");
+    measure_ = new QPushButton("Measure drive (2 W)"); measure_->setToolTip("A 2 W tone ramp (about 4 s) that measures this band's drive level. Needed once per band before tuning there.");
+    restore_ = new QPushButton("Restore ATU"); restore_->setToolTip("Puts this band's stored ATU relays back. No RF.");
+    auto_restore_ = new QCheckBox("on band change"); auto_restore_->setChecked(true); auto_restore_->setToolTip("While armed: restore the stored ATU relays whenever the dial moves to another band (no RF)");
+    stop_ = new QPushButton("Stop"); stop_->setToolTip("Unkey now");
+    test_ = new QPushButton("Test tone (8 s)"); test_->setToolTip("A steady tone exactly 1 kHz ABOVE the dial for 8 s at the power beside it, to find on another receiver: there = I/Q sign right; 1 kHz BELOW the dial = the mirror is wrong");
+    test_w_ = new QDoubleSpinBox; test_w_->setRange(1, 15); test_w_->setDecimals(0); test_w_->setValue(2); test_w_->setSuffix(" W"); test_w_->setToolTip("Test tone power (ramped up to it; unkeys above 1.5 x, or at SWR > 3)");
+    mirror_ = new QCheckBox("Mirror TX I/Q"); mirror_->setChecked(true);
+    mirror_->setToolTip("The radio needs the transmit I/Q mirrored, like receive: verified on the air 2026-11-19 (test tone at dial + 1 kHz on a WebSDR). Untick only to re-test.");
+    fwd_ = new QProgressBar; rev_ = new QProgressBar; for (auto* b : {fwd_, rev_}) { b->setRange(0, 300); b->setValue(0); b->setTextVisible(true); b->setMinimumWidth(160); }
+    fwd_->setFormat("fwd 0 W"); rev_->setFormat("ref 0 W"); swr_ = new QLabel("SWR -"); swr_->setMinimumWidth(80);
+    ft_mode_ = new QComboBox; ft_mode_->setObjectName("ftModeBox"); ft_mode_->addItems({"FT8", "FT4"});
+    ft_msg_ = new QLineEdit; ft_msg_->setPlaceholderText("CQ YOURCALL GRID"); ft_msg_->setMinimumWidth(220); ft_msg_->setToolTip("The FT8 / FT4 message (standard forms: CQ CALL GRID, CALL CALL REPORT, RR73, 73 ...)");
+    ft_hz_ = new QSpinBox; ft_hz_->setRange(200, 3000); ft_hz_->setValue(1500); ft_hz_->setSuffix(" Hz"); ft_hz_->setToolTip("Audio frequency above the dial (USB)");
+    ft_par_ = new QComboBox; ft_par_->addItems({"Even (:00 :30)", "Odd (:15 :45)"}); ft_par_->setMinimumContentsLength(20); ft_par_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    ft_w_ = new QDoubleSpinBox; ft_w_->setRange(1, 25); ft_w_->setDecimals(0); ft_w_->setValue(5); ft_w_->setSuffix(" W"); ft_w_->setToolTip("Power. Held by the forward meter during the first 3 s of each over (closed loop)");
+    cq_ = new QPushButton("CQ"); cq_->setToolTip("Call CQ (CQ yourcall yourgrid) in the chosen slot; with Auto sequence the first station answering is worked and logged. Stop ends it.");
+    pm_ = new PowerMeter;
+    send_ = new QPushButton("Send"); send_->setToolTip("Transmit the message in the next slot of the chosen parity (no question: Stop cancels a queued send). Receive pauses only for the over itself.");
+    auto_seq_ = new QCheckBox("Auto sequence + log"); auto_seq_->setChecked(true);
+    auto_seq_->setToolTip("Double-click a decoded CQ or caller to reply. Each answer moves the QSO on (report, R-report, RR73, 73), repeated up to 6 times; the finished QSO is logged to Wavelog. Send with a CQ message calls CQ the same way.");
+    ft_repeat_ = new QCheckBox("Repeat"); ft_repeat_->setToolTip("Send again in every slot of this parity until Stop (calling CQ)");
+    voice_mode_ = new QComboBox; voice_mode_->addItems({"Auto (as the receiver)", "USB", "LSB"}); voice_mode_->setToolTip("Sideband for voice: Auto = the receiver's USB / LSB (its Auto LSB / USB picks it per band), else USB above 10 MHz");
+    voice_w_ = new QDoubleSpinBox; voice_w_->setRange(1, 20); voice_w_->setDecimals(0); voice_w_->setValue(10); voice_w_->setSuffix(" W PEP"); voice_w_->setToolTip("Peak envelope power: speech peaks reach it (the processing drives them into the limiter)");
+    ptt_ = new QPushButton("PTT (hold)"); ptt_->setToolTip("Hold to talk: an SSB over with the Audio tab's input and processing (time-out 3 min)");
+    space_ptt_ = new QCheckBox("Space bar"); space_ptt_->setToolTip("Hold the space bar to talk (not while typing in a box)"); space_ptt_->setChecked(false);
+    mic_ptt_ = new QCheckBox("Mic / RCA PTT"); mic_ptt_->setChecked(true); mic_ptt_->setToolTip("The mic's PTT (front socket) or the rear RCA PTT keys an over");
+    ft_timer_ = new QTimer(this); ft_timer_->setSingleShot(true); connect(ft_timer_, &QTimer::timeout, this, &TransmitCard::startSend);
+    mem_ = new QLabel; mem_->setWordWrap(false); status_ = new QLabel("Transmit gets ready by itself once the radio is started (EEPROM check, about 16 s)."); status_->setWordWrap(true);
+    auto row = [](std::initializer_list<QWidget*> ws, bool stretch = true) { auto* h = new QHBoxLayout; h->setSpacing(8); for (auto* w : ws) h->addWidget(w); if (stretch) h->addStretch(1); return h; };
+    auto* tl = new QLabel("Tune at"); arm_->setMinimumWidth(130);
+    const QString bar = "QProgressBar{background:#151b24;border:1px solid #2a3442;border-radius:4px;color:#d8dee8;text-align:center;min-height:18px}"
+                        "QProgressBar::chunk{background:%1;border-radius:3px}";
+    fwd_->setStyleSheet(bar.arg("#2e7d32")); rev_->setStyleSheet(bar.arg("#c77700")); fwd_->setMinimumWidth(150); rev_->setMinimumWidth(150);
+    mem_->setWordWrap(true); status_->setWordWrap(true); ft_msg_->setMinimumWidth(160);
+    auto* atu_lbl = new QLabel("ATU"); auto* ft_lbl = new QLabel("FT8 / FT4"); auto* meter_lbl = new QLabel("Power");
+    for (auto* l : {atu_lbl, ft_lbl, meter_lbl}) l->setObjectName("muted");
+    auto* v = new QVBoxLayout; v->setSpacing(6); g->addLayout(v, 0, 0);
+    v->addLayout(row({arm_, lamp_, stop_}));
+    v->addWidget(atu_lbl); v->addLayout(row({tl, power_, thr_, tune_})); v->addLayout(row({restore_, auto_restore_})); v->addWidget(mem_);
+    v->addLayout(row({measure_, test_, test_w_, mirror_}));
+    meter_lbl->setVisible(false); fwd_->setVisible(false); rev_->setVisible(false); swr_->setVisible(false);   // the power meter lives at the top now (powerMeter())
+    v->addWidget(ft_lbl); v->addLayout(row({ft_mode_, ft_hz_, ft_par_})); v->addLayout(row({ft_msg_, ft_w_}, false)); v->addLayout(row({send_, cq_, ft_repeat_, auto_seq_}));
+    { auto* vl = new QLabel("Voice"); vl->setObjectName("muted"); v->addWidget(vl); }
+    v->addLayout(row({voice_mode_, voice_w_})); v->addLayout(row({ptt_, space_ptt_, mic_ptt_}));
+    v->addWidget(status_);
+    setMinimumWidth(470); setMaximumWidth(560);
+    auto* outer = new QVBoxLayout(this); outer->setContentsMargins(0, 0, 0, 0); outer->addWidget(theme::makeCard("Transmit", g));
+    timer_ = new QTimer(this); timer_->setInterval(100); connect(timer_, &QTimer::timeout, this, &TransmitCard::tick); timer_->start();
+    connect(arm_, &QPushButton::toggled, this, &TransmitCard::onArm);
+    connect(tune_, &QPushButton::clicked, this, &TransmitCard::onTune); connect(measure_, &QPushButton::clicked, this, &TransmitCard::onMeasure);
+    connect(restore_, &QPushButton::clicked, this, &TransmitCard::onRestore);
+    connect(test_, &QPushButton::clicked, this, &TransmitCard::onTestTone);
+    connect(mirror_, &QCheckBox::toggled, this, [this] { saveState(); });
+    connect(stop_, &QPushButton::clicked, this, [this] { ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } if (seq_) seq_->stop();
+                                                       if (tx_) tx_->abort(); report("Stop pressed: unkeying, nothing queued."); updateButtons(); });
+    connect(send_, &QPushButton::clicked, this, &TransmitCard::onSend);
+    connect(ptt_, &QPushButton::pressed, this, [this] { ptt_btn_ = true; onPttChanged(); });
+    connect(ptt_, &QPushButton::released, this, [this] { ptt_btn_ = false; onPttChanged(); });
+    qApp->installEventFilter(this);
+    ptt_poll_ = new QTimer(this); ptt_poll_->setInterval(50);
+    connect(ptt_poll_, &QTimer::timeout, this, [this] {
+        if (!mic_ptt_->isChecked() || !tx_ || !tx_->armed()) { if (ptt_mic_) { ptt_mic_ = false; onPttChanged(); } return; }
+        const auto bits = radio_->session().read_ptt(); const bool down = bits && (*bits & 0xC);   // bit 3 mic PTT, bit 2 rear RCA PTT
+        if (down != ptt_mic_) { ptt_mic_ = down; onPttChanged(); }
+    });
+    ptt_poll_->start();
+    connect(cq_, &QPushButton::clicked, this, [this] {
+        if (!haveStation()) return;
+        ft_msg_->setText("CQ " + rx_->myCall() + " " + myGrid4()); saveState(); onSend(); });
+    auto parity_labels = [this] { const bool ft4 = ft_mode_->currentIndex() == 1;
+        ft_par_->setItemText(0, ft4 ? "Even (:00 :15 :30 :45)" : "Even (:00 :30)"); ft_par_->setItemText(1, ft4 ? "Odd (:07.5 :22.5 ...)" : "Odd (:15 :45)"); };
+    connect(ft_mode_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, parity_labels] { parity_labels(); saveState(); });
+    connect(rx_, &ReceiverPanel::decoderSelected, this, [this](int i) { if ((i == 4 || i == 5) && ft_mode_->currentIndex() != i - 4) ft_mode_->setCurrentIndex(i - 4); });   // send what is being decoded
+    connect(ft_msg_, &QLineEdit::editingFinished, this, [this] { saveState(); });
+    connect(radio_, &RadioPanel::runningChanged, this, &TransmitCard::onRadioRunning);
+    connect(rx_, &ReceiverPanel::dialChanged, this, &TransmitCard::onDial);
+    if (!no_settings()) { QSettings q("fireside", "transmit"); power_->setValue(q.value("tune_w", 3).toDouble()); thr_->setCurrentIndex(std::clamp(q.value("thr", 2).toInt(), 0, 6)); auto_restore_->setChecked(q.value("auto_restore", true).toBool()); mirror_->setChecked(q.value("mirror_q", true).toBool());
+                           ft_msg_->setText(q.value("ft_msg", ft_msg_->text()).toString()); ft_hz_->setValue(q.value("ft_hz", 1500).toInt()); ft_w_->setValue(q.value("ft_w", 5).toDouble());
+                           ft_mode_->setCurrentIndex(q.value("ft_mode", 0).toInt()); ft_par_->setCurrentIndex(q.value("ft_par", 0).toInt()); auto_seq_->setChecked(q.value("auto_seq", true).toBool()); }
+    connect(auto_seq_, &QCheckBox::toggled, this, [this](bool on) { if (!on && seq_) seq_->stop(); saveState(); });
+    connect(power_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this] { saveState(); }); connect(thr_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { saveState(); });
+    connect(auto_restore_, &QCheckBox::toggled, this, [this] { saveState(); });
+    last_band_ = txm::band_of(rx_->dialHz());
+    updateButtons(); updateMemoryLabel();
+}
+TransmitCard::~TransmitCard() { if (tx_) tx_->abort(); if (worker_.joinable()) worker_.join(); }
+
+void TransmitCard::setSimulatedRadio(sim::RadioModel* m) {
+    sim_radio_ = m; if (!m) return;
+    const QString p = findBackup(); QFile f(p);
+    if (!p.isEmpty() && f.open(QIODevice::ReadOnly)) {            // the simulated radio carries the same EEPROM as the backup, so Arm works in practice mode
+        const QByteArray a = f.readAll(); m->eeprom.assign(a.begin(), a.end());
+        const auto c = txs::from_image(m->eeprom); if (c.valid) { m->meter = c.meter; m->pa_from_level = true; }
+    }
+}
+QString TransmitCard::findBackup() {
+    if (!no_settings()) { QSettings q("fireside", "transmit"); const QString p = q.value("backup").toString(); if (!p.isEmpty() && QFileInfo::exists(p)) return p; }
+    QDir d(backupDir()); const auto l = d.entryInfoList({"F5K_*_trx.bin"}, QDir::Files, QDir::Time);
+    return l.isEmpty() ? QString() : l.first().absoluteFilePath();
+}
+QString TransmitCard::backupDir() {
+    const QString e = qEnvironmentVariable("FIRESIDE_BACKUP_DIR"); if (!e.isEmpty()) return e;
+    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/fireside/backups";
+}
+double TransmitCard::playbackRate() {
+    const QString card = dice_card(); if (card.isEmpty()) return 0;
+    for (int n = 0; n < 16; ++n) {
+        QFile c(QString("/proc/asound/card%1/id").arg(n)); if (!c.open(QIODevice::ReadOnly) || QString::fromUtf8(c.readAll()).trimmed() != card) continue;
+        QFile f(QString("/proc/asound/card%1/firewire/formation").arg(n)); if (!f.open(QIODevice::ReadOnly)) return 0;
+        for (const QString& l : QString::fromUtf8(f.readAll()).split('\n')) if (l.trimmed().startsWith("Rx 0:")) {
+            const auto p = l.trimmed().mid(5).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            if (p.size() >= 3) { if (p[0].toInt() >= 8) return 48000; if (p[1].toInt() >= 8) return 96000; if (p[2].toInt() >= 8) return 192000; }
+        }
+    }
+    return 0;
+}
+txc::PcmFactory TransmitCard::pcmFactory() const {
+    if (simulated_) { std::atomic<double>* lv = sim_radio_ ? &sim_radio_->level : nullptr; return [lv](double rate) { return std::unique_ptr<IPcmOut>(new NullPcm(rate, lv)); }; }
+    const std::string dev = "hw:CARD=" + dice_card().toStdString() + ",DEV=0";
+    return [dev](double rate) -> std::unique_ptr<IPcmOut> {
+        double r = 0; if (fw_iso_duplex_running(&r) && r == rate) return open_fw_iso_out();   // duplex: our own FireWire stream, receive keeps running
+        return open_alsa_play(dev, rate, 8, 1024); };
+}
+
+bool TransmitCard::ask(const QString& title, const QString& text) {
+    if (auto_confirm_ >= 0) return auto_confirm_ == 1;
+    return QMessageBox::question(this, title, text, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+}
+void TransmitCard::report(const QString& m) { status_->setText(m); emit message("Transmit: " + m); }
+
+void TransmitCard::run(const QString& what, bool pauses_receive, std::function<QString(txc::TxControl&)> job) {
+    if (worker_running_ || !tx_) return;
+    if (worker_.joinable()) worker_.join();
+    worker_running_ = true; { std::lock_guard<std::mutex> l(m_); have_last_ = false; }
+    if (pauses_receive) pauseReceive();                                                      // the ALSA playback and our receive stream cannot share the radio
+    report(what + " ..."); updateButtons();
+    auto tx = tx_;
+    worker_ = std::thread([this, tx, job] {
+        QString res; try { res = job(*tx); } catch (const std::exception& e) { res = QString("failed: ") + e.what(); }
+        job_end_utc_ = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();   // the playback is closed by now
+        QMetaObject::invokeMethod(this, [this, res]() mutable {
+            if (worker_.joinable()) worker_.join();
+            worker_running_ = false;
+            const QString rxnote = resumeReceive(); { QSignalBlocker b(arm_); arm_->setChecked(tx_ && tx_->armed()); }   // a refused arm springs back
+            const bool sent_ok = res.endsWith(" #sent");
+            if (sent_ok) takeLog();                                                                  // the over that completed a QSO has gone out: log it
+            const bool resend = (sent_ok && ft_repeat_->isChecked() && !(seq_ && seq_->stage() != fireside::seq::Stage::Idle)) || (seq_ && seq_->active() && !res.startsWith("Not sent"));
+            if (seq_ && !seq_->describe().empty()) res += "  " + QString::fromStdString(seq_->describe()) + ".";
+            if (res.endsWith(" #sent")) res.chop(6);
+            report(res + rxnote); saveState(); updateButtons(); updateMemoryLabel();
+            if (resend) QTimer::singleShot(200, this, [this, g = stop_gen_] { if (g == stop_gen_) queueSend(); });   // Stop in between cancels it             // calling: the next slot of the same parity
+            voice_in_.reset();                                                                  // a voice over's input (a PC capture lives on this thread)
+            if (after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }               // start-up: receiving starts once the check is done
+            if (unkey_failed_) { unkey_failed_ = false; if (auto_confirm_ < 0) QMessageBox::critical(this, "The radio may still be transmitting",
+                "The unkey command did not get through after three tries.\n\nPower the radio off now (front panel), then check the FireWire connection.\n\n" + res); }
+        }, Qt::QueuedConnection);
+    });
+}
+
+double TransmitCard::txRate() { double r = 0; return fw_iso_duplex_running(&r) ? r : playbackRate(); }   // duplex: the stream's rate
+void TransmitCard::pauseReceive() {
+    if (simulated_ || paused_live_) return;
+    if (fw_iso_duplex_running()) { rx_->peekDecode(); return; }                              // duplex: receive keeps running; just read the slot so far
+    paused_rate_ = rx_->liveRate(); paused_live_ = rx_->closeLive();                        // closeLive decodes the slot heard so far first (an answer to us)
+}
+QString TransmitCard::resumeReceive() {
+    QString rxnote;
+    if (paused_live_ && !simulated_) {                                                       // receive back as it was, and say so
+        auto utc = [] { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); };
+        const double t_resume = utc();
+        QElapsedTimer t; t.start(); const bool ok = paused_rate_ ? rx_->loadLiveDirect(paused_rate_) : rx_->openLiveAuto();
+        const double now = utc(), slot = ft_mode_->currentIndex() == 1 ? 7.5 : 15.0;
+        QString phases;
+        if (unkeyed_utc_.load() > 0) {                                                        // where the time went (status + the message log)
+            const double a = job_end_utc_.load() - unkeyed_utc_.load(), b = t_resume - job_end_utc_.load(), c = now - t_resume;
+            phases = QString(" After the over: unkey to playback closed %1 s, to GUI %2 s, stream restart %3 s, total %4 s.").arg(a, 0, 'f', 2).arg(b, 0, 'f', 2).arg(c, 0, 'f', 2).arg(a + b + c, 0, 'f', 2);
+            emit message("Transmit:" + phases);
+            unkeyed_utc_ = 0;
+        }
+        const double into = std::fmod(now, slot), late = into < slot / 2 ? into : into - slot;   // seconds after (+) or before (-) a slot boundary
+        const QString when = QString(" (stream restart %1 s, %2 s %3 the slot boundary%4)").arg(t.elapsed() / 1000.0, 0, 'f', 1).arg(std::fabs(late), 0, 'f', 1).arg(late < 0 ? "before" : "after")
+                             .arg(late > 0.4 ? ": that slot is lost" : "");
+        rxnote = ok ? (paused_rate_ ? QString(" Receive resumed (%1 kHz direct)").arg(paused_rate_ / 1000) + when + "." : QString(" Receive resumed") + when + ".")
+                    : QString(" Receive did NOT resume: press 48 / 96 / 192 in the Source card.");
+        rxnote += phases;
+    }
+    paused_rate_ = 0; paused_live_ = false; return rxnote;
+}
+QString TransmitCard::myGrid4() {
+    QString grid = my_grid_ ? my_grid_() : QString();                                       // the Wavelog station profile's grid
+    if (grid.size() < 4) { const QStringList w = ft_msg_->text().split(' ', Qt::SkipEmptyParts); if (w.size() >= 3 && w[0] == "CQ" && w.last().size() == 4) grid = w.last(); }   // else the grid in our CQ
+    if (grid.size() < 4) return QString();                                                   // unknown: never a made-up locator
+    return grid.left(4).toUpper();
+}
+bool TransmitCard::haveStation() {
+    if (!rx_->myCall().isEmpty() && !myGrid4().isEmpty()) return true;
+    report("Set your station first: your callsign in the Decoder card's My call box (or the Log tab), and your 4-character locator in the Log tab's station "
+           "profile or by typing a CQ here once (CQ YOURCALL GRID). Nothing was sent.");
+    return false;
+}
+fireside::seq::Sequencer& TransmitCard::sequencer() {
+    const QString grid = myGrid4();
+    const QString me = rx_->myCall();                                                       // callers have checked haveStation(): never another station's call
+    if (!seq_ || QString::fromStdString(seq_->describe()).isEmpty()) seq_ = std::make_unique<fireside::seq::Sequencer>(me.toStdString(), grid.left(4).toUpper().toStdString());
+    return *seq_;
+}
+namespace {
+// the slot parity a decoder line was heard in, from its HHMMSS label (S000-style labels of a file: index = number)
+int line_parity(const QString& line, bool ft4) {
+    const QString t = line.left(6);
+    if (t.startsWith('S')) return t.mid(1).toInt() % 2;
+    const int secs = t.left(2).toInt() * 3600 + t.mid(2, 2).toInt() * 60 + t.mid(4, 2).toInt();
+    return ft4 ? int(std::floor((secs + 0.5) / 7.5)) % 2 : (secs / 15) % 2;
+}
+}  // namespace
+QString TransmitCard::qsoText() const { return seq_ ? QString::fromStdString(seq_->describe()) : QString(); }
+QString TransmitCard::messageText() const { return ft_msg_->text(); }
+double TransmitCard::recentTxPowerW() const { return QDateTime::currentSecsSinceEpoch() - last_tx_t_.load() < 600 ? last_tx_w_.load() : 0.0; }
+void TransmitCard::replyTo(const QString& line) {
+    if (!auto_seq_->isChecked()) return;
+    int snr = 0; const std::string text = fireside::logbook::ftx_line_text(line.toStdString(), &snr); const auto h = fireside::seq::parse(text, snr);
+    if (!h.ok) { report("That line has nothing to answer."); return; }
+    if (!haveStation()) return;
+    if (seq_) seq_->stop();
+    auto& sq = sequencer();
+    if (!sq.reply_to(h)) { report("Nothing to answer in: " + QString::fromStdString(text)); return; }
+    { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - line_parity(line, ft_mode_->currentIndex() == 1)); }   // our slots are the other parity
+    { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); }
+    ft_msg_->setText(QString::fromStdString(sq.current())); saveState(); emit qsoPartner(QString::fromStdString(sq.dx()));
+    ft_timer_->stop(); ft_pending_.reset();
+    if (tx_ && tx_->armed() && !worker_running_) queueSend(); else report(QString("Reply ready: %1 (%2). Transmit is not ready yet.").arg(ft_msg_->text(), ft_par_->currentText()));
+}
+void TransmitCard::heardLine(const QString& line) {
+    if (!seq_ || !auto_seq_->isChecked()) return;
+    int snr = 0; const std::string text = fireside::logbook::ftx_line_text(line.toStdString(), &snr); const auto h = fireside::seq::parse(text, snr);   // two statements: argument order is unspecified
+    if (seq_->heard(h)) {
+        emit qsoPartner(QString::fromStdString(seq_->dx()));
+        if (!seq_->current().empty()) ft_msg_->setText(QString::fromStdString(seq_->current()));
+        report(QString::fromStdString(seq_->describe()) + (seq_->current().empty() ? QString() : QString(": next ") + QString::fromStdString(seq_->current())));
+        if (!seq_->active()) { takeLog(); if (!ft_pending_ && !worker_running_) { ft_timer_->stop(); updateButtons(); } }
+    }
+}
+void TransmitCard::takeLog() {
+    if (!seq_) return;
+    if (auto l = seq_->take_log()) emit logQso(QString::fromStdString(l->call), QString::fromStdString(l->grid), QString::fromStdString(l->rst_sent), QString::fromStdString(l->rst_rcvd));
+}
+
+void TransmitCard::offerBackup() {
+    auto& s = radio_->session();
+    if (worker_running_ || (tx_ && tx_->armed()) || !findBackup().isEmpty()) return;
+    if (s.state() != RadioSession::State::Started || !s.allow_write()) return;
+    const QString dir = backupDir();
+    if (!ask("Save this radio's calibration?",
+             "Transmit needs a saved copy of this radio's calibration EEPROM. Each time the app starts it reads the radio's EEPROM again and compares it with this copy "
+             "before setting the PA bias from it, so a corrupted EEPROM can never set the PA's bias.\n\n"
+             "Read it now and save it to\n" + dir + "?\n\n"
+             "It takes about half a minute (the EEPROM is read twice and both reads must match). It is read-only: nothing is written to the radio's EEPROM. Receive carries on.")) {
+        report("No EEPROM backup was saved, so transmit stays off. Press Retry transmit check later to be asked again."); { QSignalBlocker b(arm_); arm_->setChecked(false); } return;
+    }
+    tx_ = s.transmit(pcmFactory());
+    if (!tx_) { report("The radio is not started."); return; }
+    run("Reading the EEPROM twice and saving a backup", false, [this, dir](txc::TxControl& t) {
+        const auto log = [this](const std::string& m) { const QString q = QString::fromStdString(m); QMetaObject::invokeMethod(this, [this, q] { emit message("Transmit: " + q); }, Qt::QueuedConnection); };
+        const auto b = t.backup_eeprom(dir.toStdString(), log);
+        t.arm(b.image, b.image, log); eeprom_verified_ = true;                       // just read twice and identical: that is the reference for this run
+        loadState();
+        return QString("EEPROM read twice (identical) and saved to %1. Transmit ready: PA bias set.").arg(b.paths.empty() ? dir : QString::fromStdString(b.paths.front()));
+    });
+}
+void TransmitCard::onArm(bool on) {
+    if (!on) { if (tx_) tx_->disarm(); report("Transmit disarmed."); updateButtons(); return; }
+    auto& s = radio_->session();
+    if (s.state() != RadioSession::State::Started || !s.allow_write()) { QSignalBlocker b(arm_); arm_->setChecked(false); report("Start the radio with Allow writes first."); return; }
+    const QString bpath = findBackup();
+    if (bpath.isEmpty()) {
+        { QSignalBlocker b(arm_); arm_->setChecked(false); }
+        report("No EEPROM backup yet (looked in " + backupDir() + "), so transmit is off. Receive works as normal.");
+        if (auto_confirm_ < 0 || backup_offer_tests_) QTimer::singleShot(400, this, [this] { offerBackup(); });   // asked after receive has started, not before
+        return;
+    }
+    QFile f(bpath); std::vector<uint8_t> backup; if (f.open(QIODevice::ReadOnly)) { const QByteArray a = f.readAll(); backup.assign(a.begin(), a.end()); }
+    tx_ = s.transmit(pcmFactory());
+    if (!tx_) { QSignalBlocker b(arm_); arm_->setChecked(false); report("The radio is not started."); return; }
+    run("Arming (reading the EEPROM)", false, [this, backup](txc::TxControl& t) {
+        // once per app run: the EEPROM is read and compared at start-up only (later arms rely on that check)
+        if (eeprom_verified_) t.arm(backup, backup);
+        else { t.arm_from_radio(backup, [this](const std::string& m) { const QString s = QString::fromStdString(m); QMetaObject::invokeMethod(this, [this, s] { emit message("Transmit: " + s); }, Qt::QueuedConnection); }); eeprom_verified_ = true; }
+        loadState();
+        return QString("Transmit ready: the EEPROM matches the backup, PA bias set.");
+    });
+}
+
+void TransmitCard::onTune() {
+    if (!tx_ || !tx_->armed()) return;
+    const double mhz = rx_->dialHz() / 1e6, w = power_->value(), thr = thr_->currentData().toDouble(); const int band = txm::band_of(mhz * 1e6);
+    if (band < 0) { report("The dial is outside the amateur bands."); return; }
+    if (!ask("Tune the ATU?", QString("Transmit a tune carrier on %1 MHz at about %2 W for up to 15 s while the ATU searches?\n\nListen first: is the frequency clear?").arg(mhz, 0, 'f', 4).arg(w))) return;
+    txc::Options o; o.rate = simulated_ ? 48000 : txRate(); o.mirror_q = mirror_->isChecked(); o.tx_ant = txAnt();
+    if (!(o.rate > 0)) { report("The radio's ALSA playback offers no 8-channel rate (see /proc/asound/cardN/firewire/formation)."); return; }
+    run(QString("Tuning on %1 MHz at %2 W").arg(mhz, 0, 'f', 4).arg(w), true, [this, mhz, w, thr, o](txc::TxControl& t) {
+        auto r = t.tune(mhz, w, thr, o, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });
+        if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
+        if (!r.outcome) return QString("Tune refused: ") + QString::fromStdString(r.why_not);
+        const auto& s = r.outcome->status;
+        QString res = r.outcome->result == atu::Atu::TuneResult::Pass ? "PASS" : r.outcome->result == atu::Atu::TuneResult::Fail ? QString("FAIL (%1)").arg(atu::fail_text(r.outcome->fail_reason)) : "stopped";
+        if (r.outcome->result != atu::Atu::TuneResult::Pass)   // the tuner's own report belongs to a pass only (its last status may be from an earlier tune)
+            return QString("Tune %1 after %2 s (%3). Max %4.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop)).arg(fmt_w(r.max_fwd_w));
+        res = QString("Tune %1 after %2 s (%3). Tuner: ind %4 cap %5 %6, %7, SWR %8. Max %9.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop))
+              .arg(s.ind ? *s.ind : -1).arg(s.cap ? *s.cap : -1).arg(s.hiz && *s.hiz ? "Hi-Z" : "Lo-Z").arg(s.fwd_w ? fmt_w(*s.fwd_w) : "?").arg(s.swr ? QString::number(*s.swr, 'f', 2) : "?").arg(fmt_w(r.max_fwd_w));
+        if (r.saved) res += " Saved for this band.";
+        if (r.estimated_drive) res += " (Drive from the EEPROM table: press Measure drive now for this band.)";
+        return res;
+    });
+}
+
+void TransmitCard::onMeasure() {
+    if (!tx_ || !tx_->armed()) return;
+    const double mhz = rx_->dialHz() / 1e6;
+    if (txm::band_of(mhz * 1e6) < 0) { report("The dial is outside the amateur bands."); return; }
+    if (!ask("Measure the drive?", QString("Transmit a 2 W tone ramp on %1 MHz (about 4 s) to measure this band's drive level?\n\nThe ATU should hold a good match for this band "
+             "(Restore ATU, or tune at low power first). Listen first: is the frequency clear?").arg(mhz, 0, 'f', 4))) return;
+    txc::Options o; o.rate = simulated_ ? 48000 : txRate(); o.mirror_q = mirror_->isChecked(); o.tx_ant = txAnt();
+    if (!(o.rate > 0)) { report("The radio's ALSA playback offers no 8-channel rate."); return; }
+    run(QString("Measuring the drive on %1 MHz").arg(mhz, 0, 'f', 4), true, [this, mhz, o](txc::TxControl& t) {
+        auto r = t.ramp(mhz, 2.0, o, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });
+        if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
+        if (!r.reached) return QString("Measure stopped: %1 (max %2)").arg(QString::fromStdString(r.stop)).arg(fmt_w(r.max_fwd_w));
+        return QString("Drive measured: %1 W per drive² (1 W at %2 dBFS). Tune is available on this band.").arg(r.k, 0, 'f', 0).arg(20 * std::log10(std::sqrt(1 / r.k)), 0, 'f', 1);
+    });
+}
+
+void TransmitCard::onTestTone() {
+    if (!tx_ || !tx_->armed()) return;
+    const double mhz = rx_->dialHz() / 1e6;
+    if (txm::band_of(mhz * 1e6) < 0) { report("The dial is outside the amateur bands."); return; }
+    txc::Options o; o.rate = simulated_ ? 48000 : txRate(); o.mirror_q = mirror_->isChecked(); o.tx_ant = txAnt(); o.tone_hz = 1000;
+    if (!(o.rate > 0)) { report("The radio's ALSA playback offers no 8-channel rate."); return; }
+    const double w = test_w_->value();
+    run(QString("Test tone at %1 MHz, %2 W").arg(mhz + 0.001, 0, 'f', 4).arg(w, 0, 'f', 0), true, [this, mhz, o, w](txc::TxControl& t) {
+        auto r = t.ramp(mhz, w, o, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; }, {}, 8.0);
+        if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
+        QString cmp;                                                          // our detector beside the tuner's own meter (the SWR question, 2026-11-19)
+        { double f = 0, rv = 0, sw = 0, af = 0, ar = 0, as = 0; int n = 0, na = 0; QStringList rows;
+          for (const auto& c : r.compare) { f += c.fwd_w; rv += c.rev_w; sw += c.swr; ++n;
+              if (c.atu_fwd_w && c.atu_rev_w && c.atu_swr) { af += *c.atu_fwd_w; ar += *c.atu_rev_w; as += *c.atu_swr; ++na; }
+              rows << QString("  %1 s: ours adc %2 / %3 = %4 W / %5 W SWR %6 | tuner %7").arg(c.t, 0, 'f', 1).arg(c.adc_fwd).arg(c.adc_rev).arg(c.fwd_w, 0, 'f', 2).arg(c.rev_w, 0, 'f', 2).arg(c.swr, 0, 'f', 2)
+                          .arg(c.atu_fwd_w && c.atu_rev_w && c.atu_swr ? QString("%1 W / %2 W SWR %3").arg(*c.atu_fwd_w, 0, 'f', 2).arg(*c.atu_rev_w, 0, 'f', 2).arg(*c.atu_swr, 0, 'f', 2) : QString("no report")); }
+          if (n) cmp = QString(" Meter: ours %1 W fwd / %2 W ref, SWR %3; tuner %4.\n%5").arg(f / n, 0, 'f', 2).arg(rv / n, 0, 'f', 2).arg(sw / n, 0, 'f', 2)
+                         .arg(na ? QString("%1 W / %2 W, SWR %3").arg(af / na, 0, 'f', 2).arg(ar / na, 0, 'f', 2).arg(as / na, 0, 'f', 2) : QString("gave no report")).arg(rows.join("\n")); }
+        return r.reached ? QString("Test tone done (%1 for 8 s, meant to be at %2 MHz%3).%4").arg(fmt_w(r.max_fwd_w)).arg(mhz + 0.001, 0, 'f', 4).arg(o.mirror_q ? ", Q mirrored" : "").arg(cmp)
+                         : QString("Test tone stopped: %1.%2").arg(QString::fromStdString(r.stop)).arg(cmp);
+    });
+}
+
+void TransmitCard::onSend() {
+    if (seq_) seq_->stop();
+    if (auto_seq_->isChecked() && ft_msg_->text().trimmed().toUpper().startsWith("CQ ")) { if (!haveStation()) return; sequencer().call_cq(); ft_msg_->setText(QString::fromStdString(seq_->current())); }   // CQ: answers are worked automatically
+    queueSend();
+}
+void TransmitCard::queueSend() {
+    if (!tx_ || !tx_->armed() || worker_running_) return;
+    const double mhz = rx_->dialHz() / 1e6; const bool ft4 = ft_mode_->currentIndex() == 1; const QString text = ft_msg_->text().trimmed().toUpper();
+    if (txm::band_of(mhz * 1e6) < 0) { report("The dial is outside the amateur bands."); return; }
+    const double rate = simulated_ ? 48000 : txRate();
+    if (!(rate > 0)) { report("The radio's ALSA playback offers no 8-channel rate."); return; }
+    if (text.isEmpty() || !tx::ft_message_ok(text.toStdString())) { report(QString("Cannot send \"%1\": not a message FT8/FT4 can carry").arg(text)); return; }   // cheap check now; the audio is rendered by the transmit worker, never on the window's thread (it froze the waterfall)
+    auto prep = std::make_shared<txc::TxControl::FtPrepared>(); prep->text = text.toStdString(); prep->audio_hz = ft_hz_->value(); prep->ft4 = ft4; prep->rate = rate;
+    const tx::DigiMode mode = ft4 ? tx::DigiMode::FT4 : tx::DigiMode::FT8; const tx::Parity par = ft_par_->currentIndex() ? tx::Parity::Odd : tx::Parity::Even;
+    const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    tx::TxPlan plan; try { plan = tx::plan_tx(now, mode, par, tx::default_start_offset_s(mode), 2.0, 1.0); } catch (const std::exception& e) { report(e.what()); return; }
+    const QString when = QDateTime::fromMSecsSinceEpoch(qint64(plan.slot.start_utc * 1000), Qt::UTC).toString("HH:mm:ss");
+    ft_pending_ = prep;
+    const double start_in = plan.skip_s > 0 ? 0.0 : std::max(0.0, plan.slot.start_utc - 0.8 - now);   // receive pauses ~0.8 s before the slot
+    ft_timer_->start(int(start_in * 1000)); report(QString("%1 \"%2\" queued for %3 UTC, %4 slot, %5 Hz, %6 W%7 (Stop cancels).").arg(ft4 ? "FT4" : "FT8", text, when).arg(par == tx::Parity::Even ? "even" : "odd")
+           .arg(ft_hz_->value()).arg(ft_w_->value()).arg(ft_repeat_->isChecked() ? ", repeating" : "")); updateButtons();
+}
+void TransmitCard::startSend() {
+    if (!ft_pending_ || !tx_ || !tx_->armed() || worker_running_) { ft_pending_.reset(); updateButtons(); return; }
+    auto prep = ft_pending_; ft_pending_.reset();
+    if (seq_ && seq_->stage() != fireside::seq::Stage::Idle) {                                  // sequencing: the answer from the slot just heard decides what we send
+        pauseReceive();                                                                      // (decodes that slot; heardLine moves the QSO on)
+        const std::string next = seq_->next_message();
+        if (next.empty()) { takeLog(); report(QString::fromStdString(seq_->describe()) + "." + resumeReceive()); updateButtons(); return; }
+        if (next != prep->text) { auto p2 = std::make_shared<txc::TxControl::FtPrepared>(*prep); p2->text = next; p2->buf.clear(); prep = p2; }   // rendered by the worker below
+        ft_msg_->setText(QString::fromStdString(next));
+    }
+    const double mhz = rx_->dialHz() / 1e6, w = ft_w_->value(); const tx::Parity par = ft_par_->currentIndex() ? tx::Parity::Odd : tx::Parity::Even;
+    txc::Options o; o.rate = prep->rate; o.mirror_q = mirror_->isChecked(); o.tx_ant = txAnt();
+    {   // the QSO pane: what we send, labelled with the slot it goes out in
+        const double slot = prep->ft4 ? 7.5 : 15.0, now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        const double start = std::floor((now + 2.0) / slot) * slot;                         // the slot about to start (or just started: joining late)
+        emit txSent(QDateTime::fromMSecsSinceEpoch(qint64(start * 1000), QTimeZone::UTC).toString("HHmmss"), int(std::lround(prep->audio_hz)), QString::fromStdString(prep->text));
+    }
+    run(QString("Sending %1 \"%2\"").arg(prep->ft4 ? "FT4" : "FT8", QString::fromStdString(prep->text)), true, [this, prep, mhz, w, par, o](txc::TxControl& t) {
+        if (prep->buf.empty()) { const auto f = txc::TxControl::prepare_ft(prep->text, prep->audio_hz, prep->ft4, prep->rate); prep->buf = f.buf; }   // here, on the worker thread (throws -> "failed: ...")
+        auto r = t.send_prepared(mhz, *prep, par, w, o, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; }, {}, 0.3);
+        if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
+        if (!r.sent && !r.why_not.empty()) return QString("Not sent: ") + QString::fromStdString(r.why_not);
+        const QString when = QDateTime::fromMSecsSinceEpoch(qint64(r.slot_utc * 1000), Qt::UTC).toString("HH:mm:ss");
+        QString res = QString("%1 %2 at %3 UTC: %4, %5 W (set %6 W)%7.").arg(prep->ft4 ? "FT4" : "FT8", r.sent ? "sent" : "stopped", when, QString::fromStdString(r.stop))
+                      .arg(r.mean_fwd_w, 0, 'f', 1).arg(w, 0, 'f', 0).arg(r.late_s > 0 ? ", joined late" : "");
+        unkeyed_utc_ = r.unkeyed_utc;
+        if (r.sent && r.mean_fwd_w > 0.1) { last_tx_w_ = r.mean_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }   // for the log's TX_PWR
+        if (r.sent) res += " #sent";
+        return res;
+    });
+}
+
+void TransmitCard::onRestore() {
+    if (!tx_ || !tx_->armed()) return;
+    const int band = txm::band_of(rx_->dialHz());
+    run("Restoring the ATU (no RF)", false, [band](txc::TxControl& t) {
+        std::string msg; const bool ok = t.restore_relays(band, [&](const std::string& m) { msg = m; });
+        return QString::fromStdString(msg.empty() ? (ok ? "ATU restored" : "ATU not restored") : msg);
+    });
+}
+
+void TransmitCard::onRadioRunning(bool on) {
+    if (!on) { tx_.reset(); QSignalBlocker b(arm_); arm_->setChecked(false); arm_tried_ = false; report("Radio stopped: transmit disarmed."); }
+    else if (auto_arm_) QTimer::singleShot(300, this, [this] { autoArm(); });               // the EEPROM check runs as soon as the radio is up
+    updateButtons();
+}
+void TransmitCard::armThen(std::function<void()> done) {
+    if (!auto_arm_ || (tx_ && tx_->armed())) { if (done) done(); return; }
+    after_arm_ = std::move(done); autoArm();
+    if (!worker_running_ && after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }   // the check could not start (no backup ...): receive anyway
+}
+bool TransmitCard::eventFilter(QObject* o, QEvent* e) {
+    if ((e->type() == QEvent::KeyPress || e->type() == QEvent::KeyRelease) && space_ptt_ && space_ptt_->isChecked()) {
+        auto* k = static_cast<QKeyEvent*>(e);
+        QWidget* f = QApplication::focusWidget();
+        const bool typing = f && (qobject_cast<QLineEdit*>(f) || qobject_cast<QAbstractSpinBox*>(f) || qobject_cast<QPlainTextEdit*>(f));
+        if (k->key() == Qt::Key_Space && !k->isAutoRepeat() && !typing && window()->isActiveWindow()) {
+            const bool down = e->type() == QEvent::KeyPress; if (down != ptt_key_) { ptt_key_ = down; onPttChanged(); }
+            return true;
+        }
+    }
+    return QFrame::eventFilter(o, e);
+}
+void TransmitCard::onPttChanged() {
+    ptt_->setDown(ptt_btn_ || ptt_key_ || ptt_mic_);
+    if (pttActive() && !worker_running_ && tx_ && tx_->armed() && !ft_pending_) startVoice();   // released: the over's loop sees it and unkeys
+}
+void TransmitCard::startVoice() {
+    if (!audio_) { report("No Audio tab."); return; }
+    const double mhz = rx_->dialHz() / 1e6; if (txm::band_of(mhz * 1e6) < 0) { report("The dial is outside the amateur bands."); return; }
+    QString err; voice_in_ = audio_->openInput(&err);
+    if (!voice_in_) { report("Voice: cannot open the input (" + err + ")"); return; }
+    txc::VoiceOptions v; v.o.rate = simulated_ ? 48000 : txRate(); v.o.mirror_q = mirror_->isChecked(); v.o.tx_ant = txAnt(); v.peak_w = voice_w_->value(); v.chain = audio_->chainConfig();
+    v.lsb = voice_mode_->currentIndex() == 2 || (voice_mode_->currentIndex() == 0 && (rx_->modeIndex() == 1 || (rx_->modeIndex() != 0 && mhz < 10.0 && !(mhz > 5.2 && mhz < 5.5))));   // Auto: as the receiver
+    if (!(v.o.rate > 0)) { report("No playback rate for transmit."); voice_in_.reset(); return; }
+    auto* in = voice_in_.get();
+    run(QString("Voice %1 on %2 MHz, %3 W PEP (%4)").arg(v.lsb ? "LSB" : "USB").arg(mhz, 0, 'f', 4).arg(v.peak_w, 0, 'f', 0).arg(audio_->inputName()), !fw_iso_duplex_running(),
+        [this, mhz, v, in](txc::TxControl& t) {
+            auto r = t.voice(mhz, *in, [this] { return pttActive(); }, v, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });
+            if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
+            if (!r.keyed) return QString("Voice not keyed: ") + QString::fromStdString(r.why_not.empty() ? r.stop : r.why_not);
+            if (r.max_fwd_w > 0.1) { last_tx_w_ = r.max_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }
+            return QString("Voice over: %1, %2 s, peak %3 W (set %4 W PEP)%5").arg(QString::fromStdString(r.stop)).arg(r.seconds, 0, 'f', 1).arg(r.max_fwd_w, 0, 'f', 1).arg(v.peak_w, 0, 'f', 0)
+                   .arg(r.underruns > 4800 ? QString(", audio gaps %1").arg(r.underruns) : QString());
+        });
+}
+int TransmitCard::txAnt() const { const int a = tx_ant_ ? tx_ant_(rx_->dialHz()) : 1; return a >= 1 && a <= 3 ? a : 1; }
+void TransmitCard::autoArm() {
+    if (worker_running_ || (tx_ && tx_->armed())) return;
+    arm_tried_ = true; { QSignalBlocker b(arm_); arm_->setChecked(true); } onArm(true);
+}
+void TransmitCard::onDial(double hz) {
+    const int band = txm::band_of(hz); if (band == last_band_) return;
+    last_band_ = band; updateMemoryLabel(); updateButtons();
+    if (band >= 0 && auto_restore_->isChecked() && tx_ && tx_->armed() && !worker_running_ && tx_->memory().recall(band)) onRestore();
+}
+
+bool TransmitCard::keyedNow() const { return tx_ && tx_->keyed(); }
+void TransmitCard::tick() {
+    const bool keyed = tx_ && tx_->keyed();
+    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running());           // duplex: receive follows the DDS onto the dial for the over
+    lamp_->setStyleSheet(keyed ? "background:#c62828;color:white;font-weight:bold;border-radius:4px;padding:2px" : "background:#3a3a3a;color:#888;border-radius:4px;padding:2px");
+    txc::Progress p; bool have; { std::lock_guard<std::mutex> l(m_); p = last_; have = have_last_; }
+    if (have) pm_->setReading(p.rd.fwd_w, p.rd.rev_w, p.rd.swr ? *p.rd.swr : 0.0, keyed); else pm_->setReading(0, 0, 0, false);
+    stop_->setEnabled(worker_running_ || ft_pending_ != nullptr);
+}
+
+void TransmitCard::updateButtons() {
+    auto& s = radio_->session(); const bool started = s.state() == RadioSession::State::Started && s.allow_write();
+    const bool armed = tx_ && tx_->armed(), idle = !worker_running_; const int band = txm::band_of(rx_->dialHz());
+    arm_->setEnabled(started && idle); arm_->setVisible(started && idle && arm_tried_ && !(tx_ && tx_->armed()));   // only to retry a failed check
+    const bool on_atu = txAnt() == 1;
+    tune_->setEnabled(armed && idle && band >= 0 && on_atu);
+    tune_->setToolTip(band >= 0 && armed && !(tx_->k_for(band) > 0) ? "No measured drive on this band yet: the EEPROM table is used (it errs low; raise the power if the tuner says no RF). Press Measure drive after a good tune."
+                                                                    : "Transmits a carrier (up to 15 s) while the ATU searches. Asks first: listen to the frequency.");
+    measure_->setEnabled(armed && idle && band >= 0); test_->setEnabled(armed && idle && band >= 0); test_w_->setEnabled(idle); mirror_->setEnabled(idle);
+    send_->setEnabled(armed && idle && band >= 0 && !ft_pending_); cq_->setEnabled(send_->isEnabled()); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_);
+    restore_->setEnabled(armed && idle && band >= 0 && on_atu && tx_->memory().recall(band).has_value());
+    if (!on_atu) { tune_->setToolTip(QString("This band transmits on ANT%1: the ATU is on ANT1 only (Antennas tab)").arg(txAnt())); }
+    power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr);
+}
+void TransmitCard::updateMemoryLabel() {
+    const int band = txm::band_of(rx_->dialHz());
+    if (band < 0) { mem_->setText("ATU memory: (outside the amateur bands)"); return; }
+    std::optional<atu::Setting> st;
+    if (tx_) st = tx_->memory().recall(band);
+    else if (!no_settings()) { std::ifstream in(mem_path().toStdString()); std::stringstream ss; ss << in.rdbuf(); st = atu::Memory::from_text(ss.str()).recall(band); }
+    mem_->setText(st ? QString("ATU %1: ind %2 cap %3 %4, SWR %5 (%6)").arg(txm::band_name(band)).arg(st->ind).arg(st->cap).arg(st->hiz ? "Hi-Z" : "Lo-Z").arg(st->swr, 0, 'f', 2).arg(QString::fromStdString(st->utc))
+                     : QString("ATU %1: nothing stored").arg(txm::band_name(band)));
+}
+void TransmitCard::loadState() {                         // worker thread, right after arming: the per-band ATU memory and drive calibrations
+    if (no_settings() || !tx_) return;
+    { std::ifstream in(mem_path().toStdString()); std::stringstream ss; ss << in.rdbuf(); tx_->memory() = atu::Memory::from_text(ss.str()); }
+    std::ifstream in(drive_path().toStdString()); std::stringstream ss; ss << in.rdbuf(); tx_->set_all_k(txc::parse_drive_text(ss.str()));
+}
+void TransmitCard::saveState() {
+    if (no_settings()) return;
+    QSettings q("fireside", "transmit"); q.setValue("tune_w", power_->value()); q.setValue("thr", thr_->currentIndex()); q.setValue("auto_restore", auto_restore_->isChecked()); q.setValue("mirror_q", mirror_->isChecked());
+    q.setValue("auto_seq", auto_seq_->isChecked()); q.setValue("ft_msg", ft_msg_->text()); q.setValue("ft_hz", ft_hz_->value()); q.setValue("ft_w", ft_w_->value()); q.setValue("ft_mode", ft_mode_->currentIndex()); q.setValue("ft_par", ft_par_->currentIndex());
+    if (!tx_ || worker_running_) return;
+    QDir().mkpath(cfg_dir());
+    std::ofstream(mem_path().toStdString()) << tx_->memory().to_text();
+    std::ofstream(drive_path().toStdString()) << txc::drive_text(tx_->all_k());
+}

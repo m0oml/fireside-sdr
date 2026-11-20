@@ -1,0 +1,377 @@
+#include "fireside/tx_control.h"
+#include "fireside/dsp.h"
+#include <atomic>
+#include <thread>
+#include "fireside/decode.h"
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <sstream>
+#include <stdexcept>
+#include "fireside/tuning.h"
+#include "fireside/tx_out.h"
+#include "fireside/tx_render.h"
+
+namespace fireside::txc {
+namespace { void say(const LogFn& l, const std::string& s) { if (l) l(s); } }
+
+TxControl::TxControl(Flex& fx, PcmFactory pcm, atu::Clock clock) : fx_(fx), pcm_(std::move(pcm)), clk_(clock), atu_(fx, clock) {
+    utc_ = [] { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); };
+}
+TxControl::~TxControl() { disarm(); }
+
+void TxControl::arm(const std::vector<uint8_t>& now, const std::vector<uint8_t>& backup, const LogFn& log) {
+    std::lock_guard<std::mutex> l(op_);
+    armed_ = false;
+    if (retired_) throw std::runtime_error("the radio session has ended: start the radio again");
+    if (backup.empty()) throw std::runtime_error("no EEPROM backup to compare with");
+    if (now != backup) {
+        size_t n = 0, first = 0; const size_t m = std::min(now.size(), backup.size()); for (size_t i = 0; i < m; ++i) if (now[i] != backup[i]) { if (!n) first = i; ++n; }
+        char b[200]; std::snprintf(b, sizeof b, "the radio's EEPROM differs from the saved backup (%zu byte%s differ%s, first at 0x%zX; sizes %zu / %zu): transmit refused, because the PA bias comes from it. "
+            "Dump it (firesidectl eeprom-dump) and compare; if the change is expected, remove the old backup and the app will offer to save a new one", n, n == 1 ? "" : "s", n == 1 ? "s" : "", first, now.size(), backup.size());
+        throw std::runtime_error(b);
+    }
+    auto c = txs::from_image(now); if (!c.valid) throw std::runtime_error("transmit calibration: " + c.problem);
+    txs::write_bias(fx_, c, log);
+    cal_ = std::move(c); armed_ = true;
+    say(log, "transmit armed: EEPROM identical to the backup, PA bias set from it");
+}
+void TxControl::arm_from_radio(const std::vector<uint8_t>& backup, const LogFn& log) {
+    if (retired_) throw std::runtime_error("the radio session has ended: start the radio again");
+    say(log, "reading the EEPROM (read-only) to compare with the backup ...");
+    std::vector<uint8_t> now; { std::lock_guard<std::mutex> l(op_); now = read_image(fx_, "TRX", backup.empty() ? kTrxLen : backup.size()); }
+    arm(now, backup, log);
+}
+TxControl::BackupSaved TxControl::backup_eeprom(const std::string& dir, const LogFn& log) {
+    if (retired_) throw std::runtime_error("the radio session has ended: start the radio again");
+    say(log, "reading the EEPROM twice (read-only) to save a reference backup ...");
+    BackupSaved r;
+    { std::lock_guard<std::mutex> l(op_); r.image = read_verified(fx_, "TRX", kTrxLen, 2); }                 // throws unless both reads are identical
+    const auto c = txs::from_image(r.image);
+    if (!c.valid) throw std::runtime_error("this EEPROM is not a usable transmit calibration (" + c.problem + "): nothing was saved");
+    r.paths = save_backup(dir, {{"TRX", r.image}});
+    say(log, "EEPROM backup saved: " + (r.paths.empty() ? std::string("(no file)") : r.paths.front()));
+    return r;
+}
+void TxControl::disarm() { abort_ = true; std::lock_guard<std::mutex> l(op_); armed_ = false; }   // waits for a running operation (it sees abort_ and unkeys)
+void TxControl::retire() { retired_ = true; disarm(); }
+
+double TxControl::k_for(int band) const { auto it = k_.find(band); return it != k_.end() ? it->second : 0.0; }
+std::map<int, double> parse_drive_text(const std::string& text) {
+    std::map<int, double> m; std::istringstream in(text); std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ls(line); std::string kv; int band = -1; double k = 0;
+        while (ls >> kv) { const auto eq = kv.find('='); if (eq == std::string::npos) continue;
+            const std::string key = kv.substr(0, eq), v = kv.substr(eq + 1);
+            try { if (key == "band") band = txm::band_from_name(v); else if (key == "k") k = std::stod(v); } catch (...) {} }
+        if (band >= 0 && k > 1000 && k < 1e7) m[band] = k;
+    }
+    return m;
+}
+std::string drive_text(const std::map<int, double>& k) {
+    std::ostringstream o; for (auto& [b, v] : k) o << "band=" << txm::band_name(b) << " k=" << long(std::lround(v)) << "\n"; return o.str();
+}
+void TxControl::set_k(int band, double k) { if (band >= 0 && band < txm::kBands && k > 1000) k_[band] = k; }
+
+void TxControl::prepare(double mhz, uint32_t mode, int ant) {
+    if (ant < 1 || ant > 3) throw std::invalid_argument("transmit antenna must be ANT1..ANT3");
+    fx_.set("RDAL_OP_SET_TX_ANT", uint32_t(ant), 0);
+    fx_.set("RDAL_OP_SET_TX_DSP_MODE", mode, 0);
+    fx_.set("RDAL_OP_SET_TX_FREQ_TW", double(freq_to_tw(mhz)), mhz);
+    fx_.set("RDAL_OP_SET_TX_DSP_FILTER", 200, 3100);              // as PowerSDR (capture of 2026-11-18)
+    fx_.set("RDAL_OP_SET_TX_OFFSET", 0, 0);
+    txs::write_carrier_null(fx_, cal_, mhz); fx_.sync();
+}
+
+double TxControl::drive_cap(int band) const {
+    // The drive ceiling for any over on this band: 30 W by the band's MEASURED drive level when there is one (the EEPROM power table reads
+    // ~5-10 dB low on this radio: its "100 W" drive gave only ~11-13 W), else the table's 100 W drive (errs low). Never above kAbsoluteMaxDrive
+    // (~20 W at this radio's measured levels), which ToneSource enforces again whatever is asked.
+    const double k = k_for(band);
+    const double d = k > 1000 ? std::sqrt(30.0 / k) : txs::drive_for_watts(cal_, band, 100.0);
+    return std::min(d, txs::kAbsoluteMaxDrive);
+}
+RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const ProgressFn& p, const LogFn& log, double hold_s) {
+    std::lock_guard<std::mutex> l(op_); RampResult r; Busy b(*this);
+    if (!armed_) { r.stop = "transmit is not armed"; return r; }
+    const int band = txm::band_of(mhz * 1e6);
+    if (band < 0) { r.stop = "outside the amateur bands"; return r; }
+    if (!(target_w > 0) || target_w > 15) { r.stop = "ramp target must be 0..15 W"; return r; }   // 15 W (user 2026-11-19: test tones)
+    if (!(hold_s > 0) || hold_s > 10) { r.stop = "hold must be 0..10 s"; return r; }
+    const double d1w = txs::drive_for_watts(cal_, band, 1.0), dcap = drive_cap(band);
+    if (o.tx_ant < 1 || o.tx_ant > 3) { r.stop = "transmit antenna must be ANT1..ANT3"; return r; }
+    prepare(mhz, 1, o.tx_ant);
+    txo::ToneSource src(o.rate, 8); src.set_cap(dcap); src.set_target(0); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
+    src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]);
+    txo::Stream st(pcm_(o.rate), src); clk_.sleep(0.3);
+    if (st.failed()) { r.stop = "the I/Q stream failed to start"; return r; }
+    GateConfig gc; gc.max_key_s = (target_w > 5 ? 10.0 : 6.0) + hold_s; gc.max_fwd_w = std::min(22.5, std::max(1.0, 2 * target_w)); gc.max_swr = 3.0; gc.swr_min_fwd_w = 0.5;
+    KeyHook kh(key_hook_);
+    TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
+    if (!gate.key("drive ramp", gc.max_key_s, &why)) { r.stop = why; return r; }
+    keyed_ = true; src.set_keyed(true);
+    const double step = std::pow(10.0, 0.1), t0 = clk_.now(); double drive = d1w / 10, hold = -1, next = 0.2, last_step = 0, last_trim = 0, kmax = 0, cmp_t = -1;
+    MeterCompare cmp_; bool cmp_pending = false;
+    auto now = [&] { return clk_.now() - t0; };
+    src.set_target(drive);
+    while (gate.keyed()) {
+        if (abort_) { gate.unkey("aborted"); break; }
+        if (st.failed()) { gate.unkey("the I/Q stream failed"); break; }
+        txm::Reading rd; int af = 0, ar = 0;
+        try { af = int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcFwd)); ar = int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcRev)); rd = txm::read(cal_.meter, band, af, ar); }
+        catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
+        r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (p) p({now(), src.level(), rd});
+        if (hold >= 0) {                                                               // meter comparison (no RF of its own: report requests only)
+            if (now() - cmp_t >= 0.5) {
+                if (cmp_pending) { MeterCompare c = cmp_; const auto& a = atu_.status(); c.atu_fwd_w = a.fwd_w; c.atu_rev_w = a.rev_w; c.atu_swr = a.swr; r.compare.push_back(c); }
+                cmp_ = MeterCompare{now(), af, ar, rd.fwd_w, rd.rev_w, rd.swr.value_or(0)}; cmp_t = now(); cmp_pending = true;
+                try { atu_.drain(); atu_.clear_meter(); atu_.send(atu::FWD_PWR); atu_.send(atu::REV_PWR); atu_.send(atu::SWR); } catch (const std::exception&) { cmp_pending = false; }
+            } else { try { atu_.poll(5); } catch (const std::exception&) {} }
+        }
+        gate.report(rd); gate.tick(); if (!gate.keyed()) break;
+        if (rd.fwd_w > 1.5 * target_w) { gate.unkey("forward power above 1.5 x the target"); break; }
+        if (drive >= d1w * 0.999 && r.max_fwd_w < 0.005) { gate.unkey("under 5 mW at the table's 1 W drive point: wrong channel, sign or path"); break; }
+        if (rd.fwd_w >= 0.05 && src.level() > 0 && now() - last_step >= 0.15) kmax = std::max(kmax, rd.fwd_w / (src.level() * src.level()));
+        // Near the target the meter lags (~one 0.2 s step on the radio): there wait long enough for it, then go to the target in proportion;
+        // hold only within +-10 %, and trim towards the target while holding (the 15 W test tone held at 18-20 W before, 2026-11-19).
+        const double settle = rd.fwd_w > 0.25 * target_w ? 0.45 : 0.2, since = now() - last_step;
+        if (hold < 0 && since >= settle && rd.fwd_w >= 0.9 * target_w && rd.fwd_w <= 1.1 * target_w) { hold = now() + hold_s; last_trim = now(); }
+        if (hold >= 0 && now() >= hold) { r.reached = true; gate.unkey("ramp finished at the target"); break; }
+        if (hold < 0 && now() >= next && since >= settle) {
+            const double ratio = rd.fwd_w > 0.3 ? target_w / rd.fwd_w : 1e9;      // power still to go (meaningless below 0.3 W)
+            drive = std::min(ratio < step * step ? drive * std::sqrt(ratio) : drive * step, dcap);   // the last step lands on the target
+            src.set_target(drive); last_step = now(); next = now() + settle;
+        }
+        if (hold >= 0 && now() - last_trim >= 0.4 && rd.fwd_w > 0.3 && std::fabs(rd.fwd_w / target_w - 1) > 0.05) {
+            drive = std::min(drive * std::clamp(std::sqrt(target_w / rd.fwd_w), 0.9, 1.1), dcap); src.set_target(drive); last_trim = now();
+        }
+        clk_.sleep(0.05);
+    }
+    src.set_keyed(false); keyed_ = false;
+    r.stop = gate.last_unkey_reason(); r.seconds = now(); r.k = kmax; r.unkey_failed = gate.unkey_failed();
+    if (r.reached && kmax > 1000) set_k(band, kmax);
+    char m[160]; std::snprintf(m, sizeof m, "ramp: %s, max %.2f W, %.0f W per drive^2", r.stop.c_str(), r.max_fwd_w, kmax); say(log, m);
+    for (const auto& c : r.compare) {
+        char x[240]; auto f = [](const std::optional<double>& v, const char* fmt) { char b[24]; if (!v) return std::string("-"); std::snprintf(b, sizeof b, fmt, *v); return std::string(b); };
+        std::snprintf(x, sizeof x, "meter %.1f s: ours adc fwd %d rev %d = %.2f W / %.2f W, SWR %.2f | tuner %s W / %s W, SWR %s", c.t, c.adc_fwd, c.adc_rev, c.fwd_w, c.rev_w, c.swr,
+                      f(c.atu_fwd_w, "%.2f").c_str(), f(c.atu_rev_w, "%.2f").c_str(), f(c.atu_swr, "%.2f").c_str());
+        say(log, x);
+    }
+    return r;
+}
+
+TuneResult TxControl::tune(double mhz, double power_w, double threshold, const Options& o, const ProgressFn& p, const LogFn& log) {
+    std::lock_guard<std::mutex> l(op_); TuneResult r; Busy b(*this);
+    if (!armed_) { r.why_not = "transmit is not armed"; return r; }
+    const int band = txm::band_of(mhz * 1e6);
+    if (band < 0) { r.why_not = "outside the amateur bands"; return r; }
+    if (!(power_w >= 1) || power_w > 15) { r.why_not = "tune power must be 1..15 W"; return r; }
+    if (o.tx_ant != 1) { r.why_not = "the ATU is on ANT1 only: this band transmits on ANT" + std::to_string(o.tx_ant); return r; }
+    if (!atu::threshold_request(threshold)) { r.why_not = "the tuner only knows thresholds 1.1, 1.3, 1.5, 1.7, 2.0, 2.5, 3.0"; return r; }
+    // The drive: this band's measured level if there is one; otherwise the EEPROM power table, which on 20 m gave ~5 dB LESS than the power it names
+    // (so a first tune on a new band errs low; the tuner says "no RF" if it is too little). A measurement needs a match, so the first tune comes first.
+    const double k = k_for(band), dcap = drive_cap(band);
+    const double drive = k > 1000 ? std::sqrt(power_w / k) : txs::drive_for_watts(cal_, band, power_w);
+    r.estimated_drive = !(k > 1000);
+    if (!(drive > 0)) { r.why_not = "no drive for this band"; return r; }
+    if (r.estimated_drive) say(log, std::string("no measured drive on ") + txm::band_name(band) + ": using the EEPROM power table (errs low); press Measure drive after a good tune");
+    if (drive > dcap) { r.why_not = "the drive for this power is above the table's 100 W drive"; return r; }
+    prepare(mhz, 1, 1);                                           // tune: ANT1 (the ATU's)
+    atu_.drain(); atu_.init(); clk_.sleep(1.5); atu_.drain();                  // relays settle (two runs keyed straight after a reset saw an open-like load)
+    auto rep = atu_report();
+    if (!rep || !rep->ind || !rep->cap || !rep->hiz) { r.why_not = "the tuner did not report its relays: not keying"; return r; }
+    txo::ToneSource src(o.rate, 8); src.set_cap(std::min(dcap, drive * 1.25)); src.set_target(drive); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
+    src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]);
+    txo::Stream st(pcm_(o.rate), src); clk_.sleep(0.3);
+    if (st.failed()) { r.why_not = "the I/Q stream failed to start"; return r; }
+    GateConfig gc; gc.max_key_s = 15.0; gc.max_fwd_w = 30.0; gc.max_rev_w = 20.0; gc.max_swr = 1e9;   // fixed limits while the tuner searches (see firesidekey / analysis)
+    KeyHook kh(key_hook_);
+    TxGate gate(fx_, gc, clk_); gate.arm(); TuneMeter meter;
+    const double t0 = clk_.now();
+    if (abort_) { r.why_not = "stopped before keying"; return r; }
+    auto ready = [&] { return !st.failed() && !abort_; };
+    auto carrier = [&](bool on) { src.set_keyed(on); keyed_ = on; };
+    auto poll = [&](const txm::Reading& rd) { if (p) p({clk_.now() - t0, src.level(), rd}); if (abort_) gate.unkey("aborted"); else if (st.failed()) gate.unkey("the I/Q stream failed"); };
+    r.outcome = run_atu_tune(gate, atu_, cal_.meter, band, threshold, true, 1, ready, &meter, &r.why_not, carrier, poll);
+    if (!r.outcome && abort_) r.why_not = "stopped before keying";
+    for (auto& x : meter.readings) { if (x.fwd_w > 0.5) { r.last_fwd_w = x.fwd_w; r.last_swr = x.swr; } }
+    r.max_fwd_w = meter.max_fwd_w; r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); keyed_ = false;
+    if (r.outcome && r.outcome->result == atu::Atu::TuneResult::Pass && r.outcome->status.ind && r.outcome->status.cap && r.outcome->status.hiz) {
+        const auto& s = r.outcome->status; atu::Setting set; set.ind = *s.ind; set.cap = *s.cap; set.hiz = *s.hiz != 0;
+        set.swr = s.swr ? *s.swr : 0; set.fwd_w = s.fwd_w ? *s.fwd_w : 0; set.freq_hz = mhz * 1e6;
+        char ts[32]; std::time_t t = std::time(nullptr); std::strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t)); set.utc = ts;
+        mem_.store(band, set); r.saved = set;
+    }
+    char m[200]; std::snprintf(m, sizeof m, "tune: %s (%s), max %.1f W", !r.outcome ? "refused" : r.outcome->result == atu::Atu::TuneResult::Pass ? "PASS" :
+                               r.outcome->result == atu::Atu::TuneResult::Fail ? "FAIL" : "stopped", r.stop.c_str(), r.max_fwd_w); say(log, m);
+    return r;
+}
+
+std::optional<atu::Status> TxControl::atu_report() { if (retired_ || !armed_) return std::nullopt; try { atu_.request_update(); return atu_.status(); } catch (...) { return std::nullopt; } }
+
+bool TxControl::restore_relays(int band, const LogFn& log) {
+    std::lock_guard<std::mutex> l(op_);
+    if (!armed_) { say(log, "transmit is not armed"); return false; }
+    auto s = mem_.recall(band); if (!s) { say(log, std::string("nothing stored for ") + txm::band_name(band)); return false; }
+    const bool ok = atu_.set_relays(s->ind, s->cap, s->hiz);
+    char m[120]; std::snprintf(m, sizeof m, "ATU %s: ind %d cap %d %s %s", txm::band_name(band), s->ind, s->cap, s->hiz ? "Hi-Z" : "Lo-Z", ok ? "restored (no RF)" : "NOT confirmed by the tuner"); say(log, m);
+    return ok;
+}
+}  // namespace fireside::txc
+
+namespace fireside::txc {
+namespace {
+// A rendered slot (48 kHz, sample 0 = slot start) at the stream rate, envelope normalised to 1. The resampler's filter delay is measured and removed so
+// sample n is still slot start + n / rate (the FT8 timing). A proper filter, not interpolation: images would be transmitted ~46 kHz from the carrier.
+}  // namespace
+
+TxControl::FtPrepared TxControl::prepare_ft(const std::string& text, double audio_hz, bool ft4, double rate) {
+    if (!(audio_hz >= 200 && audio_hz <= 3000)) throw std::invalid_argument("audio frequency must be 200..3000 Hz");
+    if (text.find_first_not_of(' ') == std::string::npos) throw std::invalid_argument("no message to send");
+    if (!(rate == 48000 || rate == 96000 || rate == 192000)) throw std::invalid_argument("stream rate must be 48, 96 or 192 kHz");
+    const tx::DigiMode mode = ft4 ? tx::DigiMode::FT4 : tx::DigiMode::FT8;
+    FtPrepared f; f.rate = rate; f.ft4 = ft4; f.text = text; f.audio_hz = audio_hz;
+    f.buf = decode::synth_ft_iq(text, audio_hz, rate, ft4, tx::default_start_offset_s(mode));   // the analytic GFSK directly at the stream rate (ms, not ~3 s)
+    if (f.buf.empty()) throw std::runtime_error("cannot encode this message: \"" + text + "\"");
+    return f;
+}
+SendResult TxControl::send_ft(double mhz, const std::string& text, double audio_hz, bool ft4, tx::Parity parity, double power_w, const Options& o,
+                               const ProgressFn& p, const LogFn& log) {
+    FtPrepared f;
+    try { f = prepare_ft(text, audio_hz, ft4, o.rate); } catch (const std::exception& e) { SendResult r; r.why_not = e.what(); if (log) log(std::string("send refused: ") + e.what()); return r; }
+    return send_prepared(mhz, f, parity, power_w, o, p, log, 1.5);
+}
+SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity parity, double power_w, const Options& o,
+                                     const ProgressFn& p, const LogFn& log, double min_lead_s) {
+    std::lock_guard<std::mutex> l(op_); SendResult r; Busy b(*this);
+    auto no = [&](const std::string& w) { r.why_not = w; say(log, "send refused: " + w); return r; };
+    const std::string& text = f.text; const double audio_hz = f.audio_hz; const bool ft4 = f.ft4;
+    if (!armed_) return no("transmit is not armed");
+    if (f.buf.empty() || f.rate != o.rate) return no("the prepared signal does not match the stream rate");
+    const int band = txm::band_of((mhz * 1e6) + audio_hz + 50);
+    if (band < 0 || txm::band_of(mhz * 1e6) != band) return no("outside the amateur bands");
+    if (!(power_w >= 1) || power_w > 25) return no("power must be 1..25 W");
+    const tx::DigiMode mode = ft4 ? tx::DigiMode::FT4 : tx::DigiMode::FT8;
+    const double off = tx::default_start_offset_s(mode), sig = tx::signal_seconds(mode), slot_len = tx::slot_seconds(mode);
+    auto buf = f.buf;
+
+    // drive: measured level, else the EEPROM table (errs low); the closed loop below trims it either way
+    const double k = k_for(band), dcap = drive_cap(band);
+    double drive = k > 1000 ? std::sqrt(power_w / k) : txs::drive_for_watts(cal_, band, power_w); r.estimated_drive = !(k > 1000);
+    if (!(drive > 0) || drive > dcap) return no("no usable drive for this power on this band");
+    const double drive_max = std::min(dcap, drive * 2.0);          // the loop may raise the drive by at most 6 dB
+    tx::TxPlan plan;
+    try { plan = tx::plan_tx(utc_(), mode, parity, off, 2.0, min_lead_s); } catch (const std::exception& e) { return no(e.what()); }
+    r.slot_utc = plan.slot.start_utc; r.late_s = plan.skip_s;
+    if (o.tx_ant < 1 || o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
+    prepare(mhz, 1, o.tx_ant);                                    // USB, TX DDS on the dial
+    txo::ToneSource src(o.rate, 8); src.set_cap(std::min(dcap, drive_max * 1.1)); src.set_target(drive); src.set_mirror(o.mirror_q);
+    src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_buffer(std::move(buf));
+    txo::Stream st(pcm_(o.rate), src);
+    const double latency_s = st.latency_s();                      // what the playback device holds before a sample is sent
+    auto wait_until = [&](double utc) { while (!abort_ && utc_() < utc) clk_.sleep(std::min(0.05, std::max(0.001, utc - utc_()))); };
+    wait_until(plan.skip_s > 0 ? plan.audio_start_utc - 0.15 : plan.slot.start_utc - 0.15);   // ~0.15 s before the slot (joining late: as planned)
+    if (abort_) { r.stop = "aborted before keying"; return r; }
+    if (st.failed()) return no("the I/Q stream failed to start");
+    GateConfig gc; gc.max_key_s = slot_len; gc.max_fwd_w = std::max(2.0, 1.5 * power_w); gc.max_rev_w = std::max(2.0, 0.5 * power_w); gc.max_swr = 3.0;
+    KeyHook kh(key_hook_);
+    TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
+    if (!gate.key(std::string(ft4 ? "FT4 " : "FT8 ") + text, gc.max_key_s, &why)) return no(why);
+    keyed_ = true;
+    src.seek((long long)std::llround((utc_() + latency_s - plan.slot.start_utc) * o.rate)); src.set_keyed(true);
+    const double sig_start = plan.slot.start_utc + off, sig_end = sig_start + sig, t0 = clk_.now();
+    double next_trim = sig_start + 0.4, sum_fwd = 0; int n_fwd = 0;
+    while (gate.keyed()) {
+        if (abort_) { gate.unkey("aborted"); break; }
+        if (st.failed()) { gate.unkey("the I/Q stream failed"); break; }
+        const double now = utc_();
+        if (src.done() || now > sig_end + 0.15) { gate.unkey("over finished"); r.sent = true; break; }
+        txm::Reading rd;
+        try { rd = txm::read(cal_.meter, band, int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcFwd)), int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcRev))); }
+        catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
+        r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (p) p({clk_.now() - t0, src.level(), rd});
+        gate.report(rd); gate.tick(); if (!gate.keyed()) break;
+        if (now > sig_start + 0.3 && now < sig_end - 0.2 && rd.fwd_w > 0.2) {
+            if (now >= next_trim && now < sig_start + 3.0) {        // closed loop: trim towards the set power in the first 3 s (constant envelope)
+                drive = std::clamp(drive * std::clamp(std::sqrt(power_w / rd.fwd_w), 0.8, 1.25), 0.0, drive_max); src.set_target(drive); next_trim = now + 0.25;
+            } else if (now >= sig_start + 3.3) { sum_fwd += rd.fwd_w; ++n_fwd; r.swr = rd.swr; }
+        }
+        clk_.sleep(0.05);
+    }
+    src.set_keyed(false); keyed_ = false; r.unkeyed_utc = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.drive = drive;
+    if (n_fwd > 3) {
+        r.mean_fwd_w = sum_fwd / n_fwd; r.k = r.mean_fwd_w / (drive * drive);
+        if (r.sent && (!r.swr || *r.swr < 2.5)) set_k(band, k > 1000 ? 0.7 * k + 0.3 * r.k : r.k);   // the band's drive level learns from every clean over
+    }
+    char m[200]; std::snprintf(m, sizeof m, "%s %s: %s, %.1f W (set %.1f W)%s", ft4 ? "FT4" : "FT8", text.c_str(), r.stop.c_str(), r.mean_fwd_w, power_w, r.late_s > 0 ? " (joined late)" : ""); say(log, m);
+    return r;
+}
+}  // namespace fireside::txc
+
+namespace fireside::txc {
+VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p, const LogFn& log) {
+    std::lock_guard<std::mutex> l(op_); VoiceResult r; Busy b(*this);
+    auto no = [&](const std::string& w) { r.why_not = w; say(log, "voice refused: " + w); return r; };
+    if (!armed_) return no("transmit is not armed");
+    const int band = txm::band_of(mhz * 1e6);
+    if (band < 0 || txm::band_of(mhz * 1e6 + (v.lsb ? -3000.0 : 3000.0)) != band) return no("outside the amateur bands");
+    if (!(v.peak_w >= 1 && v.peak_w <= 20)) return no("peak power must be 1..20 W");
+    if (!(v.max_key_s > 0 && v.max_key_s <= 600)) return no("time-out must be 1..600 s");
+    const double k = k_for(band); if (!(k > 1000)) return no("no measured drive level on this band: press Measure drive first");
+    const double ceiling = v.chain.iq_limiter.ceiling, dcap = drive_cap(band);
+    double drive = std::sqrt(v.peak_w / k) / ceiling;                          // full-scale processed audio (= the ceiling) -> peak_w
+    if (!(drive > 0) || drive * ceiling > dcap) return no("no usable drive for this power on this band");
+    tx::TxChainConfig cc = v.chain; cc.mic.sample_rate = 48000; cc.ssb.sideband = v.lsb ? tx::Sideband::LSB : tx::Sideband::USB;
+    tx::TxChain chain(cc);
+    if (v.o.tx_ant < 1 || v.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
+    prepare(mhz, v.lsb ? 0 : 1, v.o.tx_ant);
+    txo::ToneSource src(v.o.rate, 8); src.set_cap(std::min(dcap, drive * ceiling * 1.05)); src.set_target(drive); src.set_mirror(v.o.mirror_q);
+    src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(v.o.rate * 0.06));
+    // the producer: audio -> chain -> I/Q 48 kHz -> stream rate -> the live ring (keeps ~40 ms queued)
+    std::atomic<bool> stop{false}; std::atomic<bool> failed{false}; std::string prod_err;
+    std::thread prod([&] {
+        try {
+            std::unique_ptr<dsp::RationalResampler> rs; if (v.o.rate != 48000) rs = std::make_unique<dsp::RationalResampler>(48000.0, v.o.rate);
+            std::vector<float> a(480); std::vector<tx::cf> iq; std::vector<dsp::cf> up; std::vector<std::complex<float>> out;
+            while (!stop) {
+                const size_t n = in.read(a.data(), a.size(), 0.05); if (n == 0) continue;
+                iq.clear(); chain.process(a.data(), n, iq);
+                const std::complex<float>* src_p; size_t m;
+                if (rs) { up.clear(); rs->process(iq.data(), iq.size(), up); src_p = up.data(); m = up.size(); } else { out.assign(iq.begin(), iq.end()); src_p = out.data(); m = out.size(); }
+                size_t done = 0; while (done < m && !stop) { const size_t w = src.push_live(src_p + done, m - done); done += w; if (done < m) std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            }
+        } catch (const std::exception& e) { prod_err = e.what(); failed = true; }
+    });
+    struct Join { std::atomic<bool>& s; std::thread& t; ~Join() { s = true; if (t.joinable()) t.join(); } } join{stop, prod};
+    txo::Stream st(pcm_(v.o.rate), src);
+    for (int i = 0; i < 40 && src.live_queued() < size_t(v.o.rate * 0.03) && !failed; ++i) clk_.sleep(0.005);   // ~30 ms of audio queued first
+    if (failed) return no("audio input: " + prod_err);
+    if (st.failed()) return no("the I/Q stream failed to start");
+    if (!ptt()) { r.stop = "PTT released before keying"; return r; }
+    GateConfig gc; gc.max_key_s = v.max_key_s; gc.max_fwd_w = 1.5 * v.peak_w; gc.max_rev_w = std::max(2.0, 0.5 * v.peak_w); gc.max_swr = 3.0;
+    KeyHook kh(key_hook_);
+    TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
+    if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) return no(why);
+    keyed_ = true; r.keyed = true; src.set_keyed(true); const double t0 = clk_.now(); double last_trim = t0;
+    while (gate.keyed()) {
+        if (abort_) { gate.unkey("aborted"); break; }
+        if (!ptt()) { gate.unkey("PTT released"); break; }
+        if (failed) { gate.unkey("audio input failed: " + prod_err); break; }
+        if (st.failed()) { gate.unkey("the I/Q stream failed"); break; }
+        txm::Reading rd;
+        try { rd = txm::read(cal_.meter, band, int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcFwd)), int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcRev))); }
+        catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
+        r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (p) p({clk_.now() - t0, src.level(), rd});
+        gate.report(rd); gate.tick(); if (!gate.keyed()) break;
+        if (rd.fwd_w > 1.1 * v.peak_w && clk_.now() - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = clk_.now(); }   // ALC: only ever down
+        clk_.sleep(0.02);
+    }
+    src.set_keyed(false); keyed_ = false;
+    r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns();
+    char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, v.peak_w); say(log, m);
+    return r;
+}
+}  // namespace fireside::txc

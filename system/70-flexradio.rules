@@ -1,0 +1,19 @@
+# FlexRadio FLEX-5000 / FLEX-3000 (FireWire, TC Applied "DICE" based).
+#
+# Gives the "audio" group access to the radio's raw FireWire node (/dev/fwN) so firesidectl can talk to its
+# control mailbox without root. ALSA PCM/MIDI nodes created by snd-dice are already group "audio".
+#
+# Matching uses the TEXT entries in the radio's config ROM, exactly what the Windows driver's INF matches
+# (1394\FlexRadio_Systems&FLEX-5000, from FLEX-Firewire_Driver_v3.5.0.7171). The kernel exposes them as
+# the sysfs attributes vendor_name / model_name. Numeric vendor ID: not yet known, add it after first
+# connection (see `system/fireside-system-check.sh`).
+#
+# Only this vendor's nodes are touched by the two rules below; other FireWire gear is not.
+SUBSYSTEM=="firewire", ATTR{vendor_name}=="FlexRadio*", GROUP="audio", MODE="0660", ENV{ID_FLEXRADIO}="1"
+SUBSYSTEM=="firewire", ATTR{model_name}=="FLEX-[35]000*", GROUP="audio", MODE="0660", ENV{ID_FLEXRADIO}="1"
+
+# The host controller's OWN node (/dev/fwN with is_local=1, normally /dev/fw0), also for group "audio": the app's direct stream
+# (app/core/src/fw_iso.cpp) receives the radio's isochronous stream on it, which is how 96/192 kHz work (snd-dice offers 48 kHz only).
+# Note: the local node lets its users send any request to any node on this FireWire bus, and allocate bus channels. On this
+# single-user machine the bus holds only the radio. Remove this line if the box is shared or other FireWire devices are attached.
+SUBSYSTEM=="firewire", ATTR{is_local}=="1", ATTR{vendor_name}=="Linux Firewire", GROUP="audio", MODE="0660", ENV{ID_FLEXRADIO_LOCAL}="1"

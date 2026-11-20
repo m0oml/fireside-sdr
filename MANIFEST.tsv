@@ -1,0 +1,47 @@
+path	bytes	sha256	source
+software/flexradio/PowerSDR_v2.7.2_Installer.exe	23614072	e82883395ea9add164d842d057784d48663f63be2a1f5f69c0bd1ccfbadff220	https://edge.flexradio.com/www/uploads/20200818184920/PowerSDR_v2.7.2_Installer.exe
+docs/flexradio/PowerSDR-v2.5.3-Release-Notes.pdf	571415	a3222a69154d1f0ca384d119ebc60cd4c669c7056e969567eaa4d23d1f7c096b	https://edge.flexradio.com/www/uploads/20200818184943/PowerSDR-v2.5.3-Release-Notes.pdf
+docs/flexradio/PowerSDR-v2.6.4-Release-Notes.pdf	597358	d88748353c3a83bf7ee4a609b9a9ef5a724692fd5d43b824323ee0c85182d709	https://edge.flexradio.com/www/uploads/20200818184943/PowerSDR-v2.6.4-Release-Notes.pdf
+docs/flexradio/PowerSDR-v2.7.2-Release-Notes.pdf	589608	76e734dab9be9153b8e54781c5b6e622e00b10e612f81e68b35dd8b536b48afa	https://edge.flexradio.com/www/uploads/20200818184943/PowerSDR-v2.7.2-Release-Notes.pdf
+docs/flexradio/PowerSDR-v2.4.4-Release-Notes.pdf	499646	4ead6c3b655bf43ef83095818ab0e539988f4a23f077308a9da6fe333325bd4d	https://edge.flexradio.com/www/uploads/20200818184944/PowerSDR-v2.4.4-Release-Notes.pdf
+docs/flexradio/How-to-Use-AF-Gain-and-AGC-T-Controls.pdf	312231	ce9d27476113bbca648db2c0713953e15ca9f523fcf29c03f0c31f99d3282375	https://edge.flexradio.com/www/uploads/20200818184945/How-to-Use-AF-Gain-and-AGC-T-Controls.pdf
+docs/flexradio/PowerSDR-TX-Audio_Chain.pdf	70926	290d7429986b4094059cc00dcae9d8e6433e3210464b2cf8fa17695b3d9b1625	https://edge.flexradio.com/www/uploads/20200818184959/PowerSDR-TX-Audio_Chain.pdf
+docs/flexradio/Tracking-Notch-Filter-TNF-White-Paper.pdf	517195	5f32d8379febcd12df3ce44df2ac58631c198f6dc9d9560cb2c9118e47197e4c	https://edge.flexradio.com/www/uploads/20200818184959/Tracking-Notch-Filter-TNF-White-Paper.pdf
+docs/flexradio/Digital-Mode-Operation-with-PowerSDR.pdf	405489	a9a3060c22cbc78c90ad44720bbf94962724fb9672f56c4ff970a0c540179378	https://edge.flexradio.com/www/uploads/20200818185003/Digital-Mode-Operation-with-PowerSDR.pdf
+docs/flexradio/FlexControl-Quick-Start-Guide.pdf	674799	550fe34a57eb077bd540cea2a10563c83060796a27fe8ef4505b2b639a7b42ad	https://edge.flexradio.com/www/uploads/20200818185010/FlexControl-Quick-Start-Guide.pdf
+docs/flexradio/FLEX-5000A-Quick-Start-Guide.pdf	1346645	e2e8ee506ff4b7002d035cad5cc2dd0bffc503ea7ff3f275b934f705db1bc123	https://edge.flexradio.com/www/uploads/20200818185019/FLEX-5000A-Quick-Start-Guide.pdf
+docs/flexradio/FLEX-5000C-Quick-Start-Guide.pdf	766807	eb47f226b57f85d905625d1b1476fa2b52fab2d575e66ed1ba6f248ebb58d9a9	https://edge.flexradio.com/www/uploads/20200818185019/FLEX-5000C-Quick-Start-Guide.pdf
+docs/flexradio/FLEX-5000-Service-Manual.zip	13880727	44d921b1927e4c624b3b2ad2600bbb15d647771af5ef7a26cd06ecc0057cc0c0	https://edge.flexradio.com/www/uploads/20200818185020/FLEX-5000-Service-Manual.zip
+docs/flexradio/FLEX-5000-VU5K-Quick-Start-Guide.pdf	1827106	ffb6f95cb77fd507821fa7f6d44d3d5227a5427bec10a7d7790c46377c9786a6	https://edge.flexradio.com/www/uploads/20200818185020/FLEX-5000-VU5K-Quick-Start-Guide.pdf
+docs/flexradio/FLEX-5000-VU-Module-Schematics.zip	1650201	481baec13c960149039a34b63ecb5de382352846261aa7ee1ab468ef93a5c639	https://edge.flexradio.com/www/uploads/20200818185020/FLEX-5000-VU-Module-Schematics.zip
+docs/flexradio/FLEX-5000-RX2-Installation-Guide.pdf	1739901	95de8a7fe578302adb3de5f90d8cbd0caf51ede3ee12facdefcc6a68028ee057	https://edge.flexradio.com/www/uploads/20200818185021/FLEX-5000-RX2-Installation-Guide.pdf
+docs/flexradio/FLEX-5000-EU-Declaration-of-Conformity.pdf	35395	97bee910d59e840e830927b22eef244276d1760f9ed7cb6384983004d5a87cbb	https://edge.flexradio.com/www/uploads/20200818185022/FLEX-5000-EU-Declaration-of-Conformity.pdf
+docs/flexradio/FLEX-5000-FDX-Block-Diagram.pdf	138602	91c0ca063aab924e7cbdf07537cc6335587fc5919048d491458838ed9a77e94b	https://edge.flexradio.com/www/uploads/20200818185022/FLEX-5000-FDX-Block-Diagram.pdf
+docs/flexradio/FLEX-5000-Datasheet.pdf	736248	f170e3c4600546de85c6957712bc1ab736fdc34a38ba5e807e9740851f8eafd4	https://edge.flexradio.com/www/uploads/20200818185023/FLEX-5000-Datasheet.pdf
+docs/flexradio/FLEX-5000-ATU-100-Service-Manual.pdf	1754146	02a38def9104ed9c1dd16a89c2af0971742973e2d21d66abbda432250bae94ca	https://edge.flexradio.com/www/uploads/20200818185024/FLEX-5000-ATU-100-Service-Manual.pdf
+docs/flexradio/FLEX-5000-ATU-Installation-Guide.pdf	1081006	94e7a9107efe711ae2ac01e9cf120d69fb89fbbf1602461beee78662e524a0a7	https://edge.flexradio.com/www/uploads/20200818185026/FLEX-5000-ATU-Installation-Guide.pdf
+docs/flexradio/Configuring-the-FLEX-5000-with-SATPC32.pdf	633014	0a2f276b3942da69f9a0f31e0eb78cee48457e431c4dce11e18a0c4c8262a748	https://edge.flexradio.com/www/uploads/20200818185043/Configuring-the-FLEX-5000-with-SATPC32.pdf
+docs/flexradio/FLEX-5000-Owners-Manual-1.pdf	4154708	11798c65fe96e389a5b55e62972cb5ea15504434eaf8310949d0ab968fca3a14	https://edge.flexradio.com/www/uploads/20200914173921/FLEX-5000-Owners-Manual-1.pdf
+docs/ke9ns/FLEX-5000_Owners_Manual_v2.8.pdf	11187211	449b218a86ffca0791a6b4dcdd0b3aa0ac9f2c2b26b92c5941214f0afed0bcbd	https://www.ke9ns.com/FLEX-5000_Owners_Manual_v2.8.pdf
+docs/ke9ns/FLEX-5000 ATU-100 Service Manual.pdf	1731786	d47426df4ccadc10af4ca92cedb76269042428533f11eb13b153c92b19d3d250	https://www.ke9ns.com/FLEX-5000%20ATU-100%20Service%20Manual.pdf
+docs/ke9ns/FLEX-5000A Specifications.pdf	53794	4b8b2c5aa5419a7e56507f2f969ba763d0781c65456b07490bf6e59c0eadf31c	https://www.ke9ns.com/FLEX-5000A%20Specifications.pdf
+docs/ke9ns/Flex 5000A Running Class A and Bias Adjustment.pdf	89620	bfb23be2f1bb8c6e843d9ede492a378ae352a9ac9fd6606e42c78ef4ea9a5999	https://www.ke9ns.com/Flex%205000A%20Running%20Class%20A%20and%20Bias%20Adjustment.pdf
+docs/ke9ns/PRELIMINARY FLEX-5000 BITE Alignment & Diagnostics.pdf	127131	3f953a812709bed168b437ae7d732ab4c2742ab139d587331c2e2785cf7cd130	https://www.ke9ns.com/PRELIMINARY%20FLEX-5000%20BITE%20Alignment%20%26%20Diagnostics.pdf
+docs/ke9ns/FLEX-VU5K Manual Addendum v1.1.pdf	1111862	c14e56920d3897215cb58655f1e1e4edd432e4f9a54bdd5f34352daf6abf2617	https://www.ke9ns.com/FLEX-VU5K%20Manual%20Addendum%20v1.1.pdf
+docs/ke9ns/RFIO_Installation_Guide_2011-8-15.pdf	1041189	f131a01e618a6718d50ea4da992bd7e7b2640f0aeb06beb3e97e523b6466501d	https://www.ke9ns.com/RFIO_Installation_Guide_2011-8-15.pdf
+docs/ke9ns/PowerSDR-CAT-Command-Reference-Guide.pdf	2448145	035491d22c710bbe0d97b1f412b9c0a348182a61f0757aeb1d2504cedbe4a77e	https://www.ke9ns.com/PowerSDR-CAT-Command-Reference-Guide.pdf
+docs/ke9ns/PowerSDR ke9ns keyboard shortcuts.pdf	620927	f5bac0de45352d0d611e0e62a6f59236b37c9585d1196f799ff663cdbf784a0c	https://www.ke9ns.com/PowerSDR%20ke9ns%20keyboard%20shortcuts.pdf
+docs/ke9ns/FLEX-5000 & FLEX-3000 EEPROM _ Firewire Diagnostic Tool.htm	55528	2a1866c5d6e6f173d2b5d9c7d6a0f51fb0bfb8e8cc928df3a43072b6e44d45c2	https://www.ke9ns.com/FLEX-5000%20%26%20FLEX-3000%20EEPROM%20_%20Firewire%20Diagnostic%20Tool.htm
+docs/ke9ns/Flex repair story.pdf	973046	dd2140b85ef7fffdefb98ead19b9151c7176023b47935ebe4002b6c80f197bd4	https://www.ke9ns.com/Flex%20repair%20story.pdf
+docs/ke9ns/FLEX-3000_Owners_Manual_v2.0.pdf	3214248	a1ff59a68f7bd35f3a7c0ba6f82b87fa8040915b8a5ba53c30aad392556afaf7	https://www.ke9ns.com/FLEX-3000_Owners_Manual_v2.0.pdf
+docs/ke9ns/FLEX-1500_Owners_Manual_v2.0.pdf	3161127	420bebd3da74abf5b804de7663f00daeb19116415c449d1701168c1bcf537686	https://www.ke9ns.com/FLEX-1500_Owners_Manual_v2.0.pdf
+docs/ke9ns/FLEX-1500 Service Manual.pdf	2107416	00bdd29a9f5d39711a603caeb93b1740c8cecec3e211ab5558318b3882dbad33	https://www.ke9ns.com/FLEX-1500%20Service%20Manual.pdf
+docs/ke9ns/TCD2210.pdf	295148	460d92c38a11dd1c5cec1cd1635deb4968e0758a386be80f4b967662ea089331	https://www.ke9ns.com/TCD2210.pdf
+docs/ke9ns/tsb41ab2.pdf	2096898	31ab1fff34512bedc4d5d3f19ac18f8238ce2173c62d75d425e138c21cbb4502	https://www.ke9ns.com/tsb41ab2.pdf
+software/ke9ns/PowerSDR_v3.0.0_Installer.exe	98293220	c81e26ecc5af005240e0ff8a396ed6b1ff9458dbcb6f5c67fe346b2a97f2cb25	https://www.ke9ns.com/PowerSDR_v3.0.0_Installer.exe
+software/ke9ns/PowerSDR_KE9NS_V3.0.0.13_Incremental_Installer.msi	70763008	0e80662895a21629010f2debf8c8e208cea709ad8334cfe6d2538220dfc4cf9b	https://www.ke9ns.com/PowerSDR_KE9NS_V3.0.0.13_Incremental_Installer.msi
+software/ke9ns/F5K_firmware_old.zip	2734233	5c3e85cb26eeccae570056371aabfd3b9aff1f1aed0b4654541e44cbc30e1a0f	https://www.ke9ns.com/F5K_firmware_old.zip
+software/ke9ns/EEPROM.exe	258048	7d67bfd222ac98658511dbc3aa49fb5a535db4be7c250cab9bbbe2c3c4b8c65d	https://www.ke9ns.com/EEPROM.exe
+software/ke9ns/1394_OHCI_LegacyDriver_X86.msi	208896	c32cb44202ba0cbeee104a4d289d22c8b8ae584920444b95c0b061977b3ea077	https://www.ke9ns.com/1394_OHCI_LegacyDriver_X86.msi
+software/ke9ns/PowerSDR.zip	1525	d462ffbbf37e3c88899fc0243feef8959d2066d20189d9d1b60f1960b5091bf8	https://www.ke9ns.com/PowerSDR.zip
+software/ke9ns/powerSDR_Skins.zip	1948438	47684e6c1899e9b7a5a8f32bc762447819a50cef32a367f7256235c9625472af	https://www.ke9ns.com/powerSDR_Skins.zip

@@ -1,0 +1,720 @@
+// ATU protocol, per-band ATU memory, PA power / SWR meter and the transmit gate, against a simulated tuner that behaves like the one in the
+// PowerSDR capture of 2026-11-18 (hardware-day/capture-20261118-powersdr): result word [queue][b3][b2][code], 0x00FFFFFF = nothing pending,
+// a pass followed by the relay / power / SWR reports, a fail with its reason.
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <unistd.h>
+#include <deque>
+#include "fake_dice.h"
+#include "fireside/atu.h"
+#include "fireside/atu_memory.h"
+#include "fireside/sim_radio.h"
+#include "fireside/tx_gate.h"
+#include "fireside/tx_meter.h"
+#include "test_util.h"
+using namespace fireside; using namespace fakedice;
+
+namespace {
+uint32_t res(uint8_t code, uint8_t b2 = 0, uint8_t b3 = 0, uint8_t rem = 0) { return uint32_t(rem) << 24 | uint32_t(b3) << 16 | uint32_t(b2) << 8 | code; }
+
+struct FakeClock { double t = 1000.0; atu::Clock clock() { return {[this] { return t; }, [this](double s) { t += s; }}; } };
+
+// The tuner, PA detector and EEPROM behind the simulated mailbox: the library model (also used by fireside --simulate).
+using AtuSim = fireside::sim::RadioModel;
+
+struct Rig {
+    FakeDiceBus bus; AtuSim sim; PalMailbox mb; Flex fx; FakeClock clk;
+    Rig() : bus(), sim(bus), mb(bus, ByteOrder::Big, 1.0, 0), fx(mb, [] { Safety s; s.allow_write = true; return s; }()) { mb.verify(); }
+};
+std::vector<Wr> sent(Rig& r, const char* op) { std::vector<Wr> o; for (auto& w : write_ops(r.bus)) if (w.op == opv(op)) o.push_back(w); return o; }
+
+// 20 m calibration from this radio's EEPROM backup (2026-11-17): PA bridge volts at 1/2/5/10/20/90 W, reflected factor 0.983.
+txm::PaCal cal20() {
+    txm::PaCal c; for (int b = 0; b < txm::kBands; ++b) { c.bridge[size_t(b)] = {0.148, 0.216, 0.365, 0.544, 0.806, 1.78}; c.rev_corr[size_t(b)] = 1.0; }
+    c.bridge[5] = {0.14794, 0.21636, 0.36493, 0.54351, 0.80581, 1.77956}; c.rev_corr[5] = 0.983; c.valid = true; return c;
+}
+}  // namespace
+
+// ---------------------------------------------------------------- protocol
+TEST(atu_result_words_decode_as_in_the_capture) {
+    CHECK(!atu::parse(0x00FFFFFFu));
+    auto m = atu::parse(0x04240405u); CHECK(m); CHECK_EQ(int(m->code), 5); CHECK_EQ(int(m->b2), 0x04); CHECK_EQ(int(m->b3), 0x24); CHECK_EQ(int(m->remaining), 4);     // "4 more messages queued"
+    atu::Status s; atu::apply(s, *m); CHECK(s.fwd_w); CHECK_NEAR(*s.fwd_w, 10.60, 1e-9);            // "FWDPWR = 0x0424 = 10.60 W"
+    atu::apply(s, *atu::parse(0x020A)); CHECK(s.tune_pass && !*s.tune_pass); CHECK_EQ(int(s.fail_reason), 2);   // TUNEFAIL reason 2
+    atu::apply(s, *atu::parse(0x09)); CHECK(*s.tune_pass);
+    atu::apply(s, *atu::parse(res(atu::R_SWR, 0, 0))); CHECK_NEAR(*s.swr, 1.0, 1e-9);
+    atu::apply(s, *atu::parse(res(atu::R_SWR, 0, 64))); CHECK_NEAR(*s.swr, 3.0, 1e-9);            // rho = sqrt(64/256) = 0.5
+    atu::apply(s, *atu::parse(res(atu::R_SWRTHRESH, 2))); CHECK_NEAR(*s.threshold, 1.5, 1e-9);
+    atu::apply(s, *atu::parse(0xF8)); CHECK(*s.tune_pass);                                         // the unknown 0xF8 of the capture is ignored
+    CHECK(atu::threshold_request(1.5) == std::optional<uint8_t>(atu::SWR15)); CHECK(!atu::threshold_request(1.4));
+    CHECK_EQ(atu::send_d1(atu::SET_IND, 30), uint32_t(65 << 8 | 30));
+}
+TEST(atu_start_up_sends_what_powersdr_sends_and_no_rf) {
+    Rig r; atu::Atu a(r.fx, r.clk.clock()); a.init();
+    auto w = sent(r, "RDAL_OP_ATU_SEND_CMD"); CHECK_EQ(w.size(), size_t(3));
+    CHECK_EQ(w[0].d1, atu::send_d1(atu::AUTO_OFF)); CHECK_EQ(w[1].d1, atu::send_d1(atu::STANDBY)); CHECK_EQ(w[2].d1, atu::send_d1(atu::LOZ));
+    CHECK(sent(r, "RDAL_OP_SET_MOX").empty()); CHECK(a.status().active && !*a.status().active); CHECK(a.status().auto_on && !*a.status().auto_on);
+    CHECK(!r.fx.safety().permitted("RDAL_OP_ATU_SEND_CMD"));                                         // the permit is only held around each send
+}
+TEST(atu_saved_relays_go_back_without_transmitting) {
+    Rig r; atu::Atu a(r.fx, r.clk.clock());
+    CHECK(a.set_relays(30, 7, true)); CHECK_EQ(r.sim.ind, 30); CHECK_EQ(r.sim.cap, 7); CHECK_EQ(r.sim.hiz, 1);
+    CHECK_EQ(*a.status().ind, 30); CHECK_EQ(*a.status().cap, 7);
+    CHECK(sent(r, "RDAL_OP_SET_MOX").empty());
+    for (auto& w : sent(r, "RDAL_OP_ATU_SEND_CMD")) CHECK(w.d1 >> 8 != atu::FULL_TUNE && w.d1 >> 8 != atu::MEM_TUNE);
+    CHECK_THROWS(a.set_relays(128, 0, false), std::invalid_argument);
+    r.sim.on_send(0);                                                                                 // (no-op)
+    AtuSim& s = r.sim; s.bus.dynamic[opv("RDAL_OP_ATU_SEND_CMD")] = [&s] { const uint32_t d1 = be32(s.bus.mem[kPalResult]); if ((d1 >> 8) != atu::SET_CAP) s.on_send(d1); return 0u; };
+    CHECK(!a.set_relays(31, 9, false));                                                               // a tuner that ignores one setting is noticed
+}
+TEST(safety_gate_allows_tuner_settings_but_never_a_tune_erase_or_key_without_the_gate) {
+    Rig r; Safety& s = r.fx.safety(); s.permit("RDAL_OP_ATU_SEND_CMD"); s.permit("RDAL_OP_SET_MOX");
+    for (uint8_t req : {uint8_t(atu::FULL_TUNE), uint8_t(atu::MEM_TUNE), uint8_t(42), uint8_t(43), uint8_t(57), uint8_t(11), uint8_t(68), uint8_t(67), uint8_t(200)})
+        CHECK_THROWS(r.fx.set("RDAL_OP_ATU_SEND_CMD", atu::send_d1(req), 0), SafetyError);
+    CHECK_THROWS(r.fx.set("RDAL_OP_ATU_SEND_CMD", atu::send_d1(atu::SWR15, 1), 0), SafetyError);    // extra bytes on a no-argument request
+    CHECK_THROWS(r.fx.set("RDAL_OP_SET_MOX", 1, 0), SafetyError);                                     // keying needs the gate's grant
+    s.set_tx_grant(true);
+    r.fx.set("RDAL_OP_ATU_SEND_CMD", atu::send_d1(atu::FULL_TUNE), 0);                                // with the grant: a tune passes
+    for (uint8_t req : {uint8_t(42), uint8_t(43), uint8_t(57), uint8_t(11)}) CHECK_THROWS(r.fx.set("RDAL_OP_ATU_SEND_CMD", atu::send_d1(req), 0), SafetyError);   // erase / reset / ant 2: never
+    CHECK_THROWS(r.fx.set("RDAL_OP_SET_MOX", 2, 0), SafetyError); CHECK_THROWS(r.fx.set("RDAL_OP_SET_PA_BIAS", 1, 0), SafetyError);
+    s.set_tx_grant(false); s.unpermit("RDAL_OP_ATU_SEND_CMD");
+    CHECK_THROWS(r.fx.set("RDAL_OP_ATU_SEND_CMD", atu::send_d1(atu::SWR15), 0), SafetyError);        // nothing at all without the permit
+    Safety copy = s; s.set_tx_grant(true); Safety copy2 = s; CHECK(!copy.tx_grant()); CHECK(!copy2.tx_grant());   // a copy never inherits the grant
+}
+
+// ---------------------------------------------------------------- transmit gate
+TEST(tx_gate_refuses_until_armed_and_keys_only_through_set_mox) {
+    Rig r; TxGate g(r.fx, {}, r.clk.clock()); std::string why;
+    CHECK(!g.key("test", 1.0, &why)); CHECK(why.find("not armed") != std::string::npos); CHECK(write_ops(r.bus).empty());
+    g.arm(); CHECK(g.key("test", 1.0)); CHECK(g.keyed()); CHECK(r.sim.keyed); CHECK(r.fx.safety().tx_grant());
+    auto w = sent(r, "RDAL_OP_SET_MOX"); CHECK_EQ(w.size(), size_t(1)); CHECK_EQ(w[0].d1, 1u); CHECK_EQ(w[0].d2, 0u);
+    CHECK(!g.key("again", 1.0, &why)); CHECK(why.find("already") != std::string::npos);
+    g.unkey("done"); CHECK(!g.keyed()); CHECK(!r.sim.keyed); CHECK(!r.fx.safety().tx_grant()); CHECK(!r.fx.safety().permitted("RDAL_OP_SET_MOX"));
+    w = sent(r, "RDAL_OP_SET_MOX"); CHECK_EQ(w.size(), size_t(2)); CHECK_EQ(w[1].d1, 0u);
+    g.unkey("twice"); CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(2));                        // unkey when not keyed sends nothing
+}
+TEST(tx_gate_deadline_power_and_swr_limits_unkey) {
+    Rig r; GateConfig c; c.max_key_s = 2.0; c.max_fwd_w = 20; c.max_swr = 3.0; TxGate g(r.fx, c, r.clk.clock()); g.arm();
+    CHECK(g.key("t", 60.0)); r.clk.t += 1.9; g.tick(); CHECK(g.keyed()); r.clk.t += 0.2; g.tick(); CHECK(!g.keyed());   // never longer than max_key_s
+    CHECK(g.last_unkey_reason().find("time limit") != std::string::npos);
+    CHECK(g.key("t", 1.0)); txm::Reading rd; rd.fwd_w = 25; g.report(rd); CHECK(!g.keyed()); CHECK(g.last_unkey_reason().find("forward power") != std::string::npos);
+    CHECK(g.key("t", 1.0)); rd = {}; rd.fwd_w = 1.5; rd.swr = 9.0; g.report(rd); CHECK(g.keyed());   // too little power to judge the SWR
+    rd.fwd_w = 10; g.report(rd); CHECK(!g.keyed()); CHECK(g.last_unkey_reason().find("SWR") != std::string::npos);
+    { GateConfig c2; c2.max_rev_w = 20; c2.max_swr = 1e9; TxGate g2(r.fx, c2, r.clk.clock()); g2.arm(); CHECK(g2.key("t", 1.0));
+      rd = {}; rd.fwd_w = 16; rd.rev_w = 11; rd.swr = 11.2; g2.report(rd); CHECK(g2.keyed());          // a tune's extreme mismatch: below the reflected limit, keeps going
+      rd.rev_w = 21; g2.report(rd); CHECK(!g2.keyed()); CHECK(g2.last_unkey_reason().find("reflected") != std::string::npos); }
+    CHECK(g.key("t", 1.0)); g.disarm(); CHECK(!g.keyed()); CHECK(!g.armed()); CHECK(!g.key("t", 1.0));
+    { Rig r2; TxGate g2(r2.fx, {}, r2.clk.clock()); g2.arm(); g2.key("t", 1.0); CHECK(r2.sim.keyed); }   // (the destructor unkeys: checked below)
+    Rig r3; { TxGate g3(r3.fx, {}, r3.clk.clock()); g3.arm(); g3.key("t", 1.0); } CHECK(!r3.sim.keyed); CHECK(!r3.fx.safety().tx_grant());
+}
+TEST(tx_gate_unkeys_even_when_the_link_fails) {
+    Rig r; TxGate g(r.fx, {}, r.clk.clock()); g.arm(); CHECK(g.key("t", 1.0));
+    r.bus.stuck = true; r.bus.mem[kPalCmd] = be({kPalBusy});                                          // the mailbox stops answering
+    g.unkey("link test"); CHECK(!g.keyed()); CHECK(!r.fx.safety().tx_grant());
+    CHECK(g.log().back().find("SET_MOX 0 FAILED") != std::string::npos);                              // and says so
+}
+
+// ---------------------------------------------------------------- a whole tune
+TEST(atu_tune_passes_like_the_third_tune_of_the_capture) {
+    Rig r; atu::Atu a(r.fx, r.clk.clock()); TxGate g(r.fx, {}, r.clk.clock()); g.arm(); TuneMeter m;
+    auto o = run_atu_tune(g, a, cal20(), 5, 1.5, true, 1, [] { return true; }, &m);
+    CHECK(o); CHECK(o->result == atu::Atu::TuneResult::Pass);
+    CHECK_EQ(*o->status.ind, 30); CHECK_EQ(*o->status.cap, 7); CHECK_EQ(*o->status.hiz, 1); CHECK_NEAR(*o->status.fwd_w, 10.6, 1e-9); CHECK_NEAR(*o->status.threshold, 1.5, 1e-9);
+    CHECK(!g.keyed()); CHECK(!r.sim.keyed);
+    // order: TX mode CWU, key, threshold, full tune, ..., unkey, mode back
+    std::vector<uint32_t> ops; for (auto& w : write_ops(r.bus)) ops.push_back(w.op);
+    auto at = [&](uint32_t op, size_t from = 0) { for (size_t i = from; i < ops.size(); ++i) if (ops[i] == op) return i; return ops.size(); };
+    const size_t mode = at(opv("RDAL_OP_SET_TX_DSP_MODE")), key = at(opv("RDAL_OP_SET_MOX")), send = at(opv("RDAL_OP_ATU_SEND_CMD")), unkey = at(opv("RDAL_OP_SET_MOX"), key + 1), mode2 = at(opv("RDAL_OP_SET_TX_DSP_MODE"), mode + 1);
+    CHECK(mode < key && key < send && send < unkey && unkey < mode2 && mode2 < ops.size());
+    auto modes = sent(r, "RDAL_OP_SET_TX_DSP_MODE"); CHECK_EQ(modes[0].d1, 4u); CHECK_EQ(modes[1].d1, 1u);
+    auto sends = sent(r, "RDAL_OP_ATU_SEND_CMD"); CHECK_EQ(sends[0].d1, atu::send_d1(atu::SWR15)); CHECK_EQ(sends[1].d1, atu::send_d1(atu::FULL_TUNE));   // threshold sent right before the tune
+    CHECK_NEAR(m.max_fwd_w, 11.4, 0.3);                                                               // the PA meter on the capture's readings (tuner: 10.6 W)
+    CHECK(o->seconds < g.config().max_key_s);
+    // the carrier hook: on only while keyed
+    Rig r2; atu::Atu a2(r2.fx, r2.clk.clock()); TxGate g2(r2.fx, {}, r2.clk.clock()); g2.arm(); std::vector<std::pair<bool, bool>> ev;   // (carrier on?, keyed then?)
+    run_atu_tune(g2, a2, cal20(), 5, 1.5, true, 1, [] { return true; }, nullptr, nullptr, [&](bool on) { ev.push_back({on, r2.sim.keyed}); });
+    CHECK_EQ(ev.size(), size_t(2)); CHECK(ev[0].first && ev[0].second); CHECK(!ev[1].first && ev[1].second); CHECK(!r2.sim.keyed);
+}
+TEST(atu_tune_fail_no_carrier_and_no_answer_all_end_unkeyed) {
+    { Rig r; r.sim.best_swr = 1.8; atu::Atu a(r.fx, r.clk.clock()); TxGate g(r.fx, {}, r.clk.clock()); g.arm();
+      auto o = run_atu_tune(g, a, cal20(), 5, 1.1, true, 1, [] { return true; });
+      CHECK(o && o->result == atu::Atu::TuneResult::Fail); CHECK_EQ(int(o->fail_reason), 2); CHECK(!r.sim.keyed); }
+    { Rig r; atu::Atu a(r.fx, r.clk.clock()); TxGate g(r.fx, {}, r.clk.clock()); g.arm(); std::string why;
+      CHECK(!run_atu_tune(g, a, cal20(), 5, 1.5, true, 1, [] { return false; }, nullptr, &why)); CHECK(why.find("carrier") != std::string::npos);
+      CHECK(write_ops(r.bus).empty()); }                                                              // nothing at all is sent without a tune carrier
+    { Rig r; atu::Atu a(r.fx, r.clk.clock()); TxGate g(r.fx, {}, r.clk.clock()); std::string why;
+      CHECK(!run_atu_tune(g, a, cal20(), 5, 1.5, true, 1, [] { return true; }, nullptr, &why)); CHECK(write_ops(r.bus).empty()); }   // not armed
+    { Rig r; r.sim.silent = true; atu::Atu a(r.fx, r.clk.clock()); GateConfig c; c.max_key_s = 3.0; TxGate g(r.fx, c, r.clk.clock()); g.arm();
+      auto o = run_atu_tune(g, a, cal20(), 5, 1.5, true, 1, [] { return true; });
+      CHECK(o && o->result == atu::Atu::TuneResult::Timeout); CHECK(!r.sim.keyed); CHECK(g.last_unkey_reason().find("time limit") != std::string::npos);
+      CHECK(o->seconds <= 3.5); }
+    { Rig r; r.sim.adc_fwd = 2300; atu::Atu a(r.fx, r.clk.clock()); TxGate g(r.fx, {}, r.clk.clock()); g.arm();   // the drive runs away: the power cap stops it
+      auto o = run_atu_tune(g, a, cal20(), 5, 1.5, true, 1, [] { return true; });
+      CHECK(o && o->result != atu::Atu::TuneResult::Pass); CHECK(!r.sim.keyed); CHECK(g.last_unkey_reason().find("forward power") != std::string::npos); }
+}
+
+// ---------------------------------------------------------------- meters
+TEST(pa_meter_hits_the_calibration_points_and_reads_swr) {
+    const txm::PaCal c = cal20();
+    for (int j = 0; j < 6; ++j) { const double p[6] = {1, 2, 5, 10, 20, 90}; const int adc = int(std::lround(c.bridge[5][size_t(j)] / 2.5 * 4096)); CHECK_NEAR(txm::watts(c, 5, adc), p[j], p[j] * 0.01 + 0.02); }
+    double last = 0; for (int adc = 2; adc < 4096; adc += 37) { const double w = txm::watts(c, 5, adc); CHECK(w >= last); last = w; }   // monotonic, incl. the >90 W extrapolation
+    CHECK_EQ(txm::watts(c, 5, 1), 0.0); CHECK_EQ(txm::watts(c, -1, 900), 0.0); CHECK_EQ(txm::watts(c, 11, 900), 0.0);
+    auto r = txm::read(c, 5, 966, 238); CHECK_NEAR(r.fwd_w, 11.45, 0.1); CHECK_NEAR(r.rev_w, 0.96 * 0.983, 0.05); CHECK(r.swr); CHECK(*r.swr > 1.5 && *r.swr < 2.0);
+    CHECK(!txm::read(c, 5, 200, 100).swr);                                                            // under 1 W: no SWR
+    CHECK_NEAR(*txm::read(c, 5, 966, 966).swr, 25.0, 1e-9);                                           // reflected >= forward: shown as 25
+    txm::PaCal bad; CHECK_EQ(txm::watts(bad, 5, 900), 0.0); CHECK(!txm::read(bad, 5, 900, 100).swr);  // no calibration: no meter
+}
+TEST(pa_meter_calibration_comes_from_the_eeprom_or_not_at_all) {
+    Decoded d; TableResult b; b.name = "PA bridge"; b.pointer_ok = b.checksum_ok = true; TableResult s; s.name = "PA SWR"; s.pointer_ok = s.checksum_ok = true;
+    for (int i = 0; i < 11; ++i) { b.values.push_back({0.15, 0.22, 0.37, 0.54, 0.81, 1.78}); s.values.push_back({1.0 + 0.05 * i}); }
+    d.tables = {b, s}; auto c = txm::PaCal::from_eeprom(d); CHECK(c.valid); CHECK_NEAR(c.rev_corr[10], 1.5, 1e-9);
+    d.tables[0].values[3][2] = 0.1; CHECK(!txm::PaCal::from_eeprom(d).valid);                          // not increasing
+    d.tables[0].values[3][2] = 0.37; d.tables[1].checksum_ok = false; CHECK(!txm::PaCal::from_eeprom(d).valid);
+    d.tables.pop_back(); CHECK(!txm::PaCal::from_eeprom(d).valid);
+    const auto img = read_bin("trx.bin"); auto real = txm::PaCal::from_eeprom(decode_eeprom(img)); (void)real;   // the test image decodes without throwing
+}
+TEST(tx_bands_match_the_eeprom_rows) {
+    CHECK_EQ(txm::band_of(1.85e6), 0); CHECK_EQ(txm::band_of(3.575e6), 1); CHECK_EQ(txm::band_of(7.074e6), 3); CHECK_EQ(txm::band_of(14.3354e6), 5);
+    CHECK_EQ(txm::band_of(50.313e6), 10); CHECK_EQ(txm::band_of(9.0e6), -1); CHECK_EQ(txm::band_of(144.0e6), -1);
+    for (int b = 0; b < txm::kBands; ++b) CHECK_EQ(txm::band_from_name(txm::band_name(b)), b);
+    CHECK_EQ(txm::band_from_name("2m"), -1);
+}
+
+// ---------------------------------------------------------------- per-band memory
+TEST(atu_memory_round_trips_and_skips_damaged_lines) {
+    atu::Memory m; atu::Setting s; s.ind = 30; s.cap = 7; s.hiz = true; s.swr = 1.0; s.fwd_w = 10.6; s.freq_hz = 14335400; s.utc = "2026-11-18T23:15:23Z";
+    m.store(5, s); atu::Setting t = s; t.ind = 12; t.hiz = false; t.utc = ""; m.store(3, t); m.store(11, s); m.store(-1, s);
+    CHECK_EQ(m.all().size(), size_t(2));
+    const std::string txt = m.to_text(); CHECK(txt.find("band=20m ind=30 cap=7 hiz=1") != std::string::npos);
+    int bad = -1; auto back = atu::Memory::from_text(txt + "garbage\nband=17m ind=200 cap=1 hiz=0\nband=99m ind=1 cap=1 hiz=0\nband=15m ind=x cap=1 hiz=0\n# comment\n\n", &bad);
+    CHECK_EQ(bad, 4); CHECK_EQ(back.all().size(), size_t(2));
+    auto r = back.recall(5); CHECK(r); CHECK_EQ(r->ind, 30); CHECK_EQ(r->cap, 7); CHECK(r->hiz); CHECK_NEAR(r->fwd_w, 10.6, 1e-9); CHECK_EQ(r->utc, std::string("2026-11-18T23:15:23Z"));
+    CHECK(!back.recall(3)->hiz); CHECK(back.recall(3)->utc.empty()); CHECK(!back.recall(0));
+    back.forget(5); CHECK(!back.recall(5));
+}
+
+// ---------------------------------------------------------------- stage 3 pieces: bias / carrier null from the EEPROM, the I/Q output
+#include "fireside/tx_out.h"
+#include "fireside/tx_setup.h"
+namespace {
+// The author's own radio's EEPROM image (never committed: backups/ is git-ignored). Make backups/reference_trx.bin a copy or symlink of your radio's F5K_<serial>_<time>_trx.bin; without it these tests skip.
+// Several checks compare against what PowerSDR wrote to the author's radio, so another radio's image will not match them.
+const char* kBackup = FIRESIDE_SOURCE_DIR "/../backups/reference_trx.bin";
+std::vector<uint8_t> backup_image() { std::ifstream in(kBackup, std::ios::binary); return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); }
+}  // namespace
+TEST(tx_setup_from_this_radios_eeprom_matches_the_powersdr_capture) {
+    const auto img = backup_image(); if (img.empty()) { std::printf("  (skipped: no EEPROM backup in this checkout)\n"); return; }
+    const auto c = txs::from_image(img); CHECK(c.valid);
+    const uint8_t want[8] = {0xEB, 0x85, 0xE8, 0x87, 0xEB, 0x80, 0xE5, 0x83};                         // what PowerSDR wrote (capture, 35388 ms)
+    for (int i = 0; i < 8; ++i) CHECK_EQ(int(c.bias_pots[size_t(i)]), int(want[i]));
+    CHECK_NEAR(c.power[5][0], 0.0116, 1e-4); CHECK_NEAR(c.power[5][12], 0.0725, 1e-4);
+    CHECK_NEAR(txs::drive_for_watts(c, 5, 1.0), 0.0116 / 2.23, 1e-4); CHECK_NEAR(txs::drive_for_watts(c, 5, 100), 0.0725 / 2.23, 1e-4);
+    double last = 0; for (double w = 0.1; w <= 100; w *= 1.1) { const double d = txs::drive_for_watts(c, 5, w); CHECK(d >= last); last = d; }
+    CHECK_EQ(txs::drive_for_watts(c, 5, 1000), txs::drive_for_watts(c, 5, 100)); CHECK_EQ(txs::drive_for_watts(c, 5, 0), 0.0); CHECK_EQ(txs::drive_for_watts(c, -1, 5), 0.0);
+    CHECK(!c.carrier.empty()); (void)txs::carrier_word(c, 14.3354);
+    auto blank = img; for (int i = 0; i < 8; ++i) blank[0x2C0 + size_t(i)] = 0xFF; CHECK(!txs::from_image(blank).valid);   // never bias from a blank table
+    auto noflag = img; noflag[0x3F] = 0xFF; CHECK(!txs::from_image(noflag).valid);
+}
+TEST(safety_gate_allows_bias_and_carrier_pots_only_with_the_eeprom_values) {
+    Rig r; Safety& s = r.fx.safety(); s.permit("RDAL_OP_PA_POT_SET_RDAC"); s.permit("RDAL_OP_SET_TRX_POT");
+    CHECK_THROWS(r.fx.set("RDAL_OP_PA_POT_SET_RDAC", 0, 0xEB), SafetyError);                       // not calibrated yet: refused
+    s.set_tx_calibration({0xEB, 0x85, 0xE8, 0x87, 0xEB, 0x80, 0xE5, 0x83}, {0x807B867Eu});
+    r.fx.set("RDAL_OP_PA_POT_SET_RDAC", 0, 0xEB); r.fx.set("RDAL_OP_PA_POT_SET_RDAC", 7, 0x83); r.fx.set("RDAL_OP_SET_TRX_POT", double(0x807B867Eu), 0);
+    CHECK_THROWS(r.fx.set("RDAL_OP_PA_POT_SET_RDAC", 0, 0xEC), SafetyError); CHECK_THROWS(r.fx.set("RDAL_OP_PA_POT_SET_RDAC", 8, 0xEB), SafetyError);
+    CHECK_THROWS(r.fx.set("RDAL_OP_PA_POT_SET_RDAC", 1, 0x7A), SafetyError);                       // the raw byte on an odd pot is NOT the reviewed value
+    CHECK_THROWS(r.fx.set("RDAL_OP_SET_TRX_POT", double(0x807B867Fu), 0), SafetyError);
+    s.unpermit("RDAL_OP_PA_POT_SET_RDAC"); CHECK_THROWS(r.fx.set("RDAL_OP_PA_POT_SET_RDAC", 0, 0xEB), SafetyError);
+}
+TEST(tx_setup_writes_the_eight_pots_in_order_and_nothing_else) {
+    const auto img = backup_image(); if (img.empty()) return;
+    Rig r; const auto c = txs::from_image(img); txs::write_bias(r.fx, c);
+    auto w = write_ops(r.bus); CHECK_EQ(w.size(), size_t(8));
+    for (size_t i = 0; i < 8; ++i) { CHECK_EQ(w[i].op, opv("RDAL_OP_PA_POT_SET_RDAC")); CHECK_EQ(w[i].d1, uint32_t(i)); CHECK_EQ(w[i].d2, uint32_t(c.bias_pots[i])); }
+    CHECK(!r.fx.safety().permitted("RDAL_OP_PA_POT_SET_RDAC"));
+    txs::write_carrier_null(r.fx, c, 14.3354); CHECK_EQ(write_ops(r.bus).back().op, opv("RDAL_OP_SET_TRX_POT"));
+    txs::TxCal bad; CHECK_THROWS(txs::write_bias(r.fx, bad), std::invalid_argument);
+}
+TEST(tx_output_is_zero_unless_keyed_and_never_above_the_cap) {
+    txo::ToneSource src(48000, 8); std::vector<int32_t> b(4800 * 8);
+    auto peak = [&](int ch) { int64_t m = 0; for (size_t f = 0; f < 4800; ++f) m = std::max<int64_t>(m, std::llabs(int64_t(b[f * 8 + size_t(ch)]))); return double(m) / 2147483647.0; };
+    src.set_cap(0.01); src.set_target(0.5); src.set_tone_hz(1000); src.fill(b.data(), 4800);
+    for (auto v : b) CHECK_EQ(v, 0);                                                                  // unkeyed: everything zero, whatever the target
+    src.set_keyed(true); src.fill(b.data(), 4800);
+    CHECK(peak(0) <= 0.01 + 1e-9 && peak(1) <= 0.01 + 1e-9); CHECK(peak(0) > 0.0099);               // clamped to the cap
+    for (int ch = 2; ch < 8; ++ch) CHECK_EQ(peak(ch), 0.0);                                         // only ch0/1 ever carry anything
+    src.set_cap(1.0); CHECK_NEAR(src.cap(), txs::kAbsoluteMaxDrive, 1e-12);                          // the absolute ceiling
+    txo::ToneSource s2(48000, 8); s2.set_cap(0.04); s2.set_target(0.02); s2.set_keyed(true); s2.fill(b.data(), 48);   // 1 ms: still ramping (5 ms slew)
+    CHECK(s2.level() < 0.02 * 0.5); s2.fill(b.data(), 480); CHECK_NEAR(s2.level(), 0.02, 1e-12);
+    s2.set_keyed(false); s2.fill(b.data(), 1); CHECK_EQ(b[0], 0); CHECK_EQ(s2.level(), 0.0);
+    txo::ToneSource dc(48000, 8); dc.set_cap(0.04); dc.set_target(0.01); dc.set_tone_hz(0); dc.set_keyed(true); dc.fill(b.data(), 4800);   // 0 Hz: a carrier on the DDS
+    CHECK_NEAR(double(b[4799 * 8]) / 2147483647.0, 0.01, 1e-6); CHECK_EQ(b[4799 * 8 + 1], 0);
+}
+
+// ---------------------------------------------------------------- TxControl (GUI + firesidekey) on the simulated radio
+#include <mutex>
+#include <thread>
+#include "fireside/session.h"
+#include "fireside/tx_control.h"
+namespace {
+// A playback device that keeps the peak of ch0 of what was last written: the simulated PA turns it into forward power (k W per drive^2).
+struct SimPcm : IPcmOut {
+    std::atomic<double>* level; explicit SimPcm(std::atomic<double>* l) : level(l) {}
+    int channels() const override { return 8; } double rate() const override { return 48000; } std::string describe() const override { return "sim"; }
+    size_t write(const int32_t* x, size_t n) override {
+        double pk = 0; for (size_t f = 0; f < n; ++f) { pk = std::max(pk, std::fabs(double(x[f * 8]) / 2147483647.0)); for (int c = 2; c < 8; ++c) if (x[f * 8 + size_t(c)] != 0) throw std::logic_error("a channel other than ch0/1 carried samples"); }
+        level->store(pk); std::this_thread::sleep_for(std::chrono::microseconds(int64_t(1e6 * double(n) / rate()))); return n;   // real time, like a sound card
+    }
+};
+struct TxRig : Rig {
+    txs::TxCal cal; std::unique_ptr<txc::TxControl> tx;
+    TxRig() {
+        cal = txs::from_image(backup_image()); sim.pa_from_level = true; sim.meter = cal.meter; sim.rev_frac = 0.02;
+        tx = std::make_unique<txc::TxControl>(fx, [this](double) { return std::unique_ptr<IPcmOut>(new SimPcm(&sim.level)); }, atu::real_clock());   // real time: the sample stream runs on its own thread
+        tx->set_k(5, 11150);                                       // this radio's measured 20 m drive (there is no built-in default)
+    }
+};
+}  // namespace
+TEST(tx_control_arms_only_on_an_eeprom_identical_to_the_backup) {
+    const auto img = backup_image(); if (img.empty()) return;
+    TxRig r; auto other = img; other[0x200] ^= 1;
+    CHECK_THROWS(r.tx->arm(other, img), std::runtime_error); CHECK(!r.tx->armed()); CHECK(write_ops(r.bus).empty());
+    CHECK_THROWS(r.tx->arm(img, {}), std::runtime_error);
+    r.tx->arm(img, img); CHECK(r.tx->armed()); CHECK_EQ(write_ops(r.bus).size(), size_t(8));       // the 8 bias pots and nothing else
+    auto rr = r.tx->ramp(14.336, 2.0, {}); (void)rr;
+    r.tx->retire(); CHECK(!r.tx->armed()); CHECK_THROWS(r.tx->arm(img, img), std::runtime_error);
+    const size_t n = write_ops(r.bus).size(); auto t = r.tx->tune(14.336, 3, 1.5, {}); CHECK(!t.outcome); CHECK(!t.why_not.empty()); CHECK_EQ(write_ops(r.bus).size(), n);
+}
+TEST(tx_control_ramp_reaches_the_target_and_measures_the_drive) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image());
+    std::vector<double> fwd; auto res = r.tx->ramp(14.336, 2.0, {}, [&](const txc::Progress& p) { fwd.push_back(p.rd.fwd_w); });
+    CHECK(res.reached); CHECK(res.max_fwd_w < 3.0 && res.max_fwd_w >= 1.6); CHECK(!r.sim.keyed); CHECK(!r.tx->keyed());
+    CHECK_NEAR(res.k, 11150, 1500); CHECK_NEAR(r.tx->k_for(5), res.k, 1e-9);
+    CHECK(!fwd.empty());
+    TxRig d; d.sim.dead_pa = true; d.tx->arm(backup_image(), backup_image());                           // nothing comes out: stops at the 1 W drive point
+    auto dr = d.tx->ramp(14.336, 2.0, {}); CHECK(!dr.reached); CHECK(dr.stop.find("5 mW") != std::string::npos); CHECK(!d.sim.keyed);
+    CHECK(!r.tx->ramp(9.0, 2.0, {}).reached); CHECK(!r.tx->ramp(14.336, 16.0, {}).reached);            // outside a band / target above 5 W: refused
+    {   // the sample stream dies while keyed (the playback device fails after ~1 s): unkey at once
+        struct DyingPcm : SimPcm { int left = 100; using SimPcm::SimPcm; size_t write(const int32_t* x, size_t n) override { if (--left < 0) throw IoError("device gone"); return SimPcm::write(x, n); } };
+        TxRig s2; s2.tx = std::make_unique<txc::TxControl>(s2.fx, [&s2](double) { return std::unique_ptr<IPcmOut>(new DyingPcm(&s2.sim.level)); }, atu::real_clock());
+        s2.tx->set_k(5, 11150); s2.tx->arm(backup_image(), backup_image());
+        auto sr = s2.tx->ramp(14.336, 2.0, {}); CHECK(!sr.reached); CHECK(sr.stop.find("stream failed") != std::string::npos); CHECK(!s2.sim.keyed);
+    }
+}
+TEST(tx_control_tune_passes_saves_the_band_and_aborts_on_request) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); r.sim.tune_time_polls = 30;
+    auto t = r.tx->tune(14.336, 3.0, 1.5, {});
+    CHECK(t.outcome && t.outcome->result == atu::Atu::TuneResult::Pass); CHECK(t.saved); CHECK_EQ(t.saved->ind, 30); CHECK(!r.sim.keyed);
+    CHECK(r.tx->memory().recall(5)); CHECK(t.max_fwd_w > 2.0 && t.max_fwd_w < 5.0);
+    r.sim.ind = 0; r.sim.cap = 0; CHECK(r.tx->restore_relays(5)); CHECK_EQ(r.sim.ind, 30); CHECK_EQ(r.sim.cap, 7);   // no RF: relays back from memory
+    CHECK(!r.tx->tune(14.336, 16, 1.5, {}).outcome);                                                   // > 15 W: refused
+    auto t40 = r.tx->tune(7.1, 3.0, 1.5, {});                                                          // 40 m, never measured: the table's drive (errs low)
+    CHECK(t40.outcome && t40.estimated_drive); CHECK(t40.max_fwd_w < 3.0); CHECK(!r.sim.keyed);
+    TxRig f; f.tx->arm(backup_image(), backup_image()); r.bus.stuck = false;                          // the unkey that never gets through is reported, not hidden
+    { GateConfig gc; TxGate g(f.fx, gc, atu::real_clock()); g.arm(); CHECK(g.key("t", 1.0)); f.bus.stuck = true; f.bus.mem[kPalCmd] = be({kPalBusy});
+      g.unkey("test"); CHECK(g.unkey_failed()); CHECK(g.last_unkey_reason().find("may still be keyed") != std::string::npos); f.bus.stuck = false; f.bus.mem[kPalCmd] = be({0}); }
+    TxRig a; a.tx->arm(backup_image(), backup_image()); a.sim.silent = true; std::atomic<int> polls{0};   // abort from the GUI thread while keyed
+    auto ab = a.tx->tune(14.336, 3.0, 1.5, {}, [&](const txc::Progress&) { if (++polls == 5) a.tx->abort(); });
+    CHECK(ab.outcome && ab.outcome->result != atu::Atu::TuneResult::Pass); CHECK(ab.stop.find("abort") != std::string::npos); CHECK(!a.sim.keyed);
+}
+TEST(drive_calibration_has_no_default_and_round_trips_as_text) {
+    FakeDiceBus bus; flex_defaults(bus); PalMailbox mb(bus, ByteOrder::Big, 1.0, 0); Flex fx(mb); txc::TxControl t(fx, [](double) { return std::unique_ptr<IPcmOut>(); });
+    for (int b = 0; b < txm::kBands; ++b) CHECK_EQ(t.k_for(b), 0.0);                                        // nothing assumed for any band
+    auto m = txc::parse_drive_text("band=20m k=11150\nband=40m k=9800\nband=99m k=5\njunk\nband=17m k=12\n");
+    CHECK_EQ(m.size(), size_t(2)); CHECK_EQ(m[5], 11150.0); CHECK_EQ(m[3], 9800.0);
+    CHECK(txc::parse_drive_text(txc::drive_text(m)) == m);
+    t.set_all_k(m); CHECK_EQ(t.k_for(5), 11150.0);
+}
+TEST(session_owns_the_transmit_controller_and_retires_it_on_shutdown) {
+    FakeDiceBus bus; flex_defaults(bus);
+    RadioSession s([&](const std::string&) { return std::unique_ptr<BusHandle>(new FakeHandle(bus)); }, [](double) {});
+    SessionOptions o; o.path = "/dev/fw1"; o.allow_write = true; s.connect(o);
+    auto pcm = [](double) -> std::unique_ptr<IPcmOut> { return nullptr; };
+    CHECK(!s.transmit(pcm)); s.start(14.336, "ANT1"); auto tx = s.transmit(pcm); CHECK(tx != nullptr); CHECK(s.transmit(pcm) == tx);
+    s.shutdown(); CHECK(tx->retired()); CHECK(!s.transmit(pcm)); s.disconnect();
+}
+TEST(tx_image_correction_suppresses_the_unwanted_sideband_of_a_modelled_exciter) {
+    // An exciter whose imbalance is exactly what the EEPROM's 20 m correction undoes (the inverse of DttSP's TX correctIQ): I_hw = I / g, Q_hw = Q - ph * I_hw.
+    const double gu = -33.0, pu = 0.12, g = 1 + 0.001 * gu, ph = 0.001 * pu;
+    auto image_db = [&](bool corrected) {
+        txo::ToneSource s(48000, 8); s.set_cap(0.04); s.set_target(0.01); s.set_tone_hz(1500); s.set_keyed(true); if (corrected) s.set_correction(gu, pu);
+        std::vector<int32_t> b(4800 * 8); s.fill(b.data(), 4800); s.fill(b.data(), 4800);     // second block: past the 5 ms ramp
+        std::complex<double> up = 0, dn = 0;
+        for (size_t n = 0; n < 4800; ++n) {
+            const double i = b[n * 8] / 2147483647.0, q = b[n * 8 + 1] / 2147483647.0, ih = i / g, qh = q - ph * ih;
+            const std::complex<double> x(ih, qh), e = std::polar(1.0, 2 * M_PI * 1500.0 * double(n) / 48000.0);
+            up += x * std::conj(e); dn += x * e;                                                    // +1500 Hz (wanted) and -1500 Hz (image)
+        }
+        return 20 * std::log10(std::abs(dn) / std::abs(up));
+    };
+    const double raw = image_db(false), fixed = image_db(true);
+    CHECK(raw > -45 && raw < -30);                                  // this radio's 20 m imbalance uncorrected: image ~36 dB down
+    CHECK(fixed < -80);                                             // corrected: gone
+    const auto img = backup_image(); if (img.empty()) return;
+    const auto c = txs::from_image(img); CHECK_NEAR(c.image_gain[5], -33.0, 1e-6); CHECK_NEAR(c.image_phase[5], 0.125, 1e-6); CHECK_NEAR(c.image_gain[10], 35.0, 1e-6);
+}
+
+// ---------------------------------------------------------------- FT8 / FT4 transmit: what goes out decodes, on time, at the set power
+#include "fireside/decode.h"
+#include "fireside/dsp.h"
+namespace {
+double wall_utc() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+struct CapPcm : SimPcm {                                    // also keeps every frame (ch0/ch1) with the (shifted) UTC of each write
+    double r; std::vector<std::complex<double>>* iq; std::vector<std::pair<double, size_t>>* marks; std::function<double()> utc;
+    CapPcm(std::atomic<double>* l, double rate, std::vector<std::complex<double>>* x, std::vector<std::pair<double, size_t>>* m, std::function<double()> u) : SimPcm(l), r(rate), iq(x), marks(m), utc(std::move(u)) {}
+    double rate() const override { return r; }
+    size_t write(const int32_t* x, size_t n) override {
+        marks->push_back({utc(), iq->size()});
+        for (size_t f = 0; f < n; ++f) iq->push_back({x[f * 8] / 2147483647.0, x[f * 8 + 1] / 2147483647.0});
+        return SimPcm::write(x, n);
+    }
+};
+}  // namespace
+TEST(ft4_transmission_decodes_on_time_at_the_set_power) {
+    if (backup_image().empty()) return;
+    for (double rate : {48000.0, 96000.0}) {
+        TxRig r; std::vector<std::complex<double>> iq; std::vector<std::pair<double, size_t>> marks;
+        const double now = wall_utc(), slot = 7.5, next = std::ceil(now / slot) * slot; const double shift = (next - 3.5) - now;   // a slot starts ~3.5 s from "now" (rendering + 1.5 s lead)
+        auto utc = [shift] { return wall_utc() + shift; };
+        r.tx = std::make_unique<txc::TxControl>(r.fx, [&](double) { return std::unique_ptr<IPcmOut>(new CapPcm(&r.sim.level, rate, &iq, &marks, utc)); }, atu::real_clock());
+        r.tx->set_utc_source(utc); r.tx->set_k(5, 8000);                                     // drive level 40 % wrong: the closed loop must fix the power
+        r.tx->arm(backup_image(), backup_image());
+        const tx::Parity par = (long long)(std::llround(next / slot)) % 2 ? tx::Parity::Odd : tx::Parity::Even;
+        txc::Options o; o.rate = rate;
+        auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, true, par, 5.0, o);
+        CHECK(res.sent); CHECK(!r.sim.keyed); CHECK_NEAR(res.slot_utc, next, 1e-3);
+        CHECK_NEAR(res.mean_fwd_w, 5.0, 0.6);                                                // the loop brought it to the set power
+        CHECK(r.tx->k_for(5) > 8000 && r.tx->k_for(5) < 11150 * 1.05);                        // and the band's drive level learned towards the truth (11 150)
+        // decode what went out: undo the mirror, slot start from the write times, USB audio = Re{z}, 12 kHz
+        size_t s0 = 0; for (auto& m : marks) if (m.first <= res.slot_utc) s0 = m.second + size_t(std::lround((res.slot_utc - m.first) * rate));
+        std::vector<dsp::cf> z; for (size_t i = s0; i < iq.size() && i < s0 + size_t(7.5 * rate); ++i) z.push_back(dsp::cf(float(iq[i].real()), float(-iq[i].imag())));
+        dsp::RationalResampler rs(rate, 12000); std::vector<dsp::cf> y; z.resize(z.size() + 2000); rs.process(z.data(), z.size(), y);
+        std::vector<float> audio; for (auto& v : y) audio.push_back(v.real() * 50);
+        auto msgs = decode::Ft8Decoder::decode_slot(audio.data(), std::min(audio.size(), size_t(90000)), "", true);
+        bool found = false; for (auto& m : msgs) if (m.text == "CQ M0OML IO91") { found = true; CHECK_NEAR(m.freq, 1500, 10); CHECK(std::fabs(m.dt) < 0.1); }   // dt: WSJT-X convention (0 = the nominal start)
+        CHECK(found);
+    }
+}
+TEST(ft_send_refuses_what_it_cannot_send_and_stops_on_abort) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o;
+    CHECK(!r.tx->send_ft(14.080, "THIS IS NOT FT8 !!!", 1500, false, tx::Parity::Even, 5, o).sent);
+    CHECK(!r.tx->send_ft(14.349, "CQ M0OML IO91", 2000, false, tx::Parity::Even, 5, o).sent);         // would end above the band edge
+    CHECK(!r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, false, tx::Parity::Even, 30, o).sent);        // > 25 W
+    CHECK(write_ops(r.bus).size() == 8);                                                               // nothing but the arm's bias pots went out
+    const double now = wall_utc(), next = std::ceil(now / 15.0) * 15.0, shift = (next - 3.0) - now;
+    r.tx->set_utc_source([shift] { return wall_utc() + shift; });
+    std::thread t([&] { std::this_thread::sleep_for(std::chrono::milliseconds(4500)); r.tx->abort(); });
+    const tx::Parity par = (long long)(std::llround(next / 15.0)) % 2 ? tx::Parity::Odd : tx::Parity::Even;
+    auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, false, par, 5, o); t.join();
+    CHECK(!res.sent); CHECK(res.stop.find("abort") != std::string::npos); CHECK(!r.sim.keyed);
+}
+
+// ---------------------------------------------------------------- FT8 / FT4 transmit, more: on fast simulated time (x5) so whole FT8 overs stay quick
+namespace {
+constexpr double kSpeed = 5.0;
+// One time base for everything: the TxControl clock (gate timers, sleeps), its UTC source and the playback pacing all run kSpeed x real time.
+struct FastTime {
+    double w0 = wall_utc(), base;                       // simulated UTC at w0
+    explicit FastTime(double utc_start) : base(utc_start) {}
+    double now() const { return base + (wall_utc() - w0) * kSpeed; }
+    atu::Clock clock() const { return {[this] { return now(); }, [](double s) { std::this_thread::sleep_for(std::chrono::duration<double>(std::max(0.0, s) / kSpeed)); }}; }
+};
+// Playback: ch0/ch1 kept with the simulated UTC of each write, the PA level for the simulated radio, nothing allowed on ch2..7; can fail after `fail_after` writes.
+struct FastPcm : IPcmOut {
+    double r; const FastTime& t; std::atomic<double>* level; std::vector<std::complex<double>>& iq; std::vector<std::pair<double, size_t>>& marks; std::atomic<double>& peak; long fail_after; long writes = 0;
+    FastPcm(double rate, const FastTime& ft, std::atomic<double>* l, std::vector<std::complex<double>>& x, std::vector<std::pair<double, size_t>>& m, std::atomic<double>& pk, long fail = -1)
+        : r(rate), t(ft), level(l), iq(x), marks(m), peak(pk), fail_after(fail) {}
+    int channels() const override { return 8; } double rate() const override { return r; } std::string describe() const override { return "fast sim"; }
+    size_t write(const int32_t* x, size_t n) override {
+        if (fail_after >= 0 && ++writes > fail_after) throw std::runtime_error("device gone");
+        marks.push_back({t.now(), iq.size()}); double pk = 0;
+        for (size_t f = 0; f < n; ++f) {
+            for (int c = 2; c < 8; ++c) if (x[f * 8 + size_t(c)] != 0) throw std::logic_error("a channel other than ch0/1 carried samples");
+            const double i = x[f * 8] / 2147483647.0, q = x[f * 8 + 1] / 2147483647.0; iq.push_back({i, q}); pk = std::max({pk, std::fabs(i), std::fabs(q)});
+        }
+        level->store(pk); peak.store(std::max(peak.load(), pk));
+        std::this_thread::sleep_for(std::chrono::duration<double>(double(n) / r / kSpeed)); return n;
+    }
+};
+struct FtRig : Rig {
+    std::unique_ptr<FastTime> ft; std::unique_ptr<txc::TxControl> tx; std::vector<std::complex<double>> iq; std::vector<std::pair<double, size_t>> marks; std::atomic<double> peak{0};
+    double rate; long fail_after = -1;
+    // `utc_start`: the simulated UTC now (pick it relative to a slot boundary)
+    FtRig(double utc_start, double r = 48000) : rate(r) {
+        ft = std::make_unique<FastTime>(utc_start);
+        sim.pa_from_level = true; sim.meter = txs::from_image(backup_image()).meter; sim.rev_frac = 0.02;
+        tx = std::make_unique<txc::TxControl>(fx, [this](double rr) { return std::unique_ptr<IPcmOut>(new FastPcm(rr, *ft, &sim.level, iq, marks, peak, fail_after)); }, ft->clock());
+        tx->set_utc_source([this] { return ft->now(); }); tx->set_k(5, 11150); tx->arm(backup_image(), backup_image());
+    }
+    size_t mox_writes() { return sent(*this, "RDAL_OP_SET_MOX").size(); }
+    // What went out from the slot start, as USB audio at 12 kHz (mirror undone when `unmirror`).
+    std::vector<float> audio(double slot_utc, double seconds, bool unmirror = true) {
+        size_t s0 = 0; for (auto& m : marks) if (m.first <= slot_utc) s0 = m.second + size_t(std::max(0L, std::lround((slot_utc - m.first) * rate)));
+        std::vector<dsp::cf> z;
+        if (!marks.empty() && marks.front().first > slot_utc) z.resize(size_t(std::lround((marks.front().first - slot_utc) * rate)) - marks.front().second);   // the stream began after the slot did
+        for (size_t i = s0; i < iq.size() && i < s0 + size_t(seconds * rate); ++i) z.push_back(dsp::cf(float(iq[i].real()), float(unmirror ? -iq[i].imag() : iq[i].imag())));
+        z.resize(size_t(seconds * rate) + 2000); dsp::RationalResampler rs(rate, 12000); std::vector<dsp::cf> y; rs.process(z.data(), z.size(), y);
+        std::vector<float> a; for (auto& v : y) a.push_back(v.real() * 50); return a;
+    }
+};
+// A UTC `before` seconds ahead of a boundary of a slot of `parity`
+double utc_before_slot(double slot_len, tx::Parity parity, double before, double* slot_start = nullptr) {
+    double s = std::ceil(wall_utc() / slot_len) * slot_len + 2 * slot_len;
+    if ((long long)std::llround(s / slot_len) % 2 != (parity == tx::Parity::Odd ? 1 : 0)) s += slot_len;
+    if (slot_start) *slot_start = s; return s - before;
+}
+bool decodes(const std::vector<float>& a, bool ft4, const std::string& text, double hz, double* dt = nullptr) {
+    for (auto& m : decode::Ft8Decoder::decode_slot(a.data(), std::min(a.size(), size_t(ft4 ? 90000 : 180000)), "", ft4))
+        if (m.text == text && std::fabs(m.freq - hz) < 10) { if (dt) *dt = m.dt; return true; }
+    return false;
+}
+// Energy of z in the +f..+f+bw band against -f..-f-bw (which sideband the signal is on), 6.25 Hz steps over the first second of signal
+double sideband_db(const std::vector<std::complex<float>>& z, double rate, double f, double bw, size_t from) {
+    double up = 0, dn = 0;
+    for (double hz = f - 10; hz <= f + bw + 10; hz += 6.25) {
+        std::complex<double> u, d;
+        for (size_t n = from; n < from + size_t(rate) && n < z.size(); ++n) { const auto e = std::polar(1.0, 2 * M_PI * hz * double(n) / rate); const std::complex<double> x(z[n]); u += x * std::conj(e); d += x * e; }
+        up += std::norm(u); dn += std::norm(d);
+    }
+    return 10 * std::log10(up / std::max(dn, 1e-30));
+}
+}  // namespace
+
+TEST(ft_rendered_messages_decode_for_every_qso_step_both_modes_both_rates) {   // the renderer alone, no radio: what prepare_ft builds is the message
+    const std::vector<std::string> qso = {"CQ M0OML IO91", "DK0ULR M0OML IO91", "M0OML DK0ULR -06", "DK0ULR M0OML R-08", "M0OML DK0ULR RR73", "DK0ULR M0OML 73", "CQ DX M0OML IO91"};
+    int n = 0;
+    for (bool ft4 : {false, true}) for (double rate : {48000.0, 96000.0}) for (size_t i = 0; i < qso.size(); ++i) {
+        const double hz = std::vector<double>{300, 1500, 2700}[(i + (ft4 ? 1 : 0)) % 3];
+        if (rate == 96000 && i % 3) continue;                                                 // 96 kHz: a sample of them (the path is the same)
+        const auto f = txc::TxControl::prepare_ft(qso[i], hz, ft4, rate);
+        CHECK_EQ(f.text, qso[i]); CHECK_NEAR(f.rate, rate, 0); CHECK_EQ(f.ft4, ft4);
+        const double end = 0.5 + (ft4 ? 5.04 : 12.64) + 0.05;                               // silent after the signal: nothing past the slot's signal time
+        for (size_t k = size_t(end * rate); k < f.buf.size(); ++k) if (std::abs(f.buf[k]) > 1e-3) { CHECK(false); break; }
+        double pk = 0; for (auto& v : f.buf) pk = std::max(pk, double(std::abs(v))); CHECK(pk <= 1.05 && pk > 0.95);   // envelope normalised to 1 (FT4: up to +2.5 % resampler overshoot; the hard clamp still applies)
+        const size_t s0 = size_t((0.5 + 1.0) * rate);                                         // a second into the signal
+        CHECK_NEAR(std::abs(f.buf[s0]), 1.0, 0.02);                                           // constant envelope (closed-loop power relies on it)
+        CHECK(sideband_db(f.buf, rate, hz, ft4 ? 85 : 50, s0) > 40);                          // above the carrier: USB, nothing on the image side
+        std::vector<dsp::cf> z(f.buf.begin(), f.buf.end()); z.resize(z.size() + 2000);
+        dsp::RationalResampler rs(rate, 12000); std::vector<dsp::cf> y; rs.process(z.data(), z.size(), y);
+        std::vector<float> a; for (auto& v : y) a.push_back(v.real() * 0.1f);   // within full scale (the decoder takes audio in +-1)
+        double dt = 9; const bool ok = decodes(a, ft4, qso[i], hz, &dt); if (!ok) std::printf("  not decoded: %s %s at %.0f Hz, %.0f kHz\n", ft4 ? "FT4" : "FT8", qso[i].c_str(), hz, rate / 1000); CHECK(ok); CHECK(std::fabs(dt) < 0.1); ++n;
+    }
+    CHECK(n >= 20);
+    CHECK_THROWS(txc::TxControl::prepare_ft("CQ M0OML IO91", 150, false, 48000), std::exception);    // audio outside 200..3000
+    CHECK_THROWS(txc::TxControl::prepare_ft("CQ M0OML IO91", 3100, false, 48000), std::exception);
+    CHECK_THROWS(txc::TxControl::prepare_ft("", 1500, false, 48000), std::exception);         // nothing to send (an empty box in the GUI)
+    CHECK_THROWS(txc::TxControl::prepare_ft("   ", 1500, true, 48000), std::exception);
+}
+
+TEST(ft8_over_decodes_on_time_mirrored_on_the_upper_sideband_within_the_gate) {
+    if (backup_image().empty()) return;
+    const auto f = txc::TxControl::prepare_ft("DK0ULR M0OML IO91", 2500, false, 96000);    // rendered first (as the GUI does): on 5 x time it would eat the lead
+    double slot = 0; FtRig r(utc_before_slot(15, tx::Parity::Odd, 8.0, &slot), 96000);
+    txc::Options o; o.rate = 96000;
+    auto res = r.tx->send_prepared(14.074, f, tx::Parity::Odd, 10.0, o);
+    CHECK(res.sent); CHECK(!res.unkey_failed); CHECK(!r.sim.keyed); CHECK_NEAR(res.slot_utc, slot, 1e-6); CHECK_EQ(res.late_s, 0.0);
+    CHECK_EQ(r.mox_writes(), size_t(2));                                                      // keyed once, unkeyed once
+    CHECK(res.max_fwd_w <= 15.0); CHECK_NEAR(res.mean_fwd_w, 10.0, 1.0);                       // inside the gate's 1.5 x; at the set power
+    CHECK(r.peak.load() <= txs::drive_for_watts(r.tx->cal(), 5, 100.0) + 1e-9);               // never above the hard clamp
+    // the signal starts after the slot start and ends inside the slot
+    double first = 0, last = 0;
+    for (size_t k = 0; k < r.marks.size(); ++k) { const size_t e = k + 1 < r.marks.size() ? r.marks[k + 1].second : r.iq.size(); bool any = false;
+        for (size_t i = r.marks[k].second; i < e; ++i) if (std::abs(r.iq[i]) > 0) { any = true; break; }
+        if (any) { if (!first) first = r.marks[k].first; last = r.marks[k].first; } }
+    CHECK(first > slot && first < slot + 0.6); CHECK(last < slot + 13.4);                    // 0.5 s + 12.64 s of signal (+ block granularity)
+    double dt = 9; CHECK(decodes(r.audio(slot, 15), false, "DK0ULR M0OML IO91", 2500, &dt)); CHECK(std::fabs(dt) < 0.1);
+    // mirrored as the radio needs: on the wire the signal sits BELOW the carrier, un-mirrored above it
+    size_t s0 = 0; for (auto& m : r.marks) if (m.first <= slot + 2.0) s0 = m.second;
+    std::vector<std::complex<float>> wire, plain;
+    for (size_t i = s0; i < s0 + 96000 && i < r.iq.size(); ++i) { wire.push_back(std::complex<float>(r.iq[i])); plain.push_back(std::conj(std::complex<float>(r.iq[i]))); }
+    CHECK(sideband_db(wire, 96000, 2500, 50, 0) < -25); CHECK(sideband_db(plain, 96000, 2500, 50, 0) > 25);
+}
+
+TEST(ft_without_the_mirror_puts_the_signal_above_the_carrier_on_the_wire) {
+    if (backup_image().empty()) return;
+    double slot = 0; FtRig r(utc_before_slot(7.5, tx::Parity::Even, 8.0, &slot));
+    txc::Options o; o.mirror_q = false;
+    auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1000, true, tx::Parity::Even, 5.0, o);
+    CHECK(res.sent); CHECK(decodes(r.audio(slot, 7.5, false), true, "CQ M0OML IO91", 1000));
+}
+
+TEST(ft_closed_loop_raises_a_low_drive_and_the_gate_stops_a_dangerous_one) {
+    if (backup_image().empty()) return;
+    {   // the band's level reads 80 % too high: the drive starts at 2.8 W, the loop brings it up to 5 W, and learns
+        double slot = 0; FtRig r(utc_before_slot(7.5, tx::Parity::Odd, 8.0, &slot)); r.tx->set_k(5, 20000); txc::Options o;
+        auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, true, tx::Parity::Odd, 5.0, o);
+        CHECK(res.sent); CHECK_NEAR(res.mean_fwd_w, 5.0, 0.6); CHECK(r.tx->k_for(5) < 20000 && r.tx->k_for(5) > 11150 * 0.95);
+    }
+    {   // the level reads 1.7 x too low: the first reading is ~8.6 W for a 5 W over (limit 7.5 W): the gate unkeys at once, nothing learned
+        double slot = 0; FtRig r(utc_before_slot(7.5, tx::Parity::Odd, 8.0, &slot)); r.tx->set_k(5, 6500); txc::Options o;
+        auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, true, tx::Parity::Odd, 5.0, o);
+        CHECK(!res.sent); CHECK(!r.sim.keyed); CHECK_EQ(r.mox_writes(), size_t(2)); CHECK(res.stop.find("forward") != std::string::npos);
+        CHECK_NEAR(r.tx->k_for(5), 6500, 1e-9);
+        // and it was short: keyed for well under a second of the over
+        double keyed_s = 0; for (auto& m : r.marks) if (m.first > res.slot_utc && m.second < r.iq.size() && std::abs(r.iq[m.second]) > 0) keyed_s = m.first - res.slot_utc;
+        if (!(keyed_s < 1.5)) std::printf("  keyed %.2f s, stop %s, max %.1f W\n", keyed_s, res.stop.c_str(), res.max_fwd_w); CHECK(keyed_s < 1.5);
+    }
+}
+
+TEST(ft_high_swr_during_the_over_unkeys_and_teaches_nothing) {
+    if (backup_image().empty()) return;
+    double slot = 0; FtRig r(utc_before_slot(7.5, tx::Parity::Even, 8.0, &slot)); txc::Options o;
+    auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, true, tx::Parity::Even, 5.0, o,
+                             [&](const txc::Progress& p) { if (p.t > 2.5) r.sim.rev_frac = 0.6; });    // the antenna goes bad 2.5 s in (SWR ~ 8.8)
+    CHECK(!res.sent); CHECK(!r.sim.keyed); CHECK_EQ(r.mox_writes(), size_t(2));
+    CHECK(res.stop.find("SWR") != std::string::npos || res.stop.find("reflected") != std::string::npos);
+    CHECK_NEAR(r.tx->k_for(5), 11150, 1e-9);
+}
+
+TEST(ft_joins_the_current_slot_up_to_2_s_late_still_on_time) {
+    if (backup_image().empty()) return;
+    double slot = 0; utc_before_slot(15, tx::Parity::Even, 0, &slot);
+    const auto f = txc::TxControl::prepare_ft("CQ M0OML IO91", 1200, false, 48000);
+    FtRig r(slot + 1.2); txc::Options o;                                                      // pressed 1.2 s into an even slot: 0.7 s of the signal already gone
+    auto res = r.tx->send_prepared(14.074, f, tx::Parity::Even, 5.0, o, {}, {}, 0.0);
+    CHECK(res.sent); CHECK_NEAR(res.slot_utc, slot, 1e-6); CHECK(res.late_s > 0.5 && res.late_s < 1.5);
+    double dt = 9; CHECK(decodes(r.audio(slot, 15), false, "CQ M0OML IO91", 1200, &dt)); CHECK(std::fabs(dt) < 0.15);   // what is sent is where it belongs in the slot
+}
+
+TEST(ft_send_refusals_and_failures_leave_the_radio_unkeyed) {
+    if (backup_image().empty()) return;
+    double slot = 0; FtRig r(utc_before_slot(7.5, tx::Parity::Even, 8.0, &slot)); txc::Options o;
+    const auto f48 = txc::TxControl::prepare_ft("CQ M0OML IO91", 1500, true, 48000);
+    o.rate = 96000; CHECK(!r.tx->send_prepared(14.080, f48, tx::Parity::Even, 5, o).sent); o.rate = 48000;   // rendered for another rate
+    CHECK(!r.tx->send_prepared(7.040, txc::TxControl::prepare_ft("CQ M0OML IO91", 1500, true, 48000), tx::Parity::Even, 0.5, o).sent);   // < 1 W
+    CHECK(!r.tx->send_prepared(13.990, f48, tx::Parity::Even, 5, o).sent);                    // dial below 20 m
+    CHECK_EQ(r.mox_writes(), size_t(0));
+    r.tx->disarm(); CHECK(!r.tx->send_prepared(14.080, f48, tx::Parity::Even, 5, o).sent); CHECK_EQ(r.mox_writes(), size_t(0));
+    r.tx->arm(backup_image(), backup_image());
+    r.fail_after = 850;                                                                       // the playback device dies mid-over
+    auto res = r.tx->send_prepared(14.080, f48, tx::Parity::Even, 5, o);
+    CHECK(!res.sent); CHECK(!r.sim.keyed); CHECK(r.mox_writes() <= size_t(2)); CHECK(!r.tx->keyed());
+}
+TEST(tx_key_hook_runs_right_before_mox_on_and_right_after_mox_off) {   // the session moves the shared RX1/TX DDS onto the dial for the over (as PowerSDR)
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image());
+    std::vector<std::pair<bool, size_t>> ev;                                        // (keyed?, SET_MOX writes so far)
+    r.tx->set_key_hook([&](bool k) { ev.push_back({k, sent(r, "RDAL_OP_SET_MOX").size()}); });
+    txc::Options o; auto res = r.tx->ramp(14.10, 2.0, o);
+    CHECK(res.reached); CHECK_EQ(ev.size(), size_t(2));
+    CHECK(ev[0].first && ev[0].second == 0);                                        // before the key: no MOX yet
+    CHECK(!ev[1].first); CHECK(ev[1].second >= 2); CHECK(!r.sim.keyed);             // after: MOX on and off already sent
+}
+TEST(tx_control_ramp_to_15_w_and_never_past_its_ceiling) {   // the test tone at up to 15 W (user 2026-11-19); the ramp's own trips scale with it
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o;
+    auto res = r.tx->ramp(14.10, 15.0, o, {}, {}, 1.0);
+    if (!res.reached) std::printf("  ramp stop: %s, max %.2f W, %.1f s\n", res.stop.c_str(), res.max_fwd_w, res.seconds);
+    CHECK(res.reached); CHECK(res.max_fwd_w > 12.0 && res.max_fwd_w < 1.5 * 15.0); CHECK(!r.sim.keyed);
+    CHECK(!r.tx->ramp(14.10, 16.0, o).reached);                                       // above 15 W: refused before keying
+    CHECK_NEAR(r.tx->drive_cap(5), std::min(std::sqrt(30.0 / r.tx->k_for(5)), txs::kAbsoluteMaxDrive), 1e-12);   // the ceiling: measured 30 W, absolute clamp
+    CHECK(r.tx->drive_cap(5) <= txs::kAbsoluteMaxDrive);
+}
+TEST(tx_control_ramp_with_a_lagging_meter_settles_on_the_target_without_overshoot) {   // the 15 W test tone peaked at 18-20 W on the air
+    if (backup_image().empty()) return;
+    for (double target : {2.0, 5.0, 15.0}) {
+        TxRig r; r.sim.meter_lag_s = 0.25; r.tx->arm(backup_image(), backup_image()); txc::Options o;
+        std::vector<double> held; auto res = r.tx->ramp(14.10, target, o, [&](const txc::Progress& p) { held.push_back(p.rd.fwd_w); }, {}, 3.0);
+        double tail = 0; size_t n = 0; for (size_t i = held.size() * 3 / 4; i < held.size(); ++i) { tail += held[i]; ++n; }
+        tail = n ? tail / double(n) : 0;
+        std::printf("  target %.0f W: reached %d, max %.2f W, last quarter %.2f W (%s)\n", target, int(res.reached), res.max_fwd_w, tail, res.stop.c_str());
+        CHECK(res.reached); CHECK(res.max_fwd_w <= 1.2 * target); CHECK_NEAR(tail, target, 0.1 * target);
+    }
+}
+
+// ---------------------------------------------------------------- voice (SSB) transmit on the simulated radio
+namespace {
+struct FakeMic : txc::IAudioIn {                                                    // syllable-like bursts of 700 + 1900 Hz, paced in real time
+    size_t pos = 0; std::atomic<bool> fail{false}; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    size_t read(float* x, size_t n, double) override {                              // paced by absolute time, like a sound card clock (no drift)
+        if (fail) throw IoError("mic unplugged");
+        std::this_thread::sleep_until(t0 + std::chrono::microseconds(int64_t(1e6 * double(pos + n) / 48000)));
+        for (size_t i = 0; i < n; ++i, ++pos) { const double t = double(pos) / 48000, env = 0.5 * (1 - std::cos(2 * M_PI * 4 * t));
+            x[i] = float(0.25 * env * (std::sin(2 * M_PI * 700 * t) + std::sin(2 * M_PI * 1900 * t))); }
+        return n;
+    }
+    std::string describe() const override { return "fake mic"; }
+};
+double sideband_ratio_db(const std::vector<std::complex<double>>& iq, double rate, bool unmirror) {   // energy 300..2800 Hz above / below the carrier
+    double up = 0, dn = 0; const size_t n = std::min<size_t>(iq.size(), size_t(rate));
+    for (double f = 300; f <= 2800; f += 50) { std::complex<double> u, d;
+        for (size_t i = iq.size() - n; i < iq.size(); ++i) { std::complex<double> z = iq[i]; if (unmirror) z = std::conj(z); const auto e = std::polar(1.0, 2 * M_PI * f * double(i) / rate); u += z * std::conj(e); d += z * e; }
+        up += std::norm(u); dn += std::norm(d); }
+    return 10 * std::log10((up + 1e-30) / (dn + 1e-30));
+}
+}  // namespace
+TEST(voice_usb_and_lsb_on_their_sideband_at_the_set_peak_and_ptt_unkeys) {
+    if (backup_image().empty()) return;
+    for (bool lsb : {false, true}) {
+        TxRig r; std::vector<std::complex<double>> iq; std::vector<std::pair<double, size_t>> marks;
+        r.tx = std::make_unique<txc::TxControl>(r.fx, [&](double) { return std::unique_ptr<IPcmOut>(new CapPcm(&r.sim.level, 48000, &iq, &marks, [] { return wall_utc(); })); }, atu::real_clock());
+        r.tx->set_k(5, 11150); r.tx->arm(backup_image(), backup_image());
+        FakeMic mic; const auto t0 = std::chrono::steady_clock::now();
+        txc::VoiceOptions v; v.lsb = lsb; v.peak_w = 10;                               // the voice defaults: speech peaks reach the ceiling
+        auto res = r.tx->voice(14.20, mic, [&] { return std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(2500); }, v);
+        CHECK(res.keyed); CHECK(res.stop.find("PTT released") != std::string::npos); CHECK(!r.sim.keyed); CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(2));
+        CHECK(res.max_fwd_w > 7.0 && res.max_fwd_w <= 1.15 * 10.0);                     // peaks at the set power (the ALC only trims down)
+        const double sb = sideband_ratio_db(iq, 48000, true);                          // undo the mirror: USB above the carrier
+        // > 20 dB: the right sideband. (On the simulated, perfect radio the EEPROM's TX image correction for this radio itself makes an image
+        // ~36 dB down; on the real radio it cancels the radio's own imbalance. ~27 dB seen here.)
+        if (lsb) CHECK(sb < -20); else CHECK(sb > 20);
+        CHECK(res.underruns < 48000 / 10);                                              // the live ring kept up (silence only at the start / end)
+    }
+}
+TEST(voice_refusals_time_out_and_a_failing_mic_leave_the_radio_unkeyed) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); FakeMic mic; txc::VoiceOptions v;
+    v.peak_w = 25; CHECK(!r.tx->voice(14.2, mic, [] { return true; }, v).keyed); v.peak_w = 10;
+    CHECK(!r.tx->voice(7.0, mic, [] { return true; }, v).keyed);                        // no measured drive level on 40 m in this rig
+    CHECK(!r.tx->voice(14.2, mic, [] { return false; }, v).keyed);                      // PTT already released
+    CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(0));
+    v.max_key_s = 0.6; auto t = r.tx->voice(14.2, mic, [] { return true; }, v);
+    CHECK(t.keyed); CHECK(t.stop.find("time limit") != std::string::npos); CHECK(!r.sim.keyed);
+    std::thread k([&] { std::this_thread::sleep_for(std::chrono::milliseconds(400)); mic.fail = true; });
+    v.max_key_s = 10; auto f = r.tx->voice(14.2, mic, [] { return true; }, v); k.join();
+    CHECK(f.keyed); CHECK(f.stop.find("audio input") != std::string::npos); CHECK(!r.sim.keyed);
+}
+TEST(tx_antenna_per_over_and_the_atu_only_on_ant1) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o; o.tx_ant = 2;
+    auto res = r.tx->ramp(14.10, 2.0, o); CHECK(res.reached);
+    const auto ant = sent(r, "RDAL_OP_SET_TX_ANT"); CHECK(!ant.empty()); CHECK_EQ(ant.back().d1, 2u);   // the over went out on ANT2
+    CHECK(r.tx->tune(14.10, 3.0, 1.5, o).why_not.find("ATU is on ANT1") != std::string::npos);          // the ATU cannot tune ANT2
+    o.tx_ant = 4; CHECK(!r.tx->ramp(14.10, 2.0, o).reached); o.tx_ant = 0; CHECK(!r.tx->ramp(14.10, 2.0, o).reached);   // RX1 IN / nothing: refused
+}
+TEST(test_tone_hold_compares_our_meter_with_the_tuner) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o;
+    std::vector<std::string> lines; auto res = r.tx->ramp(14.10, 3.0, o, {}, [&](const std::string& m) { lines.push_back(m); }, 2.0);
+    CHECK(res.reached); CHECK(res.compare.size() >= 2);
+    for (const auto& c : res.compare) { CHECK(c.adc_fwd > 0); CHECK(c.atu_fwd_w.has_value()); CHECK(std::fabs(*c.atu_fwd_w - 3.0) < 0.01); CHECK(c.atu_swr.has_value()); }
+    bool logged = false; for (auto& l : lines) if (l.find("meter ") == 0 && l.find("| tuner 3.00 W") != std::string::npos) logged = true; CHECK(logged);
+    for (auto& w : write_ops(r.bus)) if (w.op == 1294u) { const uint32_t req = w.d1 >> 8; CHECK(req != 5u && req != 6u); }   // no tune started by the comparison
+}
+
+// First-time set-up: read the EEPROM twice, save it as the reference, never write to the radio, and refuse an unusable image.
+TEST(tx_backup_eeprom_reads_twice_saves_the_reference_and_refuses_a_bad_image) {
+    auto img = backup_image(); if (img.empty() || !txs::from_image(img).valid) img = read_bin("trx.bin");
+    if (!txs::from_image(img).valid) { std::printf("  (skipped: no usable EEPROM image in this checkout)\n"); return; }
+    const std::string dir = std::filesystem::temp_directory_path().string() + "/firesidecore_bkup_" + std::to_string(::getpid()); std::filesystem::remove_all(dir);
+    {
+        Rig r; r.sim.eeprom.assign(img.begin(), img.end());
+        txc::TxControl tx(r.fx, [](double) { return std::unique_ptr<IPcmOut>(); }, atu::real_clock());
+        const auto b = tx.backup_eeprom(dir);
+        CHECK(b.image == img); CHECK(!b.paths.empty()); CHECK(write_ops(r.bus).empty());                  // read-only
+        std::ifstream in(b.paths.front(), std::ios::binary); std::vector<uint8_t> saved((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); CHECK(saved == img);
+        tx.arm(b.image, saved); CHECK(tx.armed());                                                        // the saved copy is a valid reference for arming
+        auto other = saved; other[0x200] ^= 1;                                                           // a changed EEPROM: refused, and the message says how many bytes
+        try { tx.arm(other, saved); CHECK(false); } catch (const std::runtime_error& e) { CHECK(std::string(e.what()).find("1 byte differs") != std::string::npos); }
+    }
+    {
+        Rig r; r.sim.eeprom.assign(kTrxLen, 0);                                                          // all zeros: not a calibration
+        txc::TxControl tx(r.fx, [](double) { return std::unique_ptr<IPcmOut>(); }, atu::real_clock());
+        const std::string dir2 = dir + "_bad"; std::filesystem::remove_all(dir2);
+        CHECK_THROWS(tx.backup_eeprom(dir2), std::runtime_error); CHECK(!std::filesystem::exists(dir2)); CHECK(write_ops(r.bus).empty());
+    }
+    std::filesystem::remove_all(dir);
+}

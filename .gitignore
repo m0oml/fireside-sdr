@@ -1,0 +1,37 @@
+# Build output
+/build/
+build*/
+__pycache__/
+*.pyc
+
+# Downloaded third-party material: copyrighted (docs/, software/: "don't redistribute", see DOWNLOADS.md) or separate git clones (upstream/).
+# Re-fetch with the URLs and SHA-256s in MANIFEST.tsv and the pins in UPSTREAM.md.
+/docs/
+/software/
+/upstream/
+
+# Per-radio results from tools/hardware-day: contain the radio's serial number and the factory-calibration EEPROM backup.
+# Keep these SAFE but outside git (copy them somewhere backed up as soon as they are written).
+/hardware-day/
+
+# I/Q and audio captures (large; regenerate or keep elsewhere)
+*.wav
+!/app/tests/vectors/*.wav
+# the four ft8_lib recordings (MIT, see NOTICE): the FT8 tests need them; the other recordings stay out and their tests skip
+!/app/tests/ft8/191111_*.wav
+
+# Recordings used to try the decoders (large, third-party): never committed
+/recordings/
+
+# The radio's EEPROM backups (factory calibration, serial number): keep copies safe elsewhere, never commit.
+/backups/
+
+# The user's private notes for driving the Windows VM.
+/winvm.md
+
+# pal-logger build output (the proxy is called pal.dll when built: never commit it, it must not be mistaken for the vendor library)
+/tools/pal-logger/out/
+/tools/pal-logger/out64/
+
+# ctest output
+Testing/

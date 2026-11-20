@@ -216,30 +216,30 @@ Open **Transmit** under the decoder: the **Radio transmit (ATU, power, SWR)** ca
   ahead. While transmitting, the receive stream pauses (snd-dice playback and our direct receive stream cannot
   share the radio) and reopens afterwards.
 
-## Transmit control, ATU and meters (stage 1: core + simulator only, NOT connected to the GUI or the radio)
-From the PowerSDR capture of 2026-11-18 (`hardware-day/capture-20261118-powersdr/NOTES.md`, pal.dll logger in `tools/pal-logger/`) and PowerSDR's FWC/fwc_atu.cs.
+## Transmit control, ATU and meters (connected to the GUI and used on the radio since 2026-11-19)
+From PowerSDR's FWC/fwc_atu.cs (GPL), checked on the radio.
 - `fireside/tx_gate.h` **TxGate**: the only code that keys (SET_MOX 1). Disarmed until `arm()`; every key-down has a deadline (max 15 s); meter
   readings unkey it above 20 W forward or SWR 5 (once >= 2 W); unkey always sends SET_MOX 0 (also after errors, and in the destructor) and waits for the
   firmware to take it. While keyed it holds the safety gate's **transmit grant**: without it SET_MOX 1 and ATU tune requests are refused everywhere.
   `run_atu_tune()`: the PowerSDR sequence (TX mode CWU, key, threshold + tune, poll tuner and PA meter every ~35 ms, unkey, mode back); refused unless a
-  tune carrier is on the I/Q stream (which does not exist yet: stage 2).
+  tune carrier is on the I/Q stream (supplied by `TxControl`).
 - `fireside/atu.h` **Atu**: request / reply protocol (`[queue][b3][b2][code]`, 0x00FFFFFF = nothing), start-up init (auto off, standby, Lo-Z), thresholds
   1.1 .. 3.0 (sent right before every tune: PowerSDR never re-sent a changed threshold), `set_relays(ind, cap, hiz)` puts a saved tune back **without RF**
-  (direct-set encoding to verify on the radio). Safety gate: relay / setting / report requests pass with a permit; memory tune / full tune only with
+  (direct-set encoding verified on the radio: `SET_IND` carries Hi-Z in bit 7). Safety gate: relay / setting / report requests pass with a permit; memory tune / full tune only with
   the transmit grant; memory erase (42/43), reset (57), antenna 2 and unknown requests never.
 - `fireside/atu_memory.h`: per-band ATU memory (inductor, capacitor, Hi/Lo-Z, SWR, power, frequency, time) as text for the settings file.
 - `fireside/tx_meter.h`: forward / reflected watts and SWR from READ_PA_ADC 7 / 6 with this radio's EEPROM PA bridge and PA SWR (reflected correction)
-  tables (PowerSDR FWCPAPower / FWCSWR, FlexRadio's original form). On the capture's passing 20 m tune it reads 11.4 W; the tuner said 10.6 W.
+  tables (PowerSDR FWCPAPower / FWCSWR, FlexRadio's original form). On a passing 20 m tune it read 11.4 W; the tuner said 10.6 W.
   (The EEPROM check's "PA SWR out of range" warning was a wrong rule: those are correction factors, 0.46 on 6 m is normal; range now 0.2..5.)
-- Tests: `test_atu_tx.cpp` (16, against a simulated tuner that behaves like the capture's) and static guards in `tools/tests/test_tune_guard.py`
+- Tests: `test_atu_tx.cpp` (16, against a simulated tuner that behaves like the radio's) and static guards in `tools/tests/test_tune_guard.py`
   (atu.cpp writes only ATU_SEND_CMD, tx_gate.cpp only SET_MOX / SET_TX_DSP_MODE, nothing else sets the grant). Deliberately breaking the power cap,
   the deadline or the erase refusal fails them.
 
-## Transmit DSP (offline only: buffers and WAV files, NOT connected to the radio)
+## Transmit DSP (radio-free by design: buffers and WAV files)
 `fireside/tx_dsp.h`, `fireside/tx_render.h`, `tools/firesidetx.cpp`. Nothing here can key the radio: two CTests (`tests/tx_isolation.cmake`) fail if this
 code includes any radio header (followed transitively, allowlist: `dsp.h decode.h tx_dsp.h tx_render.h`) or if the `firesidetx` binary links any
 symbol from a radio, MIDI or sound-card module of `libfireside_core.a` (or imports ALSA/ioctl); self-tests prove both layers catch what they should.
-Connecting it to the radio (output channel, levels, PTT/MOX, the guarded transmit gate) waits for hardware day.
+The signals it renders reach the radio only through `TxControl` and the TxGate (the section above), never directly.
 - **SSB modulator**: audio -> one-sided complex band-pass FIR -> I/Q, USB/LSB, 150-2800 Hz, unity gain. Opposite sideband, carrier and out-of-band > 50 dB
   down; the low edge must sit at least one transition width above 0 Hz, so a DC offset can never become a carrier (> 60 dB down, tested).
 - **Mic chain** (`MicChain`): mic gain, high-pass, EQ (+-24 dB), low-pass, noise gate, compressor, optional clipper, look-ahead peak limiter.

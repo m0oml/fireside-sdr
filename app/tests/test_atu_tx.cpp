@@ -1,5 +1,5 @@
-// ATU protocol, per-band ATU memory, PA power / SWR meter and the transmit gate, against a simulated tuner that behaves like the one in the
-// PowerSDR capture of 2026-11-18 (hardware-day/capture-20261118-powersdr): result word [queue][b3][b2][code], 0x00FFFFFF = nothing pending,
+// ATU protocol, per-band ATU memory, PA power / SWR meter and the transmit gate, against a simulated tuner that behaves like the one on the
+// radio: result word [queue][b3][b2][code], 0x00FFFFFF = nothing pending,
 // a pass followed by the relay / power / SWR reports, a fail with its reason.
 #include <cstdio>
 #include <filesystem>
@@ -46,7 +46,7 @@ TEST(atu_result_words_decode_as_in_the_capture) {
     atu::apply(s, *atu::parse(res(atu::R_SWR, 0, 0))); CHECK_NEAR(*s.swr, 1.0, 1e-9);
     atu::apply(s, *atu::parse(res(atu::R_SWR, 0, 64))); CHECK_NEAR(*s.swr, 3.0, 1e-9);            // rho = sqrt(64/256) = 0.5
     atu::apply(s, *atu::parse(res(atu::R_SWRTHRESH, 2))); CHECK_NEAR(*s.threshold, 1.5, 1e-9);
-    atu::apply(s, *atu::parse(0xF8)); CHECK(*s.tune_pass);                                         // the unknown 0xF8 of the capture is ignored
+    atu::apply(s, *atu::parse(0xF8)); CHECK(*s.tune_pass);                                         // the unknown 0xF8 seen once on the radio is ignored
     CHECK(atu::threshold_request(1.5) == std::optional<uint8_t>(atu::SWR15)); CHECK(!atu::threshold_request(1.4));
     CHECK_EQ(atu::send_d1(atu::SET_IND, 30), uint32_t(65 << 8 | 30));
 }
@@ -129,7 +129,7 @@ TEST(atu_tune_passes_like_the_third_tune_of_the_capture) {
     CHECK(mode < key && key < send && send < unkey && unkey < mode2 && mode2 < ops.size());
     auto modes = sent(r, "RDAL_OP_SET_TX_DSP_MODE"); CHECK_EQ(modes[0].d1, 4u); CHECK_EQ(modes[1].d1, 1u);
     auto sends = sent(r, "RDAL_OP_ATU_SEND_CMD"); CHECK_EQ(sends[0].d1, atu::send_d1(atu::SWR15)); CHECK_EQ(sends[1].d1, atu::send_d1(atu::FULL_TUNE));   // threshold sent right before the tune
-    CHECK_NEAR(m.max_fwd_w, 11.4, 0.3);                                                               // the PA meter on the capture's readings (tuner: 10.6 W)
+    CHECK_NEAR(m.max_fwd_w, 11.4, 0.3);                                                               // the PA meter on the readings of a passing tune (tuner: 10.6 W)
     CHECK(o->seconds < g.config().max_key_s);
     // the carrier hook: on only while keyed
     Rig r2; atu::Atu a2(r2.fx, r2.clk.clock()); TxGate g2(r2.fx, {}, r2.clk.clock()); g2.arm(); std::vector<std::pair<bool, bool>> ev;   // (carrier on?, keyed then?)

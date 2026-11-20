@@ -1,5 +1,5 @@
-// Transmit DSP, offline only. Produces sample buffers (audio or baseband I/Q); it is deliberately NOT connected to the radio:
-// no link, session, safety, pal, startup, opcodes or MIDI. Connecting it waits for hardware day. A CTest scans this module for forbidden includes.
+// Transmit DSP. Produces sample buffers (audio or baseband I/Q); it is deliberately radio-free by construction:
+// no link, session, safety, pal, startup, opcodes or MIDI. The radio only sees its output through TxControl and the TxGate. A CTest scans this module for forbidden includes.
 // Conventions follow the receive side: 48 kHz complex I/Q, sample = I + jQ, dial frequency at 0 Hz, USB above it, LSB below it.
 #pragma once
 #include <cstddef>

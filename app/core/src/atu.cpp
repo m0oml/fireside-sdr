@@ -35,7 +35,7 @@ void apply(Status& s, const Msg& m) {
         case R_SWRTHRESH: if (m.b2 < 7) s.threshold = kThresholds[m.b2]; break;
         case R_AUTO_STATUS: s.auto_on = m.b2 != 0; break;
         case R_UPDATE_STATUS: s.updates_on = m.b2 != 0; break;
-        default: break;                                           // NOOP, CLEAR_DONE, STORE_OK, unknown (0xF8 was seen once in the capture)
+        default: break;                                           // NOOP, CLEAR_DONE, STORE_OK, unknown (0xF8 was seen once on the radio)
     }
 }
 Clock real_clock() {

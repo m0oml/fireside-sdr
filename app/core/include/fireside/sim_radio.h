@@ -1,4 +1,4 @@
-// A simulated FLEX-5000 beyond the mailbox (sim_bus.h): its calibration EEPROM, its ATU (behaving like the one in the PowerSDR capture of 2026-11-18:
+// A simulated FLEX-5000 beyond the mailbox (sim_bus.h): its calibration EEPROM, its ATU (behaving like the one on the radio:
 // result word [queue][b3][b2][code], 0x00FFFFFF = nothing pending, a pass followed by the relay / power / SWR reports, a fail with its reason; SET_IND carries
 // Hi-Z in bit 7, as measured on the radio) and its PA detector (fixed readings, or forward power = k x drive^2 from the transmit samples' level).
 // Used by the tests and by `fireside --simulate` (practice the transmit controls with nothing on the air). Installs itself on a DiceBus.
@@ -19,7 +19,7 @@ struct RadioModel {
     bool silent = false;                           // never answers a tune
     std::vector<uint8_t> requests;
     // PA detector
-    int adc_fwd = 966, adc_rev = 238;              // fixed readings while keyed (the capture's last readings of the passing tune) ...
+    int adc_fwd = 966, adc_rev = 238;              // fixed readings while keyed (the last readings of a passing tune on the radio) ...
     bool pa_from_level = false;                    // ... or from the transmit level: forward W = k * level^2, reflected = rev_frac of it
     std::atomic<double> level{0}; double k = 11150, rev_frac = 0.02; bool dead_pa = false; int band = 5; txm::PaCal meter;
     double meter_lag_s = 0;                        // the detector answers with the level of this long ago (the real PA meter lags ~one 0.2 s step)

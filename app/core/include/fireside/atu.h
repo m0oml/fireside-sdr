@@ -1,5 +1,5 @@
 // The FLEX-5000's internal ATU (an AT200PC-type tuner behind the radio's ATU_SEND_CMD / ATU_GET_RESULT mailbox opcodes).
-// Protocol from PowerSDR's FWC/fwc_atu.cs (GPL) and the PowerSDR capture of 2026-11-18 (hardware-day/capture-20261118-powersdr):
+// Protocol from PowerSDR's FWC/fwc_atu.cs (GPL), checked on the radio:
 //   send:  ATU_SEND_CMD(d1 = request << 8 | b2, d2 = b3)
 //   reply: ATU_GET_RESULT(d1 = wait ms) -> [queue remaining][b3][b2][response code] (byte 3 .. byte 0); 0x00FFFFFF = nothing pending.
 // What needs no RF (relays, thresholds, reports) goes through the safety gate's reviewed ATU values; a tune needs a carrier, so it only runs
@@ -57,7 +57,7 @@ public:
     // Reads one message (waits up to wait_ms in the radio); applies it. nullopt if nothing was pending.
     std::optional<Msg> poll(uint32_t wait_ms = 200);
     int drain(int max_msgs = 64);                                // read until the queue is empty; returns messages read
-    // PowerSDR's start-up sequence (seen in the capture): auto tune off, standby, Lo-Z. No RF.
+    // PowerSDR's start-up sequence (as PowerSDR does): auto tune off, standby, Lo-Z. No RF.
     void init();
     void set_threshold(double swr);                              // throws std::invalid_argument if not one of kThresholds
     // Put saved relay settings back without transmitting: inductor and capacitor values directly, then Hi/Lo-Z (SET_IND also sets the Hi/Lo-Z relay, so

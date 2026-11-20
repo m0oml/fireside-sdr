@@ -1,4 +1,4 @@
-// Shared test fixtures: big-endian helpers and a fake DICE register file behaving like the Flex firmware as pal.dll expects it.
+// Shared test fixtures: big-endian helpers and a fake DICE register file behaving like the Flex firmware as the real firmware does.
 #pragma once
 #include <functional>
 #include <map>

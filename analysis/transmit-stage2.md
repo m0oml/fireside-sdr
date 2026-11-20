@@ -1,8 +1,7 @@
 # Transmit, stage 2: how PowerSDR feeds the FLEX-5000's exciter (research, 2026-11-19)
 
-Sources: PowerSDR 2.7.2 source (GPL; `Console/audio.cs`, `console.cs`, `FWC/fwc.cs`, `FWC/FLEX5000DebugForm.cs`), the pal.dll capture of
-2026-11-18 (`hardware-day/capture-20261118-powersdr/`), this radio's EEPROM backup, and our own measurements (`audio-stream-layout.md`).
-Labels: **[source]** stated by code, **[capture]** seen in the log, **[measured]**, **[OPEN]** to settle on the radio.
+Sources: PowerSDR 2.7.2 source (GPL; `Console/audio.cs`, `console.cs`, `FWC/fwc.cs`, `FWC/FLEX5000DebugForm.cs`), the behaviour of PowerSDR on this radio (2026-11-18), this radio's EEPROM backup, and our own measurements (`audio-stream-layout.md`).
+Labels: **[source]** stated by code, **[observed]** PowerSDR's behaviour as seen on the radio, **[measured]**, **[OPEN]** to settle on the radio.
 Nothing here has transmitted from our app.
 
 ## 1. TX I/Q goes out on output ch0 / ch1 (settles the open question of audio-stream-layout.md section 4)
@@ -35,7 +34,7 @@ would hammer the PA. Hence the hard cap of section 6. **[OPEN]** which branch th
 both are settled by measuring, not by trusting the table: the first key-down ramps up from far below 1 W while the PA meter (tx_meter.h) is read.
 `high_swr_scale` is PowerSDR's SWR foldback (we unkey instead); `temp_scale` a PA temperature foldback.
 
-## 3. The key-down sequence [capture, 3rd ATU tune]
+## 3. The key-down sequence [observed, 3rd ATU tune]
 ```
 SET_TX_DSP_MODE 4 (CWU)            DSPMode enum: LSB 0, USB 1, DSB 2, CWL 3, CWU 4, FM 5, AM 6, DIGU 7, ...
 SET_TX_FREQ_TW  14.3354 MHz         the TX DDS: NO 9 kHz IF offset on transmit; in CWU it sits CW pitch (600 Hz) below the dial (14.336)
@@ -44,10 +43,10 @@ SET_MOX 1
 SET_MOX 0
 SET_TX_DSP_MODE 1 (USB)  ->  SET_TX_FREQ_TW 14.336 (back on the dial)
 ```
-`SET_TX_OFFSET` (DttSP TXOsc, 11025 Hz at start-up, 0 at tune time) and `SET_TX_DSP_FILTER` (low, high) tell the firmware about the TX passband [capture].
+`SET_TX_OFFSET` (DttSP TXOsc, 11025 Hz at start-up, 0 at tune time) and `SET_TX_DSP_FILTER` (low, high) tell the firmware about the TX passband [observed].
 PowerSDR generates the TUN carrier as a sine in DttSP (`Audio.TXInputSignal = SINE`) [source].
 
-## 4. Start-up writes PowerSDR makes for transmit that our start-up does NOT (capture, before the first key-down)
+## 4. Start-up writes PowerSDR makes for transmit that our start-up does NOT (observed, before the first key-down)
 | opcode | values | what | needed before TX? |
 |---|---|---|---|
 | `PA_POT_SET_RDAC` x8 | `EB 85 E8 87 EB 80 E5 83` | **PA bias digital pots**, from EEPROM PA bias (0x2C0: `EB 7A E8 78 EB 7F E5 7C`): **even index = byte, odd index = 255 - byte** (FLEX5000DebugForm.cs: `PAPotSetRDAC(1, 255-v)`) | **YES**. Digital pots: their state after a power cycle is unknown. Wrong bias overheats the PA. Write exactly these, read back if possible |
@@ -77,7 +76,7 @@ The TX image gain / phase tables (EEPROM 0x1F0 / 0x220) are applied in software 
 3. **First key-downs ramp**: start at a drive of 1/10 of the 1 W table value, +2 dB every 200 ms, read the PA meter each step; stop at the target (<= 5 W at
    first) or abort on: no forward power by the 1 W drive point (wrong channel / sign / path), SWR > 3, forward power above 1.5 x the target, or the gate's deadline.
 4. Transmit only inside amateur allocations (`txm::band_of() >= 0`), on a frequency the user has listened to, the user presses the key.
-5. Each key-down logged with drive, readings and outcome (like the capture), kept beside the recordings.
+5. Each key-down logged with drive, readings and outcome (like PowerSDR's), kept beside the recordings.
 
 ## 7. Stage 3 plan
 1. No RF: ATU relays from memory (`Atu::set_relays`), read back. Verifies the direct-set encoding.

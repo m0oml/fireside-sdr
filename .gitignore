@@ -29,9 +29,6 @@ __pycache__/
 # The user's private notes for driving the Windows VM.
 /winvm.md
 
-# pal-logger build output (the proxy is called pal.dll when built: never commit it, it must not be mistaken for the vendor library)
-/tools/pal-logger/out/
-/tools/pal-logger/out64/
 
 # ctest output
 Testing/

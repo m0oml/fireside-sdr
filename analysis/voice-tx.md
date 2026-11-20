@@ -9,7 +9,7 @@ transmit I/Q goes back on the same stream; the DDS is put on the dial for each o
   line-in RCA 0x14 -> ch5/6, balanced TRS 0x15 -> ch6/7, FlexWire/DB9 0x13 -> ch4/5. (Our older note "mic on ch2/3" came from the
   audio.cs default in_tx_l = 2 before the mixer form runs: superseded.)
 - Gain: slider -128..0, register = (0x100 + v) for v < 0, 0 for 0 dB; **0x80 = muted**. PowerSDR's FLEX-5000 default (database.cs
-  Mic_Input_Level) is **0** (0 dB). Our start-up writes 0x80 to 0x13..0x16 (inputs muted), as PowerSDR's capture did.
+  Mic_Input_Level) is **0** (0 dB). Our start-up writes 0x80 to 0x13..0x16 (inputs muted), as PowerSDR does.
 - Front mic connector (front-panel-events.md): pin 8 mic +, 7 mic -, 6 PTT to pin 5 (chassis), pin 2 +5 V.
 
 ## PTT

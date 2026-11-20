@@ -3,7 +3,7 @@
 // reading only, as the meter code does; the KE9NS variant that scaled both cancels it out of the SWR).
 //   PA bridge (EEPROM 0x2E0, 11 bands x 6): detector volts at 1, 2, 5, 10, 20 and 90 W; between points watts are interpolated in volts squared.
 //   PA SWR    (EEPROM 0x630, 11 bands):     reflected-power correction factor per band (about 0.46 .. 1.74 on this radio): NOT an SWR value.
-// Checked on the capture of 2026-11-18: the passing 20 m ATU tune reads 11.4 W here; the tuner itself reported 10.6 W.
+// Checked on the radio (2026-11-18): the passing 20 m ATU tune reads 11.4 W here; the tuner itself reported 10.6 W.
 #pragma once
 #include <array>
 #include <optional>

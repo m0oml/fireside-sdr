@@ -1,4 +1,4 @@
-// firesidecli: C++ command line for the FireWire route. See fireside/cli.h. Never run against the real radio yet; start with `list`, then `identify`.
+// firesidecli: C++ command line for the FireWire route. See fireside/cli.h. Start with `list`, then `identify` (both read-only).
 #include <atomic>
 #include <csignal>
 #include <iostream>

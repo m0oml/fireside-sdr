@@ -1,4 +1,4 @@
-// A simulated FLEX-5000 on the FireWire register window: behaves like the firmware as pal.dll expects it (big-endian bus, CMD busy bit, RESULT).
+// A simulated FLEX-5000 on the FireWire register window: behaves like the firmware as the real firmware does (big-endian bus, CMD busy bit, RESULT).
 // Used by the tests and by `fireside --simulate` (a demo/rehearsal with no hardware). It records every command it runs, so write sequences can be inspected.
 #pragma once
 #include <functional>

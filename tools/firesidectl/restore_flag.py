@@ -1,7 +1,7 @@
 """One-off: restore TRX EEPROM byte 0x3F ("checksums present") from 0xFF back to 0xC5.
 
 PowerSDR 2.7.2 cleared it on 2026-11-18 after a timing race made its checksum reads return stale values
-(hardware-day/capture-20261118-powersdr/NOTES.md). Nothing else in the EEPROM changed (full double read vs the backup).
+(see NOTES.md). Nothing else in the EEPROM changed (full double read vs the backup).
 
 Refuses unless ALL of these hold, and writes nothing in a dry run (the default):
   * the radio's serial number is the backup's;

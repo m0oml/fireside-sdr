@@ -7,7 +7,7 @@ from firesidectl.opcodes import OPCODES
 
 
 class FakeDiceBus:
-    """Register file behaving like the Flex firmware as pal.dll expects it (big-endian bus)."""
+    """Register file behaving like the Flex firmware as the real firmware does (big-endian bus)."""
     def __init__(self, busy_polls=2, start_busy=0, stuck=False):
         self.mem = {pal.CMD: struct.pack(">I", pal.BUSY if start_busy else 0),
                     pal.RESULT: b"\0" * 4, pal.EVENT: b"\0" * 4}

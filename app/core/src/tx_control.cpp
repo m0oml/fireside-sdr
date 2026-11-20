@@ -80,7 +80,7 @@ void TxControl::prepare(double mhz, uint32_t mode, int ant) {
     fx_.set("RDAL_OP_SET_TX_ANT", uint32_t(ant), 0);
     fx_.set("RDAL_OP_SET_TX_DSP_MODE", mode, 0);
     fx_.set("RDAL_OP_SET_TX_FREQ_TW", double(freq_to_tw(mhz)), mhz);
-    fx_.set("RDAL_OP_SET_TX_DSP_FILTER", 200, 3100);              // as PowerSDR (capture of 2026-11-18)
+    fx_.set("RDAL_OP_SET_TX_DSP_FILTER", 200, 3100);              // as PowerSDR does
     fx_.set("RDAL_OP_SET_TX_OFFSET", 0, 0);
     txs::write_carrier_null(fx_, cal_, mhz); fx_.sync();
 }

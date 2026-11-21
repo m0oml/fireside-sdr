@@ -45,10 +45,10 @@ NOTES = {
  "SET_XVTR_ACTIVE": "Transverter active.", "SET_XVTR_SPLIT": "Transverter split.",
  "SET_AMP_TX1": "Keying line AMP RLY TX1 (rear panel) on/off with T/R; also *_DELAY_ENABLE / *_DELAY (ms) for sequencing.",
  "SET_RCA_TX1": "Rear RCA TX1 key line.",
- "SET_FULL_DUPLEX": "0/1 full duplex (TX during RX path).",
+ "SET_FULL_DUPLEX": "0/1 full duplex (TX during RX path). On, the transmit DDS (SET_TX_FREQ_TW) runs while receive stays on its own frequency: the built-in generator sits there (page 6).",
  "SET_QSD": "Calibration only (Quadrature Sampling Detector enable).",
  "SET_QSE": "Calibration only (Quadrature Sampling Exciter enable).",
- "SET_SIG": "Calibration only (signal generator relay).", "SET_GEN": "Calibration only.", "SET_TEST": "Calibration only.",
+ "SET_SIG": "0/1 signal generator relay: the receiver input comes from the test path instead of the antenna. Built-in generator: page 6.", "SET_GEN": "0/1 built-in signal generator. With SET_TEST 1 and SET_SIG 1 (full duplex on) it is the receiver input, at the transmit DDS frequency, about -24 dBm. Page 6.", "SET_TEST": "0/1 test-path relay (with SET_GEN and SET_SIG: the generator into the receiver; PowerSDR's transmit loopback calibrations also use it). Page 6.",
  "SET_RX2_ON": "RX2 board on (only if fitted).",
  "SET_BREAK_IN": "0/1 CW break-in (QSK) in radio.", "SET_IAMBIC": "0/1 iambic keying flag (keyer itself runs in PC software, FlexCW.dll).",
 }

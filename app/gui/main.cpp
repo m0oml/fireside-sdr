@@ -149,6 +149,15 @@ int main(int argc, char** argv) {
             r->setDecoderIndex(5); r->addDecodedText("093700  -9  0.2 1200 ~  M0OML DK0ULR JN58\n");
             clk += 9 * 7500; r->tickCallers(); step("callers: still listed after 9 FT4 cycles", r->callersText().contains("DK0ULR"));
             clk += 7500; r->tickCallers(); step("callers: gone after 10 unanswered FT4 cycles", r->callersText().isEmpty());
+            {   // the QSO pane during a QSO: only the partner (and our overs); anyone else calling waits in the callers area; the end is marked
+                r->setDecoderIndex(4); r->clearQso(); r->setQsoPartner("DK0ULR");
+                r->addDecodedText("093800  -7  0.1 1500 ~  M0OML DK0ULR -10\n093800  -9  0.1 1800 ~  M0OML OK1XYZ JO70\n");
+                step("QSO pane: the partner's line is there, another caller is not (he waits in the callers area)",
+                     r->qsoPaneText().contains("DK0ULR -10") && !r->qsoPaneText().contains("OK1XYZ") && r->callersText().contains("OK1XYZ"));
+                r->endQso("DK0ULR", true); step("QSO pane: 'done' at the end, and no partner any more", r->qsoPaneText().contains("QSO with DK0ULR done") && r->qsoPartner().isEmpty());
+                r->addDecodedText("093830  -9  0.1 1800 ~  M0OML OK1XYZ JO70\n"); step("QSO pane: after the QSO, a new call shows again", r->qsoPaneText().contains("OK1XYZ JO70"));
+                r->clearQso();
+            }
             r->setCallersClockForTests({}); r->setDecoderIndex(4); r->clearDecoded(); lp->clearForm();   // (the Log tab entry was filled by those callers)
         }
         {   // someone answering me: the line is highlighted, the entry filled and the caller looked up; others calling meanwhile are left alone
@@ -603,6 +612,14 @@ int main(int argc, char** argv) {
                     const size_t mox = count(1292); tc->tuneButton()->click(); wait_idle(40000);
                     step("ATU tune passes on the simulated radio", tc->statusLabel()->text().contains("PASS") && tc->memoryLabel()->text().contains("ind 30 cap 7"));
                     step("the tune keyed once and unkeyed", count(1292) == mox + 2 && !w.simRadio()->keyed);
+                    {   // the S-meter check with the internal generator: receive only, every relay switched back (the simulated radio has no generator: "not seen")
+                        rx->setModeIndex(0); pump(3); const size_t mox0 = count(1292);
+                        step("S-meter check button usable once armed", tc->genCheckButton()->isEnabled());
+                        tc->genCheckButton()->click(); pump(3); wait_idle(40000);
+                        step("S-meter check: generator, test and signal relays and full duplex on and off again, nothing keyed",
+                             count(1249) == 2 && count(1248) == 2 && count(1250) == 2 && count(1296) == 2 && count(1292) == mox0 && !w.simRadio()->keyed
+                             && tc->statusLabel()->text().contains("S-meter check"));
+                    }
                     {   // FT4: a queued send goes out in its slot; a queued one is cancelled by Stop without keying
                         const auto modes = tc->digitalPart()->findChildren<QComboBox*>(); for (auto* c : modes) if (c->count() == 2 && c->itemText(0) == "FT8") c->setCurrentIndex(1);
                         const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -763,8 +780,8 @@ int main(int argc, char** argv) {
                     {   // the S-meter: the factory RX level table per band, the preamp row only while the preamp is on, the placeholder without a table
                         std::array<double, 11> mt{}, pa{}; mt.fill(-33.0); pa.fill(-14.0); mt[5] = -32.7; const double dial0 = rx->dialHz();
                         rx->setRxLevelCal(true, mt, pa); rx->setDialHz(14.2e6); rx->setPreampChecked(false); pump(1);
-                        step("S-meter: the 20 m factory meter offset", rx->meterCalibrated() && std::fabs(rx->meterOffsetDb() + 32.7) < 1e-9);
-                        rx->setPreampChecked(true); step("S-meter: preamp on subtracts its gain", std::fabs(rx->meterOffsetDb() + 46.7) < 1e-9); rx->setPreampChecked(false);
+                        step("S-meter: the 20 m factory meter offset", rx->meterCalibrated() && std::fabs(rx->meterOffsetDb() - (-32.7 + ReceiverPanel::kTableToDbfsDb)) < 1e-9);
+                        rx->setPreampChecked(true); step("S-meter: preamp on subtracts its gain", std::fabs(rx->meterOffsetDb() - (-46.7 + ReceiverPanel::kTableToDbfsDb)) < 1e-9); rx->setPreampChecked(false);
                         rx->setDialHz(5.0e6); step("S-meter: outside the bands the placeholder", !rx->meterCalibrated());
                         rx->setRxLevelCal(false, mt, pa); rx->setDialHz(14.2e6); step("S-meter: no table, no calibration", !rx->meterCalibrated()); rx->setDialHz(dial0); pump(1);
                     }

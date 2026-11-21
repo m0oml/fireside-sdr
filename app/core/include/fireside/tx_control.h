@@ -124,6 +124,14 @@ public:
     VoiceResult voice(double dial_mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p = {}, const LogFn& log = {});
     // No RF: put a band's stored relays back. false if nothing is stored or the tuner does not report them.
     bool restore_relays(int band, const LogFn& log = {});
+    // Receive-level check with the radio's built-in signal generator (siggen.h; PowerSDR CalibrateLevel for the FLEX-5000). Holds the transmit lock for
+    // the whole check, so nothing can key meanwhile; it never keys itself. The generator sits at dial + tone_hz (inside the receive passband).
+    // read(): {in-passband dBFS, strongest spectrum peak's offset from the dial in Hz}, from the receiver. preamp(on): switches the receive preamp and
+    // returns false if it could not (optional: then the preamp is measured too, as PowerSDR does). The preamp ends as preamp_was_on.
+    // The generator is switched off again on every path (the error, if any, in restore_error: then ok is false).
+    struct GenCheck { bool ok = false, preamp_measured = false; std::string why, restore_error; double off_dbfs = -200, on_dbfs = -200, preamp_dbfs = -200, peak_hz = 0; };
+    GenCheck sig_gen_check(double dial_mhz, double tone_hz, const std::function<std::pair<double, double>()>& read, const std::function<bool(bool)>& preamp,
+                           bool preamp_was_on, const LogFn& log = {});
     std::optional<atu::Status> atu_report();                      // no RF: the tuner's relays
 
 private:

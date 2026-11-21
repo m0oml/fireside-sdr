@@ -12,6 +12,7 @@
 #include "fireside/sim_radio.h"
 #include "fireside/tx_gate.h"
 #include "fireside/tx_meter.h"
+#include "fireside/tuning.h"
 #include "test_util.h"
 using namespace fireside; using namespace fakedice;
 
@@ -758,4 +759,32 @@ TEST(tx_backup_eeprom_reads_twice_saves_the_reference_and_refuses_a_bad_image) {
         CHECK_THROWS(tx.backup_eeprom(dir2), std::runtime_error); CHECK(!std::filesystem::exists(dir2)); CHECK(write_ops(r.bus).empty());
     }
     std::filesystem::remove_all(dir);
+}
+TEST(signal_generator_check_is_receive_only_and_always_switches_the_relays_back) {
+    Rig r; txc::TxControl tx(r.fx, [](double) { return std::unique_ptr<IPcmOut>(); }, r.clk.clock());
+    auto sig_on = [&] { auto s = sent(r, "RDAL_OP_SET_SIG"); return !s.empty() && s.back().d1 == 1; };
+    bool pre = false;
+    // the receiver: the generator appears 1 kHz above the dial, 42 dB above the antenna's signal, once SET_SIG 1 has gone out; the preamp adds 14 dB
+    auto read = [&]() -> std::pair<double, double> { if (!sig_on()) return {-95.0, 3500.0}; return {pre ? -39.0 : -53.0, 1000.0}; };
+    auto preamp = [&](bool on) { pre = on; return true; };
+    auto g = tx.sig_gen_check(14.2, 1000, read, preamp, true);
+    CHECK(g.ok); CHECK(g.restore_error.empty()); CHECK_NEAR(g.on_dbfs, -53.0, 1e-6); CHECK(g.preamp_measured); CHECK_NEAR(g.preamp_dbfs - g.on_dbfs, 14.0, 1e-6);
+    CHECK(pre);                                                                                    // the preamp ends as it was (on)
+    const std::vector<std::pair<const char*, uint32_t>> want = {
+        {"RDAL_OP_SET_FULL_DUPLEX", 1}, {"RDAL_OP_SET_TX_FREQ_TW", freq_to_tw(14.201)}, {"RDAL_OP_SET_GEN", 1}, {"RDAL_OP_SET_TEST", 1}, {"RDAL_OP_SET_SIG", 1},
+        {"RDAL_OP_SET_FULL_DUPLEX", 0}, {"RDAL_OP_SET_GEN", 0}, {"RDAL_OP_SET_TEST", 0}, {"RDAL_OP_SET_SIG", 0}};
+    const auto w = write_ops(r.bus); CHECK_EQ(w.size(), want.size());                              // exactly these writes, nothing else (no MOX, T/R, QSE)
+    for (size_t i = 0; i < std::min(w.size(), want.size()); ++i) { CHECK_EQ(w[i].op, opv(want[i].first)); CHECK_EQ(w[i].d1, want[i].second); }
+    // not seen (no generator signal): refused, and still switched back
+    auto none = [&]() -> std::pair<double, double> { return {-95.0, 3500.0}; };
+    const size_t n0 = write_ops(r.bus).size(); auto g2 = tx.sig_gen_check(14.2, 1000, none, {}, false);
+    CHECK(!g2.ok); CHECK(g2.why.find("not seen") != std::string::npos); CHECK_EQ(write_ops(r.bus).size(), n0 + 9);
+    CHECK(!sig_on()); CHECK(sent(r, "RDAL_OP_SET_MOX").empty()); CHECK(!r.sim.keyed);
+    // the generator at the wrong place (e.g. LSB with a +1 kHz offset): refused
+    auto off_place = [&]() -> std::pair<double, double> { if (!sig_on()) return {-95.0, 3500.0}; return {-53.0, -1000.0}; };
+    CHECK(tx.sig_gen_check(14.2, 1000, off_place, {}, false).why.find("strongest signal") != std::string::npos);
+    CHECK(!tx.sig_gen_check(14.2, 50, read, {}, false).ok);                                          // offset outside the passband: refused before any write
+    // full duplex is gated to 0 / 1 only
+    Safety s; s.allow_write = true; s.permit("RDAL_OP_SET_FULL_DUPLEX"); const OpInfo* fd = find_opcode("RDAL_OP_SET_FULL_DUPLEX");
+    s.check_write(*fd, 1, 0); s.check_write(*fd, 0, 0); CHECK_THROWS(s.check_write(*fd, 2, 0), SafetyError); CHECK_THROWS(s.check_write(*fd, 1, 1), SafetyError);
 }

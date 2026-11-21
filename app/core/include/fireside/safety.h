@@ -35,7 +35,7 @@ public:
     void unpermit(const std::string& full_name) { std::lock_guard<std::mutex> l(m_); permitted_.erase(full_name); }
     bool permitted(const std::string& full_name) const { std::lock_guard<std::mutex> l(m_); return permitted_.count(full_name) != 0; }
     static bool matches_dangerous(const std::string& full_name);
-    static bool value_restricted(const std::string& full_name);            // INITIALIZE, SET_MOX, SET_PA_BIAS, ATU_SEND_CMD, PA pots, TRX pot, WRITE_CODEC_REG (mic gain 0x16 only)
+    static bool value_restricted(const std::string& full_name);            // INITIALIZE, SET_MOX, SET_PA_BIAS, ATU_SEND_CMD, PA pots, TRX pot, WRITE_CODEC_REG (mic gain 0x16 only), SET_FULL_DUPLEX (0 / 1)
     // true if not restricted; (0, 0) for INITIALIZE / SET_MOX / SET_PA_BIAS; for ATU_SEND_CMD the requests that cannot make RF or erase anything (atu.h)
     static bool reviewed_value(const std::string& full_name, uint32_t d1, uint32_t d2);
     // Transmit grant: only the TxGate (tx_gate.h) sets it, while it holds the key. With it (and a permit), SET_MOX(1, 0) and the ATU tune requests

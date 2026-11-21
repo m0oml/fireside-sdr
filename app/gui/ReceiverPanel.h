@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <QList>
 #include <functional>
 #include <QHash>
@@ -71,8 +72,14 @@ public:
     bool powerMeterShown() const { return tx_meter_ && tx_meter_->isVisibleTo(this); }
     void setTxLamp(QLabel* lamp);
     // The radio's factory RX level table (from the EEPROM, read with the transmit check): dBm = dBFS + meter[band] (+ preamp[band] while the preamp is on).
+    // The EEPROM's meter column is in PowerSDR's units: DttSP's signal-strength meter is 10 log10 of the power SUMMED over the DSP buffer (sdr.c,
+    // RXMETER_POST_FILT), and CalibrateLevel forces that buffer to 4096 samples, so it reads 10 log10(4096) = 36.1 dB above our in-passband dBFS (a mean).
+    // Confirmed on this radio's 20 m with the internal generator 2026-11-21: measured offset +3.17 dB, table -32.74 + 36.12 = +3.38.
+    static constexpr double kTableToDbfsDb = 36.123599479677736;   // 10 log10(4096)
     void setRxLevelCal(bool valid, const std::array<double, 11>& meter, const std::array<double, 11>& preamp);
-    bool meterCalibrated() const; double meterOffsetDb() const;                       // the TX light, left of the frequency
+    bool meterCalibrated() const; double meterOffsetDb() const; int meterSource() const;
+    void setCheckedCal(int band, double meter, double preamp);      // from the S-meter check with the internal generator (preamp NaN: not measured)
+    std::pair<double, double> levelForChecks() const { return {chk_dbfs_.load(), chk_peak_hz_.load()}; }   // thread-safe: in-passband dBFS, spectrum peak offset (Hz)                       // the TX light, left of the frequency
     int modeGroup() const;                               // 0 Voice, 1 CW, 2 Digital: the master switch
     void setModeGroup(int g) { chooseGroup(g); }
     bool decoderRowVisible() const { return dec_row_ && dec_row_->isVisibleTo(this); }
@@ -100,6 +107,8 @@ public:
     bool externalMode() const { return external_; }
     void setTransmitting(bool keyed);                  // duplex: while keyed the radio's shared RX1/TX DDS sits ON the dial (no 9 kHz IF shift): receive follows it, so the spectrum stays right                                   // duplex: decode the slot so far now (we transmit next; receive keeps running)
     void addQsoTx(const QString& utcLabel, int audioHz, const QString& message);
+    void endQso(const QString& call, bool done);       // the QSO with call ended (done = completed and logged): a closing line in the QSO pane
+    QString qsoPartner() const { return qso_partner_; }
     QString qsoPaneText() const;
     // The callers area (top 4 lines of the FT8/FT4 decoder pane): everyone who has called us stays listed, fading, until we answer them (we transmit to them, or reply
     // to their line) or they have gone unanswered for 6 FT8 / 10 FT4 cycles. A repeat call refreshes the entry; only the newest four are shown.
@@ -210,7 +219,7 @@ private:
     QHash<QString, QString> info_by_call_; QHash<QString, int> tag_by_call_;
     QPlainTextEdit* callers_ = nullptr; QWidget* dec_left_ = nullptr; QList<Caller> caller_list_; std::function<qint64()> callers_now_;
     void addCaller(const QString& call, const QString& line); void removeCaller(const QString& call); void renderCallers(); qint64 callersNow() const;
-    QTimer* ui_; QComboBox* mem_combo_; QComboBox* dec_mode_; QSpinBox* dec_tone_; QPlainTextEdit* dec_text_; QPlainTextEdit* qso_text_ = nullptr; QWidget* dec_split_ = nullptr; QHBoxLayout* header_ = nullptr; QString qso_partner_, logged_note_; bool tx_on_dial_ = false; QPushButton *ft8_btn_ = nullptr, *ft4_btn_ = nullptr; QCheckBox* auto_sb_ = nullptr; int last_band_idx_ = -2; bool recalling_ = false; QPushButton* clear_qso_ = nullptr; QString heard_note_; QWidget* advanced_ = nullptr; void syncFtButtons(); void addQsoLine(const QString& line, int kind); QLabel* dec_status_; QFrame* dec_card_; QPushButton* tx_btn_ = nullptr; QPushButton* preamp_ = nullptr; QWidget* tx_w_ = nullptr; QWidget* tx_side_ = nullptr; QButtonGroup* grp_mode_ = nullptr; QStackedWidget* mode_pages_ = nullptr; QPushButton *psk_btn_ = nullptr, *rtty_btn_ = nullptr; QWidget* dec_row_ = nullptr; QVBoxLayout* mode_switch_col_ = nullptr; QGridLayout* meters_grid_ = nullptr; QWidget* tx_meter_ = nullptr; bool cal_valid_ = false; std::array<double, 11> cal_meter_{}, cal_preamp_{}; QTimer* tx_meter_hold_ = nullptr; void showTxMeter(bool tx); QFrame *send_card_ = nullptr, *voice_card_ = nullptr, *signal_card_ = nullptr; int last_voice_mode_ = 0, last_digi_ = 4; void applyGroup(int g); void syncGroup(); void chooseGroup(int g); QComboBox* palette_; QComboBox* avg_ = nullptr; QLineEdit* my_call_ = nullptr; QComboBox* am_det_ = nullptr; QPushButton *rate_btn_[3] = {nullptr, nullptr, nullptr}, *stop_radio_ = nullptr; unsigned direct_rate_ = 0; QString rx_ant_text_; RecordController* rec_ = nullptr; QSlider* gain_ = nullptr; QLabel* gain_label_ = nullptr; QPushButton *grab_btn_ = nullptr, *rec_btn_ = nullptr; void updateRecordButtons(); QPushButton *zoom_in_ = nullptr, *zoom_out_ = nullptr, *zoom_full_ = nullptr; QCheckBox* bandplan_; QSlider* floor_; std::vector<Memory> memories_; std::vector<BandMem> band_mem_; bool band_recall_ = false; void noteBand(); bool restoring_ = false; double ref_hz_ = 0; bool tune_sw_ = false;
+    QTimer* ui_; QComboBox* mem_combo_; QComboBox* dec_mode_; QSpinBox* dec_tone_; QPlainTextEdit* dec_text_; QPlainTextEdit* qso_text_ = nullptr; QWidget* dec_split_ = nullptr; QHBoxLayout* header_ = nullptr; QString qso_partner_, logged_note_; bool tx_on_dial_ = false; QPushButton *ft8_btn_ = nullptr, *ft4_btn_ = nullptr; QCheckBox* auto_sb_ = nullptr; int last_band_idx_ = -2; bool recalling_ = false; QPushButton* clear_qso_ = nullptr; QString heard_note_; QWidget* advanced_ = nullptr; void syncFtButtons(); void addQsoLine(const QString& line, int kind); QLabel* dec_status_; QFrame* dec_card_; QPushButton* tx_btn_ = nullptr; QPushButton* preamp_ = nullptr; QWidget* tx_w_ = nullptr; QWidget* tx_side_ = nullptr; QButtonGroup* grp_mode_ = nullptr; QStackedWidget* mode_pages_ = nullptr; QPushButton *psk_btn_ = nullptr, *rtty_btn_ = nullptr; QWidget* dec_row_ = nullptr; QVBoxLayout* mode_switch_col_ = nullptr; QGridLayout* meters_grid_ = nullptr; QWidget* tx_meter_ = nullptr; bool cal_valid_ = false; std::array<bool, 11> chk_valid_{}; std::array<double, 11> chk_meter_{}, chk_preamp_{}; std::atomic<double> chk_dbfs_{-200}, chk_peak_hz_{0}; std::array<double, 11> cal_meter_{}, cal_preamp_{}; QTimer* tx_meter_hold_ = nullptr; void showTxMeter(bool tx); QFrame *send_card_ = nullptr, *voice_card_ = nullptr, *signal_card_ = nullptr; int last_voice_mode_ = 0, last_digi_ = 4; void applyGroup(int g); void syncGroup(); void chooseGroup(int g); QComboBox* palette_; QComboBox* avg_ = nullptr; QLineEdit* my_call_ = nullptr; QComboBox* am_det_ = nullptr; QPushButton *rate_btn_[3] = {nullptr, nullptr, nullptr}, *stop_radio_ = nullptr; unsigned direct_rate_ = 0; QString rx_ant_text_; RecordController* rec_ = nullptr; QSlider* gain_ = nullptr; QLabel* gain_label_ = nullptr; QPushButton *grab_btn_ = nullptr, *rec_btn_ = nullptr; void updateRecordButtons(); QPushButton *zoom_in_ = nullptr, *zoom_out_ = nullptr, *zoom_full_ = nullptr; QCheckBox* bandplan_; QSlider* floor_; std::vector<Memory> memories_; std::vector<BandMem> band_mem_; bool band_recall_ = false; void noteBand(); bool restoring_ = false; double ref_hz_ = 0; bool tune_sw_ = false;
     bool playing_ = false; std::vector<double> notch_list_; double shift_acc_ = 0; double filter_width_ = 2700, filter_low_ = 150; int filter_shape_ = 1; QSpinBox *cut_lo_ = nullptr, *cut_hi_ = nullptr; QLabel *cut_lo_label_ = nullptr, *cut_hi_label_ = nullptr; QComboBox* shape_box_ = nullptr;
     double step_hz_ = 100;
     fireside::display::Scale scale_; fireside::display::ScaleTracker scale_tracker_; double peak_hz_ = 0, peak_db_ = -200, signal_dbfs_ = -200; size_t audio_total_ = 0;

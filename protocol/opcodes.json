@@ -1334,9 +1334,9 @@
    "data2": "u32",
    "result": null,
    "safety": "write",
-   "in_use": false,
+   "in_use": true,
    "group": "Other",
-   "note": "Calibration only."
+   "note": "0/1 test-path relay (with SET_GEN and SET_SIG: the generator into the receiver; PowerSDR's transmit loopback calibrations also use it). Page 6."
   },
   {
    "number": 1249,
@@ -1346,9 +1346,9 @@
    "data2": "u32",
    "result": null,
    "safety": "write",
-   "in_use": false,
+   "in_use": true,
    "group": "Other",
-   "note": "Calibration only."
+   "note": "0/1 built-in signal generator. With SET_TEST 1 and SET_SIG 1 (full duplex on) it is the receiver input, at the transmit DDS frequency, about -24 dBm. Page 6."
   },
   {
    "number": 1250,
@@ -1358,9 +1358,9 @@
    "data2": "u32",
    "result": null,
    "safety": "write",
-   "in_use": false,
+   "in_use": true,
    "group": "Other",
-   "note": "Calibration only (signal generator relay)."
+   "note": "0/1 signal generator relay: the receiver input comes from the test path instead of the antenna. Built-in generator: page 6."
   },
   {
    "number": 1251,
@@ -1910,9 +1910,9 @@
    "data2": "u32",
    "result": null,
    "safety": "dangerous",
-   "in_use": false,
+   "in_use": true,
    "group": "Transmit and keying",
-   "note": "0/1 full duplex (TX during RX path)."
+   "note": "0/1 full duplex (TX during RX path). On, the transmit DDS (SET_TX_FREQ_TW) runs while receive stays on its own frequency: the built-in generator sits there (page 6)."
   },
   {
    "number": 1297,

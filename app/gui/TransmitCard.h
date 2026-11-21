@@ -62,7 +62,11 @@ public:
     // The card is only the owner: these are the pieces the window places. key: lamp, Stop, status. atu: tune power, threshold, Tune, Restore. calibration: a fold with Measure drive and Test tone.
     // digital: the FT8 / FT4 message controls. voice: mic, power, PTT. other: the CAT keying tick and its power.
     QWidget* atuPart() const { return atu_part_; }
-    void applyRxCal(const fireside::RxLevelCal& c);    // hands the EEPROM's RX level table to the S-meter
+    void applyRxCal(const fireside::RxLevelCal& c);
+    void onGenCheck();                                   // the S-meter check with the radio's internal generator (receive only)
+    void applyGenCheck(const fireside::txc::TxControl::GenCheck& r, int band);
+    void loadCheckedCal();
+    QPushButton* genCheckButton() const { return gen_btn_; }    // hands the EEPROM's RX level table to the S-meter
     QWidget* otherProgramsPart() const { return ext_part_; } QLabel* lampLabel() const { return lamp_; } QDialog* tunerDialog() const { return tuner_dialog_; } QPushButton* tunerButton() const { return tuner_btn_; } QPushButton* stopButton() const { return stop_; }
     QWidget* digitalPart() const { return digi_part_; } QWidget* voicePart() const { return voice_part_; }
     QString qsoText() const;                             // the sequencer's one-line state ("" if idle)
@@ -82,6 +86,7 @@ signals:
     void qsoPartner(const QString& call);                // the station the sequencer is working ("" = none)
     void txSent(const QString& utcLabel, int audioHz, const QString& message);   // an over starts
     void logQso(const QString& call, const QString& grid, const QString& rstSent, const QString& rstRcvd);   // a QSO the sequencer completed
+    void qsoEnded(const QString& call, bool done);      // the sequence with call ended: done (completed, logged) or gave up
 private slots:
     void onArm(bool on); void onTune(); void onMeasure(); void onRestore(); void onTestTone(); void onSend(); void tick();
     void onRadioRunning(bool on); void onDial(double hz);
@@ -105,7 +110,7 @@ private:
     static constexpr qint64 kExtWatchdogMs = 15000; static constexpr double kExtMaxKeyS = 120;
     std::atomic<qint64> ext_watchdog_ms_{kExtWatchdogMs};                       // tests shorten it (setExtWatchdogForTests)
     bool extActive() const; bool requestExt(int client, bool on); void extHeartbeat(int client);
-    std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr; QPushButton *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
+    std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_; void noteSeqEnd(); QPushButton *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
     QCheckBox* auto_seq_ = nullptr; std::unique_ptr<fireside::seq::Sequencer> seq_; std::function<QString()> my_grid_;
     void pauseReceive(); QString resumeReceive();        // receive pauses for an over (the slot so far decoded first) and comes back after it
     fireside::seq::Sequencer& sequencer();

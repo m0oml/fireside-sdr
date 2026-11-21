@@ -1,4 +1,5 @@
 #include "fireside/tx_control.h"
+#include "fireside/siggen.h"
 #include "fireside/dsp.h"
 #include <atomic>
 #include <thread>
@@ -377,5 +378,42 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns(); note_stop(r.stop);
     char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, v.peak_w); say(log, m);
     return r;
+}
+}  // namespace fireside::txc
+
+namespace fireside::txc {
+TxControl::GenCheck TxControl::sig_gen_check(double dial_mhz, double tone_hz, const std::function<std::pair<double, double>()>& read,
+                                             const std::function<bool(bool)>& preamp, bool preamp_was_on, const LogFn& log) {
+    std::lock_guard<std::mutex> l(op_); GenCheck r; Busy b(*this);
+    auto say = [&](const std::string& m) { if (log) log(m); };
+    if (!read) { r.why = "no receiver reading"; return r; }
+    if (!(std::fabs(tone_hz) >= 200 && std::fabs(tone_hz) <= 3000)) { r.why = "the generator offset must be 200..3000 Hz from the dial"; return r; }
+    auto wait = [&](double s) { const double t0 = clk_.now(); while (!abort_ && clk_.now() - t0 < s) clk_.sleep(0.05); };
+    auto average = [&](double s, double* peak) {               // power average of the receiver's in-passband level, sampled every 0.1 s
+        double sum = 0, pk = 0; int n = 0; const double t0 = clk_.now();
+        while (!abort_ && clk_.now() - t0 < s) { const auto [d, p] = read(); if (d > -199) { sum += std::pow(10.0, d / 10.0); ++n; pk = p; } clk_.sleep(0.1); }
+        if (peak) *peak = pk; return n ? 10.0 * std::log10(sum / n) : -200.0;
+    };
+    auto put_preamp_back = [&] { if (preamp) preamp(preamp_was_on); };
+    if (preamp && preamp_was_on) preamp(false);                 // PowerSDR measures with the preamp off first
+    wait(0.5); r.off_dbfs = average(1.5, nullptr);
+    if (abort_) { put_preamp_back(); r.why = "stopped"; return r; }
+    try { siggen::on(fx_, dial_mhz + tone_hz / 1e6); }
+    catch (const std::exception& e) { r.why = std::string("could not switch the generator on: ") + e.what(); put_preamp_back(); return r; }
+    say("signal generator on (receive only): receiver input = the radio's internal generator at " + std::to_string(dial_mhz + tone_hz / 1e6) + " MHz");
+    wait(1.5); r.on_dbfs = average(2.0, &r.peak_hz);
+    if (preamp && !abort_) {
+        if (preamp(true)) { wait(0.5); r.preamp_dbfs = average(2.0, nullptr); r.preamp_measured = !abort_; }
+        preamp(false);
+    }
+    r.restore_error = siggen::off(fx_);                         // always, whatever happened above
+    put_preamp_back();
+    say(r.restore_error.empty() ? "signal generator off: receiver input back to the antenna" : "SIGNAL GENERATOR OFF FAILED: " + r.restore_error);
+    if (!r.restore_error.empty()) { r.why = "the generator could not be switched off (" + r.restore_error + "): power-cycle the radio"; return r; }
+    if (abort_) { r.why = "stopped"; return r; }
+    if (r.on_dbfs - r.off_dbfs < 30) { r.why = "the generator was not seen (only " + std::to_string(int(std::lround(r.on_dbfs - r.off_dbfs))) + " dB above the antenna's signal)"; return r; }
+    if (std::fabs(r.peak_hz - tone_hz) > 150) { r.why = "the strongest signal was at " + std::to_string(int(std::lround(r.peak_hz))) + " Hz, not at the generator's " + std::to_string(int(tone_hz)) + " Hz"; return r; }
+    if (r.on_dbfs > -3) { r.why = "the generator overloads the receiver"; return r; }
+    r.ok = true; return r;
 }
 }  // namespace fireside::txc

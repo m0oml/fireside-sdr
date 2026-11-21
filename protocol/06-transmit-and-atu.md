@@ -103,6 +103,28 @@ Facts learned the hard way:
 - After the tune, read the relays (and the tuner's forward, reflected and SWR) and store them. Restoring a stored tune needs no RF.
 - The ATU's own SWR table in the EEPROM may be blank on a radio whose tuner was never programmed; that does not stop the tuner working.
 
-## 8. What has been verified on the air
+## 8. The built-in signal generator (receive only) (**Reported**)
+The FLEX-5000 has an internal signal generator that can be switched into the receiver in place of the antenna. Its factory RX level calibration (the EEPROM's RX level table, [page 5](05-startup-and-eeprom.md)) was made with it.
+Source: PowerSDR 2.7.2 (GPL), `console.cs` `CalibrateLevel()` and Setup > Tests "Enable HW Signal Generator" (`setup.cs`). Fireside SDR does the same for its S-meter check; on a real radio this is not yet verified.
+
+**On** (about 50 ms apart): `SET_FULL_DUPLEX` 1, the generator's frequency as the transmit DDS (`SET_TX_FREQ_TW`), `SET_GEN` 1, `SET_TEST` 1, `SET_SIG` 1.
+No antenna command: the relays do the routing (PowerSDR shows the receive antenna as "Sig Gen"). **No** `SET_MOX`, `SET_TR`, `SET_QSE` or PA bias change: nothing is transmitted.
+**Off** (PowerSDR's order): `SET_FULL_DUPLEX` 0, `SET_GEN` 0, `SET_TEST` 0, `SET_SIG` 0. Switch it off on every path, including errors: until then the receiver hears the generator, not the antenna.
+
+**Level:** PowerSDR's production test takes the generator as **-24.0 dBm** at the receiver for every FLEX-5000 (`FLEX5000ProdTestForm.cs`, `udLevel`).
+**How the RX level table was made**, per band (`CalibrateLevel`, DSB mode, 500 Hz filter, generator at the dial):
+- preamp off: the signal-strength meter is read 50 times; meter offset = -24 - reading (the table's third column);
+- preamp on: read again; the gain difference is stored negated (second column, about -14 dB);
+- the spectrum's peak bin gives the display offset (first column).
+
+**Units, important:** PowerSDR's signal-strength meter (DttSP `sdr.c`, `RXMETER_POST_FILT`) is 10 log10 of the power **summed** over the DSP buffer, and `CalibrateLevel` sets that buffer to 4096 samples.
+So the meter column is 10 log10(4096) = **36.1 dB** below what a mean-power reading needs: dBm = (in-passband mean power in dB relative to full scale) + meter offset + 36.1, plus the preamp column while the preamp is on.
+**Verified** on one FLEX-5000A, 20 m, 2026-11-21: the generator read -27.2 dBFS (meter offset +3.17 dB); the table's -32.74 + 36.12 = +3.38 dB. The preamp gain measured 14.06 dB against the table's 13.97 dB.
+Fireside SDR's check puts the generator 1 kHz inside the receive passband, requires it 30 dB above the antenna's signal at the expected place, measures with the preamp off and on, and keeps the result per band (it never writes the EEPROM).
+
+**Not to copy:** PowerSDR's transmit calibrations (carrier null, TX image) use the same test path with the transmitter running: `SET_TR` 1, `SET_QSE` 1, `SET_SIG` 1, `SET_TEST` 1, `SET_PDRVMON` 1, `SET_GEN` 0, the PWR slider at 100 and a MOX pulse at the end. They are outside this page's receive-only scope.
+**Open question:** our notes say the radio has one DDS for receive and transmit in normal operation, yet in full duplex the generator follows the transmit DDS while receive stays put. Both may be true (full duplex enabling a second path); not verified.
+
+## 9. What has been verified on the air
 FT8 from the app at 5 W on 20 m, received and answered at the far end; test tones at 2 to 15 W with the receive stream running through the over; ATU tunes at 3, 5 and 10 W on 20 m and another on 40 m; TX I/Q sign confirmed on a WebSDR.
 Not exercised: SSB voice, CW keying, anything above about 20 W, an amplifier on the rear keying lines (`SET_AMP_TX1` and friends), and the transverter and VU module outputs.

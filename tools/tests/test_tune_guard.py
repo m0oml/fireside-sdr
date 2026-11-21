@@ -200,6 +200,18 @@ class TuningIsOneOpcode(unittest.TestCase):
             self.assertNotIn(bad, c, bad)
         self.assertIsNone(re.search(r"[.>]request\(", c))
 
+    def test_siggen_cpp_switches_only_the_generator_relays_full_duplex_and_the_tx_dds(self):
+        """The built-in signal generator (receive only, as PowerSDR's CalibrateLevel): SET_GEN / SET_TEST / SET_SIG, SET_FULL_DUPLEX (0 / 1, gated) and the
+        transmit DDS frequency. Never MOX, the T/R relay, the exciter (QSE) / detector (QSD) switches, the PA-driver monitor or the EEPROM."""
+        c = code("core/src/siggen.cpp")
+        self.assertEqual(sorted(set(re.findall(r'fx\.set\(\s*"([A-Z0-9_]+)"', c))), ["RDAL_OP_SET_GEN", "RDAL_OP_SET_SIG", "RDAL_OP_SET_TEST", "RDAL_OP_SET_TX_FREQ_TW"])
+        self.assertEqual(len(re.findall(r"\.set\(", c)), 8)
+        self.assertEqual(re.findall(r'const std::string n = "([A-Z0-9_]+)"', c), ["RDAL_OP_SET_FULL_DUPLEX"])
+        for bad in ("SET_MOX", "SET_TR\"", "SET_QSE", "SET_QSD", "PDRVMON", "EEPROM", "allow_dangerous", "set_tx_grant", "SET_TX_ANT"):
+            self.assertNotIn(bad, c.replace("// NEVER", ""), bad)
+        h = code("core/include/fireside/tx_control.h") + code("core/src/tx_control.cpp")
+        self.assertIn("siggen::off(fx_)", h)                                         # the check always switches it off again
+
     def test_only_tune_cpp_and_startup_cpp_write(self):
         offenders = []
         for root in ("core/src", "gui", "tools"):
@@ -208,7 +220,7 @@ class TuningIsOneOpcode(unittest.TestCase):
                     if not f.endswith((".cpp", ".h")): continue
                     p = os.path.relpath(os.path.join(d, f), APP)
                     if p in ("core/src/tune.cpp", "core/src/startup.cpp", "core/src/client.cpp", "core/src/preamp.cpp", "core/src/rxant.cpp",
-                             "core/src/atu.cpp", "core/src/tx_gate.cpp", "core/src/tx_setup.cpp", "tools/firesidekey.cpp", "core/src/tx_control.cpp", "core/src/codec.cpp"): continue   # each has its own test below
+                             "core/src/atu.cpp", "core/src/tx_gate.cpp", "core/src/tx_setup.cpp", "tools/firesidekey.cpp", "core/src/tx_control.cpp", "core/src/codec.cpp", "core/src/siggen.cpp"): continue   # each has its own test below
                     if re.search(r"\b(fx|flex|client)\w*(\.|->)set\(", code(p)): offenders.append(p)
         self.assertEqual(offenders, [])
 

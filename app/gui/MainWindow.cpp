@@ -96,6 +96,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
         connect(receiver_, &ReceiverPanel::callerDecoded, tx_card_, &TransmitCard::heardLine);
         connect(tx_card_, &TransmitCard::logQso, log_panel_, &LogPanel::logAuto);
         connect(tx_card_, &TransmitCard::qsoPartner, receiver_, &ReceiverPanel::setQsoPartner);
+        connect(tx_card_, &TransmitCard::qsoEnded, receiver_, &ReceiverPanel::endQso);
         connect(tx_card_, &TransmitCard::txSent, receiver_, &ReceiverPanel::addQsoTx);
         receiver_->setTransmitMeters(tx_card_->powerMeter(), tx_card_->statusLabel(), tx_card_->armButton()); receiver_->setTxLamp(tx_card_->lampLabel()); audio_panel_->addKeyingWidget(tx_card_->otherProgramsPart());   // the power meter joins the signal meter, the TX light by the frequency, the CAT tick on the Audio tab
         {   // antenna selector (main screen), as buttons: RX ANT1..3 / RX1 IN, TX ANT1..3 for the band the dial is in (the Antennas table remembers them)

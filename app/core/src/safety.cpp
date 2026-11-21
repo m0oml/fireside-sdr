@@ -11,7 +11,7 @@ bool Safety::matches_dangerous(const std::string& n) {
 }
 bool Safety::value_restricted(const std::string& n) {
     return n == "RDAL_OP_INITIALIZE" || n == "RDAL_OP_SET_MOX" || n == "RDAL_OP_SET_PA_BIAS" || n == "RDAL_OP_ATU_SEND_CMD" || n == "RDAL_OP_PA_POT_SET_RDAC" || n == "RDAL_OP_SET_TRX_POT"
-        || n == "RDAL_OP_WRITE_CODEC_REG";
+        || n == "RDAL_OP_WRITE_CODEC_REG" || n == "RDAL_OP_SET_FULL_DUPLEX";
 }
 bool Safety::calibrated_value(const std::string& n, uint32_t d1, uint32_t d2) const {
     std::lock_guard<std::mutex> l(m_);
@@ -45,6 +45,8 @@ bool Safety::reviewed_value(const std::string& n, uint32_t d1, uint32_t d2) {
     // Codec: ONLY the mic input gain, register 0x16 (PowerSDR fwcmixform.cs tbMic: 0 dB = 0x00, -128..-1 dB = 0x80..0xFF, 0x80 = muted).
     // An audio input level: it cannot key, route or switch anything else (analysis/voice-tx.md).
     if (n == "RDAL_OP_WRITE_CODEC_REG") return d1 == 0x16 && (d2 == 0x00 || (d2 >= 0x80 && d2 <= 0xFF));
+    // Full duplex: only off / on (siggen.cpp, the built-in signal generator, receive only; PowerSDR FWC.SetFullDuplex).
+    if (n == "RDAL_OP_SET_FULL_DUPLEX") return d1 <= 1 && d2 == 0;
     if (n == "RDAL_OP_PA_POT_SET_RDAC" || n == "RDAL_OP_SET_TRX_POT") return false;   // only calibrated_value() (the radio's own EEPROM values)
     return d1 == 0 && d2 == 0;
 }

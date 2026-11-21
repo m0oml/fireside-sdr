@@ -116,7 +116,7 @@ The same table for programs: [`opcodes.json`](opcodes.json) and [`opcodes.csv`](
 | 1283 | `SET_KEY_2M` | w | u32, u32 | dangerous | |  |
 | 1284 | `SET_XVTR` | w | u32, u32 | dangerous | |  |
 | 1292 | `SET_MOX` | w | u32, u32 | dangerous | yes | 0/1 key/unkey the transmitter. DANGEROUS-gated; needs a correct antenna/dummy load. |
-| 1296 | `SET_FULL_DUPLEX` | w | u32, u32 | dangerous | | 0/1 full duplex (TX during RX path). |
+| 1296 | `SET_FULL_DUPLEX` | w | u32, u32 | dangerous | yes | 0/1 full duplex (TX during RX path). On, the transmit DDS (SET_TX_FREQ_TW) runs while receive stays on its own frequency: the built-in generator sits there (page 6). |
 | 1297 | `SET_TX_DAC` | w | u32, u32 | dangerous | |  |
 | 1298 | `SET_AMP_TX1` | w | u32, u32 | dangerous | | Keying line AMP RLY TX1 (rear panel) on/off with T/R; also *_DELAY_ENABLE / *_DELAY (ms) for sequencing. |
 | 1299 | `SET_AMP_TX2` | w | u32, u32 | dangerous | |  |
@@ -233,9 +233,9 @@ The same table for programs: [`opcodes.json`](opcodes.json) and [`opcodes.csv`](
 
 | # | opcode | R/W | types | safety | in use | notes |
 |---|---|---|---|---|---|---|
-| 1248 | `SET_TEST` | w | u32, u32 | write | | Calibration only. |
-| 1249 | `SET_GEN` | w | u32, u32 | write | | Calibration only. |
-| 1250 | `SET_SIG` | w | u32, u32 | write | | Calibration only (signal generator relay). |
+| 1248 | `SET_TEST` | w | u32, u32 | write | yes | 0/1 test-path relay (with SET_GEN and SET_SIG: the generator into the receiver; PowerSDR's transmit loopback calibrations also use it). Page 6. |
+| 1249 | `SET_GEN` | w | u32, u32 | write | yes | 0/1 built-in signal generator. With SET_TEST 1 and SET_SIG 1 (full duplex on) it is the receiver input, at the transmit DDS frequency, about -24 dBm. Page 6. |
+| 1250 | `SET_SIG` | w | u32, u32 | write | yes | 0/1 signal generator relay: the receiver input comes from the test path instead of the antenna. Built-in generator: page 6. |
 | 1251 | `SET_IMPULSE` | w | u32, u32 | write | |  |
 | 1255 | `SET_QSE` | w | u32, u32 | write | | Calibration only (Quadrature Sampling Exciter enable). |
 | 1256 | `SET_XREF` | w | u32, u32 | write | |  |

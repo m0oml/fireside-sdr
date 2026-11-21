@@ -1,4 +1,6 @@
 #include "TransmitCard.h"
+#include "fireside/siggen.h"
+#include "fireside/preamp.h"
 #include <QCheckBox>
 #include <QDialog>
 #include <QComboBox>
@@ -125,7 +127,11 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     {   // the tuner settings: a window of their own, so the antenna card stays short
         tuner_dialog_ = new QDialog(this, Qt::Tool); tuner_dialog_->setWindowTitle("Tuner settings"); auto* dv = new QVBoxLayout(tuner_dialog_); dv->setSpacing(8);
         auto* cal = new QPushButton("Calibration  \u25B8"); cal->setCheckable(true); cal->setToolTip("Measure drive and the test tone: used once per band, not for everyday operation");
-        cal_body_ = part({row({measure_, test_, test_w_, mirror_})}); cal_body_->setVisible(false);
+        gen_btn_ = new QPushButton("Check S-meter (internal generator)");
+        gen_btn_->setToolTip("Receive only: for about 10 s the receiver listens to the radio's internal signal generator (taken as -24 dBm, as PowerSDR does) instead of the antenna, "
+                             "with the preamp off and then on. The result is saved for this band and the S-meter uses it. Nothing is transmitted.");
+        connect(gen_btn_, &QPushButton::clicked, this, &TransmitCard::onGenCheck);
+        cal_body_ = part({row({measure_, test_, test_w_, mirror_}), row({gen_btn_})}); cal_body_->setVisible(false);
         connect(cal, &QPushButton::toggled, this, [this, cal](bool on) { cal_body_->setVisible(on); cal->setText(on ? QStringLiteral("Calibration  \u25BE") : QStringLiteral("Calibration  \u25B8")); tuner_dialog_->adjustSize(); });
         mem_->setWordWrap(true); mem_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         dv->addLayout(row({tl, power_, thr_})); dv->addLayout(row({restore_, auto_restore_})); dv->addWidget(mem_); dv->addLayout(row({cal, stop2_})); dv->addWidget(cal_body_);
@@ -139,12 +145,13 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
     hide();                                                                           // this object only owns the parts: the window places them (Antenna, Transmit, decoder row, voice strip)
     timer_ = new QTimer(this); timer_->setInterval(100); connect(timer_, &QTimer::timeout, this, &TransmitCard::tick); timer_->start();
+    loadCheckedCal();
     connect(arm_, &QPushButton::toggled, this, &TransmitCard::onArm);
     connect(tune_, &QPushButton::clicked, this, &TransmitCard::onTune); connect(measure_, &QPushButton::clicked, this, &TransmitCard::onMeasure);
     connect(restore_, &QPushButton::clicked, this, &TransmitCard::onRestore);
     connect(test_, &QPushButton::clicked, this, &TransmitCard::onTestTone);
     connect(mirror_, &QCheckBox::toggled, this, [this] { saveState(); });
-    connect(stop_, &QPushButton::clicked, this, [this] { ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } if (seq_) seq_->stop();
+    connect(stop_, &QPushButton::clicked, this, [this] { ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } if (seq_) { seq_->stop(); noteSeqEnd(); }   // a logged QSO stopped during its RR73 repeats is still done
                                                        ext_ptt_ = false; if (tx_) tx_->abort(); report("Stop pressed: unkeying, nothing queued."); updateButtons(); });
     connect(send_, &QPushButton::clicked, this, &TransmitCard::onSend);
     connect(ext_allow_, &QCheckBox::toggled, this, [this](bool on) {
@@ -293,6 +300,7 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
             const QString rxnote = resumeReceive(); { QSignalBlocker b(arm_); arm_->setChecked(tx_ && tx_->armed()); }   // a refused arm springs back
             const bool sent_ok = res.endsWith(" #sent");
             if (sent_ok) takeLog();                                                                  // the over that completed a QSO has gone out: log it
+            noteSeqEnd();
             const bool resend = (sent_ok && ft_repeat_->isChecked() && !(seq_ && seq_->stage() != fireside::seq::Stage::Idle)) || (seq_ && seq_->active() && !res.startsWith("Not sent"));
             if (seq_ && !seq_->describe().empty()) res += "  " + QString::fromStdString(seq_->describe()) + ".";
             if (res.endsWith(" #sent")) res.chop(6);
@@ -375,7 +383,7 @@ void TransmitCard::replyTo(const QString& line) {
     if (!sq.reply_to(h)) { report("Nothing to answer in: " + QString::fromStdString(text)); return; }
     { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - line_parity(line, ft_mode_->currentIndex() == 1)); }   // our slots are the other parity
     { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); }
-    ft_msg_->setText(QString::fromStdString(sq.current())); saveState(); emit qsoPartner(QString::fromStdString(sq.dx()));
+    ft_msg_->setText(QString::fromStdString(sq.current())); saveState(); ended_for_.clear(); emit qsoPartner(QString::fromStdString(sq.dx()));
     ft_timer_->stop(); ft_pending_.reset();
     if (tx_ && tx_->armed() && !worker_running_) queueSend(); else report(QString("Reply ready: %1 (%2). Transmit is not ready yet.").arg(ft_msg_->text(), ft_par_->currentText()));
 }
@@ -391,7 +399,18 @@ void TransmitCard::heardLine(const QString& line) {
 }
 void TransmitCard::takeLog() {
     if (!seq_) return;
-    if (auto l = seq_->take_log()) emit logQso(QString::fromStdString(l->call), QString::fromStdString(l->grid), QString::fromStdString(l->rst_sent), QString::fromStdString(l->rst_rcvd));
+    if (auto l = seq_->take_log()) {
+        emit logQso(QString::fromStdString(l->call), QString::fromStdString(l->grid), QString::fromStdString(l->rst_sent), QString::fromStdString(l->rst_rcvd));
+        logged_for_ = QString::fromStdString(l->call);                                  // logged; "done" is said when the sequence really ends (RR73 repeats may follow)
+    }
+    noteSeqEnd();
+}
+void TransmitCard::noteSeqEnd() {                        // the sequence has ended: say so once in the QSO pane (done = it was logged; else only if it gave up)
+    if (!seq_ || seq_->active()) return;
+    const QString dx = QString::fromStdString(seq_->dx()); if (dx.isEmpty() || dx == ended_for_) return;
+    const bool logged = dx == logged_for_;
+    if (!logged && seq_->stage() != fireside::seq::Stage::GaveUp) return;                // stopped before anything was logged: nothing to announce
+    ended_for_ = dx; emit qsoEnded(dx, logged);
 }
 
 void TransmitCard::offerBackup() {
@@ -418,9 +437,55 @@ void TransmitCard::offerBackup() {
     });
 }
 void TransmitCard::applyRxCal(const RxLevelCal& c) {
+    rx_cal_ = c;
     rx_->setRxLevelCal(c.valid, c.meter, c.preamp);
-    emit message(c.valid ? QString("S-meter: using the radio's factory RX level table (20 m: meter %1 dB, preamp %2 dB); not yet checked against a known signal").arg(c.meter[5], 0, 'f', 1).arg(c.preamp[5], 0, 'f', 1)
+    emit message(c.valid ? QString("S-meter: using the radio's factory RX level table (20 m: meter %1 dB in PowerSDR units = %2 dB here, preamp %3 dB)").arg(c.meter[5], 0, 'f', 1).arg(c.meter[5] + ReceiverPanel::kTableToDbfsDb, 0, 'f', 1).arg(c.preamp[5], 0, 'f', 1)
                          : QString("S-meter: the RX level table is not usable (%1); the meter stays uncalibrated").arg(QString::fromStdString(c.problem)));
+}
+void TransmitCard::onGenCheck() {
+    if (!tx_ || !tx_->armed() || worker_running_ || ft_pending_) { report("The S-meter check needs the transmit check done and nothing else running."); return; }
+    const QString mode = rx_->modeName(); const int band = txm::band_of(rx_->dialHz());
+    if (band < 0) { report("The dial is outside the amateur bands."); return; }
+    if (mode != "USB" && mode != "LSB") { report("Switch the receiver to USB or LSB for the S-meter check (the generator is put 1 kHz inside the passband)."); return; }
+    if (!ask("Check the S-meter with the internal generator?",
+             "Receive only: nothing is transmitted.\n\nFor about 10 seconds the receiver listens to the radio's built-in signal generator instead of the antenna "
+             "(PowerSDR's \"Enable HW Signal Generator\" and its RX level calibration), with the preamp off and then on. PowerSDR takes the generator as -24 dBm.\n\n"
+             "The result is saved for this band and the S-meter uses it from then on.")) return;
+    const double dial = rx_->dialHz() / 1e6, tone = mode == "LSB" ? -1000.0 : 1000.0; const bool pre = radio_->session().preamp_on();
+    ReceiverPanel* rx = rx_; RadioPanel* radio = radio_;
+    auto read = [rx] { return rx->levelForChecks(); };                                       // atomics: safe from the worker
+    auto preamp = [radio](bool on) { const auto r = radio->session().set_preamp(on); return r == PreampResult::Sent || r == PreampResult::Unchanged; };
+    run(QString("Checking the S-meter on %1 with the internal generator (receive only)").arg(txm::band_name(band)), false, [this, dial, tone, read, preamp, pre, band, cal = rx_cal_](txc::TxControl& t) {
+        const auto log = [this](const std::string& m) { const QString q = QString::fromStdString(m); QMetaObject::invokeMethod(this, [this, q] { emit message("S-meter check: " + q); }, Qt::QueuedConnection); };
+        const auto r = t.sig_gen_check(dial, tone, read, preamp, pre, log);
+        QMetaObject::invokeMethod(this, [this, r, band] { applyGenCheck(r, band); }, Qt::QueuedConnection);
+        if (!r.ok) return QString("S-meter check: %1.").arg(QString::fromStdString(r.why));
+        const double meter = siggen::kLevelDbm - r.on_dbfs;
+        QString t2 = QString("S-meter check on %1: the generator (-24 dBm) read %2 dBFS, so the meter offset is %3 dB").arg(txm::band_name(band)).arg(r.on_dbfs, 0, 'f', 1).arg(meter, 0, 'f', 1);
+        if (cal.valid) { const double tbl = cal.meter[size_t(band)] + ReceiverPanel::kTableToDbfsDb; t2 += QString(" (factory table %1 dB in our units, difference %2 dB)").arg(tbl, 0, 'f', 1).arg(meter - tbl, 0, 'f', 1); }
+        if (r.preamp_measured) { t2 += QString("; preamp gain %1 dB").arg(r.preamp_dbfs - r.on_dbfs, 0, 'f', 1); if (cal.valid) t2 += QString(" (table %1)").arg(-cal.preamp[size_t(band)], 0, 'f', 1); }
+        return t2 + ". Saved: the S-meter uses it on this band.";
+    });
+}
+void TransmitCard::applyGenCheck(const txc::TxControl::GenCheck& r, int band) {
+    if (!r.restore_error.empty() && auto_confirm_ < 0)
+        QMessageBox::critical(this, "Signal generator still on?", "The radio did not confirm switching its internal generator off:\n\n" + QString::fromStdString(r.restore_error) +
+                              "\n\nThe receiver may still be listening to the generator instead of the antenna. Stop the radio and power it off and on.");
+    if (!r.ok || band < 0 || band >= txm::kBands) return;
+    const double meter = siggen::kLevelDbm - r.on_dbfs, pre = r.preamp_measured ? -(r.preamp_dbfs - r.on_dbfs) : std::nan("");
+    rx_->setCheckedCal(band, meter, pre);
+    if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) {
+        QSettings q("fireside", "smeter"); q.beginGroup(txm::band_name(band));
+        q.setValue("meter_db", meter); if (r.preamp_measured) q.setValue("preamp_db", pre); else q.remove("preamp_db");
+        q.setValue("generator_dbfs", r.on_dbfs); q.setValue("utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)); q.endGroup();
+    }
+}
+void TransmitCard::loadCheckedCal() {                     // the S-meter checks saved earlier (per band), used before the EEPROM table
+    if (qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) return;
+    QSettings q("fireside", "smeter");
+    for (int b = 0; b < txm::kBands; ++b) { q.beginGroup(txm::band_name(b));
+        if (q.contains("meter_db")) rx_->setCheckedCal(b, q.value("meter_db").toDouble(), q.contains("preamp_db") ? q.value("preamp_db").toDouble() : std::nan(""));
+        q.endGroup(); }
 }
 void TransmitCard::onArm(bool on) {
     if (!on) { if (tx_) tx_->disarm(); report("Transmit disarmed."); updateButtons(); return; }
@@ -654,6 +719,7 @@ void TransmitCard::updateButtons() {
     if (!on_atu) { tune_->setToolTip(QString("This band transmits on ANT%1: the ATU is on ANT1 only (Antennas tab)").arg(txAnt())); }
     power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr);
     ext_allow_->setEnabled(armed || ext_allow_->isChecked());                      // can always be unticked
+    gen_btn_->setEnabled(armed && idle && band >= 0 && !ft_pending_);
 }
 void TransmitCard::updateMemoryLabel() {
     const int band = txm::band_of(rx_->dialHz());

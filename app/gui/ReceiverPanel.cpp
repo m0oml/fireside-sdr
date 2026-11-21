@@ -587,7 +587,7 @@ void ReceiverPanel::refresh() {
         else audioOut_->push(audio_buf_, float(volume_->value()) / 100.0f);
     }
     const RxStatus st = engine_.status();
-    peak_hz_ = st.peak_hz; peak_db_ = st.peak_db; signal_dbfs_ = st.signal_dbfs; audio_total_ = size_t(st.audio_samples);
+    peak_hz_ = st.peak_hz; peak_db_ = st.peak_db; signal_dbfs_ = st.signal_dbfs; chk_dbfs_ = st.signal_dbfs; chk_peak_hz_ = st.peak_hz; audio_total_ = size_t(st.audio_samples);
     if (playing_ && !st.running) { playing_ = false; QSignalBlocker b(play_); play_->setChecked(false); play_->setText("Play"); }
     if (st.ended) note_ = "End of recording."; else if (!st.error.empty()) note_ = QString("Stopped: ") + QString::fromStdString(st.error);
     { std::string t; if (engine_.take_text(t) > 0) addDecodedText(QString::fromStdString(t));
@@ -595,7 +595,7 @@ void ReceiverPanel::refresh() {
     meter_->setLevel(st.signal_dbfs <= -199 ? -120 : st.signal_dbfs);
     const double off = meterOffsetDb(); meter_->setOffsetDb(off); const bool cal = meterCalibrated();
     meter_text_->setText(st.signal_dbfs <= -199 ? "no signal" : QString("%1   %2 dBm %5   %3 dBFS   peak line %4 dBFS").arg(SMeter::sText(st.signal_dbfs + off), 0).arg(st.signal_dbfs + off, 0, 'f', 0).arg(st.signal_dbfs, 0, 'f', 1).arg(st.peak_db, 0, 'f', 1)
-                         .arg(cal ? "(factory table)" : "(uncal)"));
+                         .arg(meterSource() == 2 ? "(checked)" : cal ? "(factory table)" : "(uncal)"));
     updateStatus();
 }
 
@@ -883,8 +883,9 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
         }
         const QString shown = (ln.indexOf(kInfoSep) < 0 ? ln : ln.left(ln.indexOf(kInfoSep))).trimmed();
         if (to_me) {
-            addQsoLine(shown, 1);                                                  // only what is addressed to us (and our own overs): nothing else, not even the partner's other calls
             const QString fb = QString::fromStdString(fireside::qrz::base_call(m.from));
+            // the QSO pane: what is addressed to us and our own overs; during a QSO only the partner's (anyone else calling waits in the callers area)
+            if (qso_partner_.isEmpty() || fb == qso_partner_) addQsoLine(shown, 1);
             if (!fb.isEmpty() && fb != qso_partner_) addCaller(fb, shown);         // someone new calling us: kept in the callers area until answered (the partner's replies are in the QSO pane)
         }
     }
@@ -954,6 +955,14 @@ void ReceiverPanel::setQsoPartner(const QString& call) {
     if (!b.isEmpty() && qso_text_) { qso_text_->moveCursor(QTextCursor::End); QTextCursor c = qso_text_->textCursor(); if (!qso_text_->document()->isEmpty()) c.insertBlock();
         QTextCharFormat f; f.setForeground(QColor("#8b93a7")); c.setBlockFormat(QTextBlockFormat()); c.insertText(QString::fromUtf8("\u2500\u2500 QSO with %1 \u2500\u2500").arg(b), f); qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
 }
+void ReceiverPanel::endQso(const QString& call, bool done) {               // the sequence finished: a closing line, and the pane takes callers again
+    const QString b = QString::fromStdString(fireside::qrz::base_call(call.toStdString()));
+    if (qso_text_) { qso_text_->moveCursor(QTextCursor::End); QTextCursor c = qso_text_->textCursor(); if (!qso_text_->document()->isEmpty()) c.insertBlock();
+        QTextCharFormat f; f.setForeground(done ? QColor("#3ddc84") : QColor("#8b93a7")); f.setFontWeight(QFont::Bold); c.setBlockFormat(QTextBlockFormat());
+        c.insertText(done ? QString::fromUtf8("\u2500\u2500 QSO with %1 done \u2500\u2500").arg(b) : QString::fromUtf8("\u2500\u2500 QSO with %1 not completed (no answer) \u2500\u2500").arg(b), f);
+        qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
+    if (b == qso_partner_) qso_partner_.clear();
+}
 void ReceiverPanel::addQsoTx(const QString& utc, int hz, const QString& msg) {
     { QString to = msg.section(' ', 0, 0).trimmed(); to.remove('<').remove('>'); removeCaller(QString::fromStdString(fireside::qrz::base_call(to.toStdString()))); }   // our over to them answers them
     addQsoLine(QString("%1  TX      %2 ~  %3").arg(utc).arg(hz, 4).arg(msg), 2);
@@ -995,11 +1004,20 @@ void ReceiverPanel::setRxLevelCal(bool valid, const std::array<double, 11>& mete
     meter_->setToolTip(valid ? "dBm from the radio's factory RX level table (EEPROM): per band, minus the preamp's gain when it is on. Not yet checked against a known signal."
                              : "dBm uses a placeholder offset: the radio's RX level table has not been read (it is read with the transmit check at start-up)");
 }
-bool ReceiverPanel::meterCalibrated() const { return cal_valid_ && fireside::txm::band_of(dialHz()) >= 0; }
-double ReceiverPanel::meterOffsetDb() const {      // dBm = dBFS + this: the band's factory meter offset (+ the preamp row while the preamp is on), else the placeholder
-    const int b = fireside::txm::band_of(dialHz());
-    if (!cal_valid_ || b < 0 || b >= 11) return SMeter::kUncalOffsetDb;
-    return cal_meter_[size_t(b)] + (preamp_ && preamp_->isChecked() ? cal_preamp_[size_t(b)] : 0.0);
+void ReceiverPanel::setCheckedCal(int band, double meter, double preamp) {      // from the internal-generator check: used before the factory table on that band
+    if (band < 0 || band >= 11) return; chk_valid_[size_t(band)] = true; chk_meter_[size_t(band)] = meter; chk_preamp_[size_t(band)] = preamp;
+}
+int ReceiverPanel::meterSource() const {           // 0 placeholder, 1 the EEPROM's factory table, 2 checked here with the internal generator
+    const int b = fireside::txm::band_of(dialHz()); if (b < 0 || b >= 11) return 0;
+    return chk_valid_[size_t(b)] ? 2 : cal_valid_ ? 1 : 0;
+}
+bool ReceiverPanel::meterCalibrated() const { return meterSource() > 0; }
+double ReceiverPanel::meterOffsetDb() const {      // dBm = dBFS + this: the band's meter offset (+ the preamp row while the preamp is on), else the placeholder
+    const int b = fireside::txm::band_of(dialHz()); const int src = meterSource();
+    if (src == 0) return SMeter::kUncalOffsetDb;
+    const bool pre = preamp_ && preamp_->isChecked(); const size_t i = size_t(b);
+    if (src == 2) return chk_meter_[i] + (pre ? (std::isnan(chk_preamp_[i]) ? (cal_valid_ ? cal_preamp_[i] : 0.0) : chk_preamp_[i]) : 0.0);
+    return cal_meter_[i] + kTableToDbfsDb + (pre ? cal_preamp_[i] : 0.0);
 }
 void ReceiverPanel::setTxLamp(QLabel* lamp) { if (mode_switch_col_) mode_switch_col_->insertWidget(0, lamp); }   // left of the frequency: the TX light
 QWidget* ReceiverPanel::takeAdvancedWidget() { QWidget* w = advanced_; advanced_ = nullptr; return w; }

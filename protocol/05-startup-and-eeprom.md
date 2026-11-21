@@ -66,7 +66,7 @@ A byte other than `0xC5` at `0x3F` makes the reference software stop trusting th
 **Tables** (float32, little-endian, 11 bands in the order 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 m; checksum = XOR of all bytes of the table):
 | Table | pointer at | data at | shape | checksum at | sane values |
 |---|---|---|---|---|---|
-| RX level | `0x48` | `0x100` | 11 x 3 (display, preamp, meter) | `0x18F` | display about -60, preamp about -14, meter about -33 |
+| RX level | `0x48` | `0x100` | 11 x 3 (display, preamp, meter) | `0x18F` | display about -60, preamp about -14, meter about -33. Made with the built-in generator at -24 dBm ([page 6](06-transmit-and-atu.md) section 8) |
 | RX image gain | `0x4A` | `0x190` | 11 | `0x1BF` | abs < 500 |
 | RX image phase | `0x4C` | `0x1C0` | 11 | `0x1EF` | abs < 500 |
 | TX image gain | `0x4E` | `0x1F0` | 11 | `0x21F` | abs < 500 |

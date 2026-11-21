@@ -48,7 +48,7 @@ TEST(rigctl_dial_refused_while_transmitting) {
     CHECK_EQ(r.sets, 0); CHECK_EQ(r.mode_sets, 0);
     r.busy = false; r.key = true; CHECK_EQ(s.feed("F 14074000\n"), std::string("RPRT -9\n")); CHECK_EQ(s.feed("t\n"), std::string("1\n"));   // get_ptt reports the real state
 }
-TEST(rigctl_never_transmits) {
+TEST(rigctl_refuses_ptt_without_a_ptt_request) {
     FakeRig r; Session s(r);
     for (const char* k : {"T 1\n", "T 2\n", "T 3\n", "\\set_ptt 1\n", "+T 1\n"}) { const std::string o = s.feed(k); CHECK(o.find("RPRT -9") != std::string::npos); }
     CHECK_EQ(s.refused_ptt(), uint64_t(5));
@@ -58,6 +58,25 @@ TEST(rigctl_never_transmits) {
     CHECK_EQ(s.feed("\\set_powerstat 0\n"), std::string("RPRT -9\n"));          // power off
     CHECK_EQ(s.feed("\\set_powerstat 1\n"), std::string("RPRT 0\n"));
     CHECK(dump_state().find("ptt_type=0x0") != std::string::npos);
+}
+namespace {
+struct FakePtt : PttRequest {
+    bool allow = true; int on_calls = 0, off_calls = 0, beats = 0, last_client = -1; bool held = false;
+    bool request_ptt(int client, bool on) override { last_client = client; if (!on) { ++off_calls; held = false; return true; } ++on_calls; if (allow) held = true; return allow; }
+    void heartbeat(int client) override { last_client = client; ++beats; }
+};
+}  // namespace
+TEST(rigctl_ptt_goes_only_through_the_ptt_request) {
+    FakeRig r; FakePtt p; Session s(r, &p, 7);
+    CHECK_EQ(s.feed("T 1\n"), std::string("RPRT 0\n")); CHECK(p.held); CHECK_EQ(p.on_calls, 1); CHECK_EQ(p.last_client, 7);
+    CHECK_EQ(s.feed("T 0\n"), std::string("RPRT 0\n")); CHECK(!p.held); CHECK_EQ(p.off_calls, 1);
+    CHECK_EQ(s.feed("+T 3\n"), std::string("set_ptt: 3\nRPRT 0\n")); CHECK_EQ(p.on_calls, 2);   // PTT data
+    p.allow = false; CHECK_EQ(s.feed("T 1\n"), std::string("RPRT -9\n")); CHECK_EQ(s.refused_ptt(), uint64_t(1));
+    CHECK_EQ(s.feed("T 0\n"), std::string("RPRT 0\n"));                     // releasing is never refused
+    CHECK_EQ(s.feed("T 9\n"), std::string("RPRT -1\n")); CHECK_EQ(s.feed("T\n"), std::string("RPRT -1\n"));
+    CHECK_EQ(p.on_calls, 3);                                                   // T 9 / T with no value never asked
+    const int b0 = p.beats; s.feed("f\nm\n"); CHECK_EQ(p.beats, b0 + 2);    // every command is a heartbeat
+    r.key = true; CHECK_EQ(s.feed("t\n"), std::string("1\n"));               // get_ptt still reports the real state
 }
 TEST(rigctl_set_mode_names_and_widths) {
     FakeRig r; Session s(r); r.dig = false;

@@ -64,3 +64,15 @@ TEST(save_backup_is_read_only_and_never_overwrites) {
     std::string csv = read_text("trx.csv"); std::ifstream in(dir + "/F5K_0301-1234 backup.csv"); std::stringstream ss; ss << in.rdbuf(); CHECK_EQ(ss.str(), csv);
     std::filesystem::permissions(dir, std::filesystem::perms::owner_all); std::filesystem::remove_all(dir);
 }
+
+TEST(rx_level_table_feeds_the_s_meter_only_when_it_is_sound) {
+    Decoded d; TableResult t; t.name = "RX level"; t.pointer_ok = t.checksum_ok = true;
+    for (int i = 0; i < 11; ++i) t.values.push_back({-60.0 + 0.1 * i, -14.0, -33.0 + 0.1 * i});
+    d.tables = {t}; auto c = rx_level_cal(d);
+    CHECK(c.valid); CHECK_NEAR(c.meter[5], -32.5, 1e-9); CHECK_NEAR(c.preamp[5], -14.0, 1e-9); CHECK_NEAR(c.display[0], -60.0, 1e-9);
+    d.tables[0].checksum_ok = false; CHECK(!rx_level_cal(d).valid); d.tables[0].checksum_ok = true;
+    d.tables[0].values[3][2] = 5.0; CHECK(!rx_level_cal(d).valid); d.tables[0].values[3][2] = -33.0;      // a meter offset of +5 dB is not a calibration
+    d.tables[0].values.pop_back(); CHECK(!rx_level_cal(d).valid);
+    CHECK(!rx_level_cal(Decoded{}).valid);
+    const auto img = read_bin("trx.bin"); if (!img.empty()) { auto r = rx_level_cal(decode_eeprom(img)); (void)r; }   // the test image decodes without throwing
+}

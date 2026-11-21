@@ -3,6 +3,7 @@
 #include "CatPanel.h"
 #include "fireside/tx_meter.h"
 #include <QLabel>
+#include <QTimer>
 #include <QGridLayout>
 #include <QButtonGroup>
 #include "AppLog.h"
@@ -83,7 +84,8 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
         if (qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) return;                          // also ~/.local/share/fireside/transmit.log (UTC time stamp), to read back later
         const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/fireside"; QDir().mkpath(dir);
         QFile f(dir + "/transmit.log"); if (f.open(QIODevice::Append | QIODevice::Text)) f.write((QDateTime::currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss.zzz ") + m + "\n").toUtf8()); });
-    receiver_->setTransmitSideWidget(tx_card_);                                              // the radio's transmit: to the right of the decoder
+    tx_card_->setParent(receiver_); tx_card_->hide();                                       // only the owner of the pieces below
+    receiver_->setTransmitParts(tx_card_->digitalPart(), tx_card_->voicePart());              // the message controls beside the decoder (Digital), the voice controls under the waterfall (Voice)
     receiver_->setTransmitWidget(tx_panel_);                                                 // the offline TX lab: under the decoder, behind its button
     connect(tx_panel_, &TxPanel::previewRequested, this, [this](const QString& wav, int decoder, int tone) { if (receiver_->loadFile(wav)) { receiver_->setDecoderIndex(decoder); if (tone > 0) receiver_->setDecoderTone(tone); showReceiver(); } });   // look at the rendered file on the waterfall: the receiver only reads it
     connect(receiver_, &ReceiverPanel::decodedCall, log_panel_, &LogPanel::checkWorked); connect(log_panel_, &LogPanel::workedKnown, receiver_, &ReceiverPanel::markWorked);
@@ -95,7 +97,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
         connect(tx_card_, &TransmitCard::logQso, log_panel_, &LogPanel::logAuto);
         connect(tx_card_, &TransmitCard::qsoPartner, receiver_, &ReceiverPanel::setQsoPartner);
         connect(tx_card_, &TransmitCard::txSent, receiver_, &ReceiverPanel::addQsoTx);
-        receiver_->setTxMeterWidget(tx_card_->powerMeter());
+        receiver_->setTransmitMeters(tx_card_->powerMeter(), tx_card_->statusLabel(), tx_card_->armButton()); receiver_->setTxLamp(tx_card_->lampLabel()); audio_panel_->addKeyingWidget(tx_card_->otherProgramsPart());   // the power meter joins the signal meter, the TX light by the frequency, the CAT tick on the Audio tab
         {   // antenna selector (main screen), as buttons: RX ANT1..3 / RX1 IN, TX ANT1..3 for the band the dial is in (the Antennas table remembers them)
             auto* w = new QWidget; auto* g = new QGridLayout(w); g->setContentsMargins(0, 0, 0, 0); g->setHorizontalSpacing(4); g->setVerticalSpacing(4);
             auto* rxg = new QButtonGroup(w); auto* txg = new QButtonGroup(w); rxg->setExclusive(true); txg->setExclusive(true);
@@ -105,7 +107,8 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
                 b->setToolTip(i == 3 ? "Receive on the RX1 IN socket (receive only), for this band" : QString("Receive on %1 for this band").arg(rx_text[i])); rxg->addButton(b, i); g->addWidget(b, 0, i + 1); }
             for (int i = 0; i < 3; ++i) { auto* b = new QPushButton(QString("ANT%1").arg(i + 1)); b->setCheckable(true); b->setCursor(Qt::PointingHandCursor);
                 b->setToolTip(i == 0 ? "Transmit on ANT1, through the ATU, for this band" : QString("Transmit on ANT%1 for this band: NOT through the ATU (Tune is refused)").arg(i + 1)); txg->addButton(b, i + 1); g->addWidget(b, 1, i + 1); }
-            auto* note = new QLabel(" "); note->setObjectName("muted"); g->addWidget(note, 2, 0, 1, 5);
+            auto* note = new QLabel(" "); note->setObjectName("muted"); g->addWidget(note, 1, 4, 1, 2);
+            g->addWidget(tx_card_->atuPart(), 2, 0, 1, 6);   // Tune ATU and the Tuner settings button (the rest is in a window)   // the tuner lives with the antennas
             receiver_->setAntennaWidget(w);
             tx_card_->setTxAntennaSource([this](double hz) { return antennas_->txAntennaFor(hz); });
             connect(rxg, &QButtonGroup::idClicked, this, [this, rxg](int id) { antennas_->setAntennaForDial(receiver_->dialHz(), rxg->button(id)->property("ant").toString()); });
@@ -115,7 +118,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
                 for (auto* b : rxg->buttons()) { QSignalBlocker bl(b); b->setChecked(b->property("ant").toString() == want); }
                 if (auto* t = txg->button(antennas_->txAntennaFor(receiver_->dialHz()))) { QSignalBlocker bl(t); t->setChecked(true); }
                 const QString a = antennas_->activeAntenna(); const int tx = antennas_->txAntennaFor(receiver_->dialHz());
-                note->setText(QString("%1%2").arg(tx == 1 ? "TX through the ATU" : "TX without the ATU").arg(a.isEmpty() ? QString() : "   RX now: " + (a == "RX1IN" ? QString("RX1 IN") : a)));
+                note->setText(tx == 1 ? "via the ATU" : "no ATU"); note->setToolTip(QString("%1%2").arg(tx == 1 ? "TX through the ATU" : "TX without the ATU").arg(a.isEmpty() ? QString() : "   RX now: " + (a == "RX1IN" ? QString("RX1 IN") : a)));
             };
             connect(antennas_, &AntennaPanel::choiceChanged, this, redraw); connect(antennas_, &AntennaPanel::choiceChanged, tx_card_, [this] { tx_card_->refreshButtons(); });
             connect(receiver_, &ReceiverPanel::dialChanged, this, redraw); redraw();
@@ -124,9 +127,22 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
         radio_->setBeforeStream([this](std::function<void()> go) { tx_card_->armThen(std::move(go)); });   // start-up: EEPROM check, then receive
         log_panel_->setTxPowerSource([this] { return tx_card_->recentTxPowerW(); });   // TX_PWR in the log: what our last over really put out
     }
-    {   // CAT for other programs (Hamlib NET rigctl on 127.0.0.1): dial and mode only, through the receiver's own tuning path; it cannot transmit
+    {   // CAT for other programs (Hamlib NET rigctl on 127.0.0.1): dial and mode through the receiver's own tuning path; PTT requests go to the Transmit card, which decides
         cat_ = new CatPanel(receiver_, [this] { return tx_card_ && tx_card_->keyedNow(); }, [this] { return tx_card_ && (tx_card_->busy() || tx_card_->sendQueued()); });
         auto* cl = new QVBoxLayout; cl->addWidget(cat_); device_col_->insertWidget(device_col_->count() - 2, theme::makeCard("CAT (other programs)", cl));
+        if (tx_card_) cat_->setPttRequest(tx_card_->pttRequest());              // the only way a CAT client can ask to key: the Transmit card decides
+    }
+    {   // other programs: receive audio to the virtual device, and the "External program" switch
+        if (audio_panel_) audio_panel_->setReceiver(receiver_);
+        connect(receiver_->externalBox(), &QCheckBox::toggled, this, [this](bool on) { applyExternal(on); });
+        if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) {
+            QSettings q("fireside", "external");
+            if (q.value("on", false).toBool()) {
+                ext_prev_decoder_ = q.value("prev_decoder", 0).toInt(); ext_prev_seq_ = q.value("prev_autoseq", true).toBool();
+                ext_prev_upload_ = q.value("prev_upload", false).toBool(); ext_prev_data_ = q.value("prev_data_out", false).toBool();
+                applyExternal(true, true);
+            }
+        }
     }
     // QRZ.com: callers first, then (if ticked on the Log tab) every decoded station; the answer goes after their decoder lines
     connect(receiver_, &ReceiverPanel::decodedCall, log_panel_->qrz(), [this](const QString& c) { log_panel_->qrz()->wantCached(c); });      // everyone: from the cache only
@@ -136,7 +152,16 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
     connect(log_panel_->qrz(), &QrzClient::infoReady, receiver_, [this](const QString& call, const fireside::qrz::Info& i) {
         receiver_->showCallInfo(call, QString::fromStdString(fireside::qrz::short_text(i, log_panel_->myGrid().toStdString(), receiver_->heardGrid(call).toStdString()))); /* distance from the grid they sent */ });   // someone answering me: highlighted, filled in and looked up
     connect(receiver_, &ReceiverPanel::decodedLineActivated, this, [this](const QString& line) { log_panel_->fillFromDecode(line); });   // the quick entry sits on the Receiver tab: nothing to switch to
-    setCentralWidget(tabs_); resize(1400, 860);
+    {   // the red box for safety stops, above every tab: persists 5 s (a new stop restarts it)
+        auto* wrap = new QWidget; auto* vl = new QVBoxLayout(wrap); vl->setContentsMargins(0, 0, 0, 0); vl->setSpacing(0);
+        trip_ = new QLabel; trip_->setVisible(false); trip_->setAlignment(Qt::AlignCenter); trip_->setWordWrap(true); trip_->setObjectName("tripbox");
+        trip_->setStyleSheet("QLabel#tripbox { background: #b71c1c; color: #ffffff; font-size: 16pt; font-weight: bold; padding: 10px 16px; border: 2px solid #ff8a80; }");
+        trip_->setTextInteractionFlags(Qt::NoTextInteraction);
+        trip_timer_ = new QTimer(this); trip_timer_->setSingleShot(true); connect(trip_timer_, &QTimer::timeout, this, [this] { trip_->setVisible(false); });
+        vl->addWidget(trip_); vl->addWidget(tabs_, 1); setCentralWidget(wrap);
+        if (tx_card_) connect(tx_card_, &TransmitCard::safetyTrip, this, &MainWindow::showTrip);
+    }
+    resize(1400, 860);
     if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) { QSettings q("fireside", "window"); if (q.contains("geometry")) restoreGeometry(q.value("geometry").toByteArray()); tabs_->setCurrentIndex(std::clamp(q.value("tab", 0).toInt(), 0, 1)); }
     connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshDevices);
     connect(ident, &QPushButton::clicked, this, &MainWindow::identify);
@@ -148,7 +173,34 @@ void MainWindow::refreshDevices() {
     for (const auto& d : fireside::list_midi_devices()) devices_->addItem(QString::fromStdString(d.card + "   " + d.path), QString::fromStdString(d.path));
     if (!devices_->count()) log_->appendPlainText("No ALSA rawmidi devices found (radio off, not bound to snd-dice, or no FireWire card yet).");
 }
-MainWindow::~MainWindow() = default;
+void MainWindow::showTrip(const QString& reason) {
+    trip_->setText("TRANSMITTER STOPPED: " + reason); trip_->setVisible(true); trip_->raise(); trip_timer_->start(5000);
+    appLog("transmit", "SAFETY STOP shown: " + reason);
+}
+MainWindow::~MainWindow() { if (cat_) cat_->setPttRequest(nullptr); }   // the Transmit card may go first: CAT must not reach it then
+
+void MainWindow::applyExternal(bool on, bool restoring) {
+    QCheckBox* seq = tx_card_ ? tx_card_->autoSeqBox() : nullptr; QCheckBox* up = psk_panel_ ? psk_panel_->uploadBox() : nullptr;
+    QCheckBox* data = audio_panel_ ? audio_panel_->dataOutBox() : nullptr;
+    if (on) {
+        if (!restoring) { ext_prev_decoder_ = receiver_->decoderIndex(); ext_prev_seq_ = seq && seq->isChecked(); ext_prev_upload_ = up && up->isChecked(); ext_prev_data_ = data && data->isChecked(); }
+        receiver_->setExternalMode(true);
+        if (seq) { seq->setChecked(false); seq->setEnabled(false); }
+        if (up) { up->setChecked(false); up->setEnabled(false); }
+        if (data) data->setChecked(true);
+        log_->appendPlainText("External program: our decoder, auto sequence + log and PSK Reporter uploads are off; receive audio goes to \"Fireside RX audio\".");
+    } else {
+        receiver_->setExternalMode(false);
+        if (ext_prev_decoder_ > 0) receiver_->setDecoderIndex(ext_prev_decoder_);
+        if (seq) { seq->setEnabled(true); seq->setChecked(ext_prev_seq_); }
+        if (up) { up->setEnabled(true); up->setChecked(ext_prev_upload_); }
+        if (data) data->setChecked(ext_prev_data_);
+        log_->appendPlainText("External program off: decoder, auto sequence + log and PSK Reporter uploads are back as they were.");
+    }
+    if (qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) return;
+    QSettings q("fireside", "external"); q.setValue("on", on); q.setValue("prev_decoder", ext_prev_decoder_); q.setValue("prev_autoseq", ext_prev_seq_);
+    q.setValue("prev_upload", ext_prev_upload_); q.setValue("prev_data_out", ext_prev_data_);
+}
 void MainWindow::closeEvent(QCloseEvent* e) {
     if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) { QSettings q("fireside", "window"); q.setValue("geometry", saveGeometry()); q.setValue("tab", tabs_->currentIndex()); }
     if (log_panel_) log_panel_->saveSettings();

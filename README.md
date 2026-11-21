@@ -12,7 +12,7 @@ This is an independent, unofficial project. It is not made, endorsed or supporte
 - **Transmit:** reviewed start-up, PA bias from the radio's EEPROM, ATU tune with a per-band memory, power and SWR meters, closed-loop power, FT8 and FT4
   (with an auto-sequencer). FT8 transmit has been verified on the air; SSB voice and CW are not yet used on the air from the app.
 - **Around the radio:** logging to a [Wavelog](https://www.wavelog.org/) server, QRZ.com lookups, PSK Reporter uploads, and a Hamlib NET rigctl server
-  (frequency and mode only, it can never transmit) so other programs can follow the radio.
+  so other programs (WSJT-X, JS8Call, fldigi ...) can follow the radio, plus two virtual audio devices for their receive and transmit audio. They can key the radio over CAT only while you allow it for that session.
 - **Tools:** `firesidectl` (Python control and test tools), `firesidetx` (offline transmit rendering), `firesidekey` (command-line transmit).
 
 ## You need
@@ -32,7 +32,7 @@ image skip themselves when it is absent (see `app/tests/test_atu_tx.cpp`).
 This program can put RF on the air and write to a radio's settings. **You are responsible for your licence conditions, your antenna, your hardware and
 your signal.** There is no warranty (see the licence).
 - The app only transmits when you press a transmit button; the only code that keys the radio is the transmit gate (`app/core/include/fireside/tx_gate.h`),
-  with static checks in `tools/tests/test_tune_guard.py`. The CAT server cannot key the radio.
+  with static checks in `tools/tests/test_tune_guard.py`. Another program can key it over CAT only while "Let other programs key" is ticked (never remembered), through the same gate and limits.
 - Drive levels are per radio and per band and are measured by the app (no built-in default). Start with low power and a proper antenna or a dummy load.
 - Radio writes are off in every new window until you agree to "Start the radio?". Nothing writes the radio's EEPROM.
 - It was developed against one radio. Treat the first transmissions on your own radio with care, and check the output with an external meter.

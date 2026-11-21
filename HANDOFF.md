@@ -53,8 +53,14 @@ right of the decoder. Tests: 24 CTest groups (523 core tests) + 124 Python; the 
    tuner reads 0.00 W reflected; same formula as PowerSDR. Left as is until the user has a better antenna (the gate still trips on our SWR 3.0);
    the tuner-SWR trip option needs the user's OK.
 4c. DONE 2026-11-20: band memory (each band returns where it was left) and a Hamlib NET rigctl CAT server (Device tab, 127.0.0.1:4532,
-   frequency / mode only, cannot transmit). Not yet tried with WSJT-X / GridTracker / WaveLogGate on the user's PC (checked with `rigctl -m 2`).
-   CAT PTT for other programs would need their audio into our TX path too: a separate step, and it needs the user's OK (a new transmit route).
+   frequency / mode). Not yet tried with WSJT-X / GridTracker / WaveLogGate on the user's PC (checked with `rigctl -m 2`).
+4g. DONE 2026-11-20 (user's OK, Opus): other programs. Virtual devices Fireside RX audio / Fireside TX audio (system/53-fireside-virtual-audio.conf), CAT PTT
+   through rigctl::PttRequest -> the Transmit card -> TxControl::voice with the data chain ("Let other programs key", never remembered; 1..20 W; 2 min; 15 s
+   watchdog; owner only; duplex stream), and the "External program" switch. Tested on the simulated radio and with real Hamlib rigctl. Receive VERIFIED
+   2026-11-20: WSJT-X decoded from Monitor of Fireside RX audio. Keying by WSJT-X NOT yet tried on the air. First try (2026-11-20 23:38) was refused
+   safely: Qt does not list PipeWire monitor sources, so "Monitor of Fireside TX audio" could not be opened. Fixed: Fireside TX audio is now a loopback
+   (sink "Fireside TX audio" + source "Fireside TX audio (input)"). NEXT (user, morning of 2026-11-21): close both apps, run system/setup-system.sh (restarts
+   PipeWire), restart, check the input is listed, then WSJT-X Tune at 5 W and one CQ. All of this is still UNCOMMITTED.
 4d. PSK Reporter uploads VERIFIED 2026-11-20: 180 reports from M0OML (IO92AR, 20 m FT8, 07:55-08:37 UTC) are in PSK Reporter's database
    (retrieve.pskreporter.info query, receiverCallsign=M0OML), matching the app's count. psk-analysis.pl showed "0 packets" all the same: not a usable check.
 4e. WDSP spike 2026-11-20 (scratch only, nothing in the repo): TAPR OpenHPSDR-wdsp 2.11 (GPL v2+, compatible with our GPLv3) builds on Linux with a small Win32

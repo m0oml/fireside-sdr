@@ -177,11 +177,22 @@ Open **Transmit** under the decoder: the **Radio transmit (ATU, power, SWR)** ca
   mark while that decoder is on. QSettings `receiver/band_memory`. The antenna per band stays the Antennas tab's.
 - **CAT server** (user 2026-11-20; `fireside/rigctl.h`, `gui/CatPanel.*`, Device tab): the Hamlib NET rigctl protocol (rigctld, model 2) on
   127.0.0.1:4532, on by default. get/set freq and mode (USB LSB AM CW FM, PKTUSB / PKTLSB = USB / LSB with the data flag; a data decoder reports
-  PKT until the client picks), VFO A only, no split, \chk_vfo, \dump_state (no transmit ranges, ptt_type 0), \get_vfo_info, \get_lock_mode,
+  PKT until the client picks), VFO A only, no split, \chk_vfo, \dump_state (no transmit ranges, ptt_type 0: Hamlib's client still sends PTT), \get_vfo_info, \get_lock_mode,
   the "+ ; | ," extended responses. Reply formats copied from Hamlib 4.7.2's rigctld; checked with `rigctl -m 2`. Tunes through
-  `ReceiverPanel::setDialHz` (the one tuning path); refused (RPRT -9) while keyed or a transmit job runs. **Cannot transmit**: the Backend has
-  no PTT; T 1, send_morse, send_voice_mem and power-off answer RPRT -9 (static guard in tools/tests/test_tune_guard.py). The older Kenwood
-  TS-2000 `cat.h` stays for the CLI.
+  `ReceiverPanel::setDialHz` (the one tuning path); refused (RPRT -9) while keyed or a transmit job runs. The Backend has no transmit call;
+  send_morse, send_voice_mem and power-off answer RPRT -9. **PTT** (user 2026-11-20): `T 1/2/3` goes only to `rigctl::PttRequest`, whose one
+  implementation is the Transmit card (below); with none attached, or refused, RPRT -9. `T 0` always passes. Static guards in tools/tests/test_tune_guard.py.
+  The older Kenwood TS-2000 `cat.h` stays for the CLI and still refuses TX.
+- **Other programs (WSJT-X, JS8Call, fldigi ...)** (user 2026-11-20): `system/53-fireside-virtual-audio.conf` (installed by `setup-system.sh`) makes two
+  PipeWire null sinks. **Fireside RX audio**: the receiver pushes a second copy of its audio there at a fixed level (Audio tab, not the Volume slider or Mute);
+  the other program records its monitor. **Fireside TX audio**: a loopback; the other program plays into its sink and we capture "Fireside TX audio (input)" (Qt does not list monitor sources). **Keying over CAT**: the Transmit
+  card's "Let other programs key" (off in every new window, never remembered) and power (1..20 W). An accepted `T 1` runs `TxControl::voice()` with
+  `tx::data_chain_defaults()` (no processing, SSB 100..3000 Hz, the same ceilings), that input, `max_key_s` 120, while: the tick is on, transmit is armed,
+  the owning client holds PTT and has sent a command in the last 15 s; amateur band with a measured drive level; the direct duplex stream running. One owner;
+  `T 0`, a disconnect, unticking, Stop or a radio stop unkey. Tests: rigctl PTT tests, a simulated data over (`test_atu_tx.cpp`), and `--smoke-radio`
+  (a real socket client: refused without the tick, keyed, owner only, dial locked, T 0 / untick / disconnect / watchdog unkey, out of band refused).
+- **External program** (decoder card, remembered): holds our decoder off (a decoder choice still sets its mode and filter), turns off auto sequence + log
+  and the PSK Reporter upload (greyed), and turns on the Fireside RX audio feed; unticking restores the previous choices (QSettings `fireside/external`).
 - **PSK Reporter tab** (user 2026-11-19): where this station is heard, live from the PSK Reporter MQTT feed (mqtt.pskreporter.info:1884 TLS,
   MQTT 3.1.1, topic pskr/filter/v2/+/+/<my call>/#; only my call is sent, generic client id, no account). Table of receivers (distance / bearing
   from the Log tab's grid, last / best SNR, reports), summary over 15 min .. 24 h (this band or all), a one-line summary in the Radio screen's

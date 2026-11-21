@@ -46,6 +46,7 @@ QSlider::groove:horizontal { height: 4px; background: #2c3446; border-radius: 2p
 QSlider::sub-page:horizontal { background: %4; border-radius: 2px; }
 QSlider::handle:horizontal { background: #e9eefb; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }
 QPlainTextEdit { background: #0b0e14; border: 1px solid %6; border-radius: 6px; font-family: "DejaVu Sans Mono", monospace; }
+QLabel#status { font-family: "DejaVu Sans Mono", monospace; }
 QScrollBar:vertical { background: #0b0e14; width: 12px; margin: 0; border: 0; }
 QScrollBar:horizontal { background: #0b0e14; height: 12px; margin: 0; border: 0; }
 QScrollBar::handle:vertical { background: #2c3446; min-height: 28px; border-radius: 5px; margin: 2px; }

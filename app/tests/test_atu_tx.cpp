@@ -677,6 +677,47 @@ TEST(voice_refusals_time_out_and_a_failing_mic_leave_the_radio_unkeyed) {
     v.max_key_s = 10; auto f = r.tx->voice(14.2, mic, [] { return true; }, v); k.join();
     CHECK(f.keyed); CHECK(f.stop.find("audio input") != std::string::npos); CHECK(!r.sim.keyed);
 }
+namespace {
+struct FakeTone : txc::IAudioIn {                                                   // another program's FT8-like tone: 1500 Hz, constant envelope, real time
+    double amp = 1.0; size_t pos = 0; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    size_t read(float* x, size_t n, double) override {
+        std::this_thread::sleep_until(t0 + std::chrono::microseconds(int64_t(1e6 * double(pos + n) / 48000)));
+        for (size_t i = 0; i < n; ++i, ++pos) x[i] = float(amp * std::sin(2 * M_PI * 1500 * double(pos) / 48000));
+        return n;
+    }
+    std::string describe() const override { return "fake program"; }
+};
+}  // namespace
+// Keying by another program (CAT PTT) is a voice over with the data chain: a full-scale tone gives the set power, a quieter one less (never more),
+// on the right sideband, and the radio unkeys when the program releases PTT.
+TEST(data_over_from_another_program_full_scale_gives_the_set_power_and_ptt_unkeys) {
+    if (backup_image().empty()) return;
+    for (double amp : {1.0, 0.5}) {
+        TxRig r; std::vector<std::complex<double>> iq; std::vector<std::pair<double, size_t>> marks;
+        r.tx = std::make_unique<txc::TxControl>(r.fx, [&](double) { return std::unique_ptr<IPcmOut>(new CapPcm(&r.sim.level, 48000, &iq, &marks, [] { return wall_utc(); })); }, atu::real_clock());
+        r.tx->set_k(5, 11150); r.tx->arm(backup_image(), backup_image());
+        FakeTone tone; tone.amp = amp; const auto t0 = std::chrono::steady_clock::now();
+        txc::VoiceOptions v; v.chain = tx::data_chain_defaults(); v.peak_w = 5; v.max_key_s = 120;
+        auto res = r.tx->voice(14.074, tone, [&] { return std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(2000); }, v);
+        CHECK(res.keyed); CHECK(res.stop.find("PTT released") != std::string::npos); CHECK(!r.sim.keyed); CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(2));
+        if (amp == 1.0) CHECK(res.max_fwd_w > 4.0 && res.max_fwd_w <= 1.15 * 5.0);     // full scale: the set power (the ALC only trims down)
+        else CHECK(res.max_fwd_w > 0.8 && res.max_fwd_w < 2.0);                         // -6 dB audio: about a quarter of the power
+        CHECK(sideband_ratio_db(iq, 48000, true) > 20);                                 // USB
+    }
+}
+TEST(safety_stops_are_told_to_the_trip_hook_and_normal_ends_are_not) {
+    for (const char* r : {"SWR 3.4 above the 3.0 limit", "forward power 11.5 W above the 4.0 W limit", "reflected power 9.0 W above the 5.0 W limit", "key-down time limit",
+                          "meter read failed: x", "PA meter read failed: x", "the I/Q stream failed", "audio input failed: x", "under 5 mW at the table's 1 W drive point: wrong channel, sign or path",
+                          "off (SET_MOX 0 FAILED 3 times: x: the radio may still be keyed, power it off)", "the radio refused the key: x"})
+        CHECK(txc::TxControl::is_safety_stop(r));
+    for (const char* r : {"ramp finished at the target", "over finished", "tune finished", "PTT released", "aborted", "PTT released before keying", "disarmed", "gate destroyed", ""})
+        CHECK(!txc::TxControl::is_safety_stop(r));
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); std::vector<std::string> trips; r.tx->set_trip_hook([&](const std::string& w) { trips.push_back(w); });
+    txc::Options o; auto ok = r.tx->ramp(14.10, 2.0, o); CHECK(ok.reached); CHECK(trips.empty());                   // a normal ramp tells nobody
+    r.sim.pa_from_level = false; r.sim.adc_fwd = 966; r.sim.adc_rev = 238;                                         // the fixed reading is far above a 2 W target
+    auto bad = r.tx->ramp(14.10, 2.0, o); CHECK(!bad.reached); CHECK_EQ(trips.size(), size_t(1)); CHECK(trips[0].find("above") != std::string::npos); CHECK(!r.sim.keyed);
+}
 TEST(tx_antenna_per_over_and_the_atu_only_on_ant1) {
     if (backup_image().empty()) return;
     TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o; o.tx_ant = 2;

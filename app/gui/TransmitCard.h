@@ -8,8 +8,10 @@
 #include "fireside/sim_radio.h"
 #include "fireside/tx_control.h"
 #include "fireside/qso_seq.h"
+#include "fireside/rigctl.h"
+#include "fireside/eeprom.h"
 #include <functional>
-class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit; class QProgressBar; class QPushButton; class QSpinBox; class QTimer;
+class QCheckBox; class QComboBox; class QDialog; class QDoubleSpinBox; class QLabel; class QLineEdit; class QProgressBar; class QPushButton; class QSpinBox; class QTimer;
 class RadioPanel; class ReceiverPanel; class PowerMeter; class AudioPanel;
 
 // The radio's transmit controls on the Receiver screen: transmit gets ready by itself once the radio runs (EEPROM check + PA bias; a Retry button only if that fails), ATU Tune at a chosen power (default 3 W), Measure drive (2 W ramp,
@@ -57,10 +59,26 @@ public:
     QPushButton* cqButton() const { return cq_; }
     double recentTxPowerW() const;                       // mean forward power of our last FT8/FT4 over if it was in the last 10 minutes, else 0 (the log's TX_PWR)
     PowerMeter* powerMeter() const { return pm_; }
+    // The card is only the owner: these are the pieces the window places. key: lamp, Stop, status. atu: tune power, threshold, Tune, Restore. calibration: a fold with Measure drive and Test tone.
+    // digital: the FT8 / FT4 message controls. voice: mic, power, PTT. other: the CAT keying tick and its power.
+    QWidget* atuPart() const { return atu_part_; }
+    void applyRxCal(const fireside::RxLevelCal& c);    // hands the EEPROM's RX level table to the S-meter
+    QWidget* otherProgramsPart() const { return ext_part_; } QLabel* lampLabel() const { return lamp_; } QDialog* tunerDialog() const { return tuner_dialog_; } QPushButton* tunerButton() const { return tuner_btn_; } QPushButton* stopButton() const { return stop_; }
+    QWidget* digitalPart() const { return digi_part_; } QWidget* voicePart() const { return voice_part_; }
     QString qsoText() const;                             // the sequencer's one-line state ("" if idle)
     QString messageText() const;                         // newest F5K_*_trx.bin in backupDir() (or the remembered one)
+    // Keying by other programs over CAT (Hamlib set_ptt): the ONLY implementation of rigctl::PttRequest. An over is TxControl::voice() with the data
+    // chain, the "Fireside TX audio" input and the card's power; it keys only while: "Let other programs key" is ticked (never remembered), transmit
+    // is armed, the owning program holds PTT and has talked to us in the last 15 s, at most 2 minutes, in an amateur band with a measured drive level,
+    // with the direct FireWire stream running (receive keeps going). Stop, unticking, a radio stop and the program disconnecting all unkey.
+    fireside::rigctl::PttRequest* pttRequest();
+    QCheckBox* extAllowBox() const { return ext_allow_; }
+    QDoubleSpinBox* extPowerBox() const { return ext_w_; }
+    bool extOverRunning() const { return ext_over_.load(); }
+    void setExtWatchdogForTests(qint64 ms) { ext_watchdog_ms_ = ms; }
 signals:
     void message(const QString& text);
+    void safetyTrip(const QString& reason);               // an over ended on a safety limit or failure (SWR, power, time limit, meter / stream / audio failure ...): shown in red by the window
     void qsoPartner(const QString& call);                // the station the sequencer is working ("" = none)
     void txSent(const QString& utcLabel, int audioHz, const QString& message);   // an over starts
     void logQso(const QString& call, const QString& grid, const QString& rstSent, const QString& rstRcvd);   // a QSO the sequencer completed
@@ -81,8 +99,13 @@ private:
     AudioPanel* audio_ = nullptr; QComboBox* voice_mode_ = nullptr; QDoubleSpinBox* voice_w_ = nullptr; QPushButton* ptt_ = nullptr; QCheckBox *space_ptt_ = nullptr, *mic_ptt_ = nullptr; QTimer* ptt_poll_ = nullptr;
     std::atomic<bool> ptt_btn_{false}, ptt_key_{false}, ptt_mic_{false}; std::unique_ptr<fireside::txc::IAudioIn> voice_in_;
     bool pttActive() const { return ptt_btn_ || ptt_key_ || ptt_mic_; }
-    void onPttChanged(); void startVoice();
-    std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr;
+    void onPttChanged(); void startVoice(); void connectTrip();
+    struct ExtPtt; std::unique_ptr<ExtPtt> ext_; QCheckBox* ext_allow_ = nullptr; QDoubleSpinBox* ext_w_ = nullptr;
+    std::atomic<int> ext_owner_{-1}; std::atomic<bool> ext_ptt_{false}, ext_allowed_{false}, ext_over_{false}; std::atomic<qint64> ext_beat_ms_{0};
+    static constexpr qint64 kExtWatchdogMs = 15000; static constexpr double kExtMaxKeyS = 120;
+    std::atomic<qint64> ext_watchdog_ms_{kExtWatchdogMs};                       // tests shorten it (setExtWatchdogForTests)
+    bool extActive() const; bool requestExt(int client, bool on); void extHeartbeat(int client);
+    std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr; QPushButton *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
     QCheckBox* auto_seq_ = nullptr; std::unique_ptr<fireside::seq::Sequencer> seq_; std::function<QString()> my_grid_;
     void pauseReceive(); QString resumeReceive();        // receive pauses for an over (the slot so far decoded first) and comes back after it
     fireside::seq::Sequencer& sequencer();

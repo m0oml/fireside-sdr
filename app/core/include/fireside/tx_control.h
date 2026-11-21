@@ -112,6 +112,11 @@ public:
     // Called with true right before every key-down and with false right after the unkey (the session moves the shared RX1/TX DDS onto
     // the dial for the over and back to the receive IF shift afterwards, as PowerSDR does). Must not throw.
     void set_key_hook(std::function<void(bool keyed)> h) { key_hook_ = std::move(h); }
+    // A safety stop is not a normal end of an over: a power / SWR / reflected limit, the key-down time limit, a meter, stream or audio failure, no power at the
+    // 1 W point, the radio refusing the key, or an unkey that did not get through. The hook is called (on the worker thread) with the reason right after
+    // any operation that ended that way, so the GUI can show it where it cannot be missed. Normal ends (finished, PTT released, Stop) never call it.
+    static bool is_safety_stop(const std::string& reason);
+    void set_trip_hook(std::function<void(const std::string& reason)> h) { trip_hook_ = std::move(h); }
     // Voice over: keyed while ptt() is true (and abort() not called), at most max_key_s. Audio from `in` -> TxChain -> SSB I/Q -> the live
     // ToneSource (mirror, image correction, HARD clamp) at the stream rate. Drive: the chain's I/Q ceiling gives peak_w by the band's
     // measured level (refused without one); it is only ever trimmed DOWN, when the forward meter reads peaks above 1.1 x peak_w.
@@ -123,7 +128,8 @@ public:
 
 private:
     Flex& fx_; PcmFactory pcm_; atu::Clock clk_; std::function<double()> utc_; txs::TxCal cal_; atu::Atu atu_; atu::Memory mem_; std::map<int, double> k_;
-    std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool)> key_hook_;
+    std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool)> key_hook_; std::function<void(const std::string&)> trip_hook_;
+    void note_stop(const std::string& s) { if (trip_hook_ && is_safety_stop(s)) { try { trip_hook_(s); } catch (...) {} } }
     struct KeyHook { const std::function<void(bool)>& h; explicit KeyHook(const std::function<void(bool)>& f) : h(f) { if (h) h(true); } ~KeyHook() { if (h) try { h(false); } catch (...) {} } };   // declared before the TxGate: its end runs after the unkey
     void prepare(double freq_mhz, uint32_t dsp_mode, int tx_ant); // TX antenna (1..3, else std::invalid_argument before any write), mode, DDS, filter, offset, carrier null
     struct Busy { TxControl& c; explicit Busy(TxControl& x) : c(x) { c.busy_ = true; c.abort_ = false; } ~Busy() { c.busy_ = false; c.keyed_ = false; } };

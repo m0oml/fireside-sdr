@@ -604,7 +604,7 @@ int main(int argc, char** argv) {
                     step("ATU tune passes on the simulated radio", tc->statusLabel()->text().contains("PASS") && tc->memoryLabel()->text().contains("ind 30 cap 7"));
                     step("the tune keyed once and unkeyed", count(1292) == mox + 2 && !w.simRadio()->keyed);
                     {   // FT4: a queued send goes out in its slot; a queued one is cancelled by Stop without keying
-                        const auto modes = tc->findChildren<QComboBox*>(); for (auto* c : modes) if (c->count() == 2 && c->itemText(0) == "FT8") c->setCurrentIndex(1);
+                        const auto modes = tc->digitalPart()->findChildren<QComboBox*>(); for (auto* c : modes) if (c->count() == 2 && c->itemText(0) == "FT8") c->setCurrentIndex(1);
                         const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
                         const long long idx = (long long)std::floor(now / 7.5) + ((std::fmod(now, 7.5) > 5.0) ? 2 : 1);   // a slot >= 2.5 s away
                         tc->parityBox()->setCurrentIndex(int(idx % 2)); rx->myCallBox()->setText("M0OML"); tc->messageBox()->setText("CQ M0OML IO91");   // the station is the user's own: there is no default call
@@ -613,12 +613,12 @@ int main(int argc, char** argv) {
                         for (int i = 0; i < 900 && (tc->sendQueued() || tc->busy() || tc->statusLabel()->text().endsWith("...")); ++i) pump(1);
                         step("FT4 over sent on the simulated radio", tc->statusLabel()->text().contains("FT4 sent") && count(1292) == mox + 2 && !w.simRadio()->keyed);
                         const size_t mox2 = count(1292); tc->sendButton()->click(); pump(2);
-                        QPushButton* stopb = nullptr; for (auto* b : tc->findChildren<QPushButton*>()) if (b->text() == "Stop") stopb = b;
+                        QPushButton* stopb = nullptr; for (auto* b : tc->digitalPart()->findChildren<QPushButton*>()) if (b->text() == "Stop") stopb = b;
                         if (stopb) stopb->click();
                         pump(20); step("a queued send is cancelled by Stop without keying", !tc->sendQueued() && count(1292) == mox2 && !w.simRadio()->keyed);
                         tc->messageBox()->setText("   "); const size_t mox3 = count(1292); tc->sendButton()->click(); pump(2);
                         step("an empty message is refused, nothing queued or keyed", !tc->sendQueued() && tc->statusLabel()->text().contains("Cannot send") && count(1292) == mox3);
-                        QCheckBox* rep = nullptr; for (auto* c : tc->findChildren<QCheckBox*>()) if (c->text().startsWith("Repeat")) rep = c;
+                        QCheckBox* rep = nullptr; for (auto* c : tc->digitalPart()->findChildren<QCheckBox*>()) if (c->text().startsWith("Repeat")) rep = c;
                         step("repeat box exists", rep != nullptr);
                         if (rep) {   // Repeat: after an over the next slot of the same parity is queued by itself; Stop ends the calling
                             const double now2 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -636,7 +636,7 @@ int main(int argc, char** argv) {
                         }
                     }
                     {   // click to reply, auto sequence and auto log: a whole FT4 QSO with DK0ULR on the simulated radio
-                        const auto modes = tc->findChildren<QComboBox*>(); for (auto* c : modes) if (c->count() == 2 && c->itemText(0) == "FT8") c->setCurrentIndex(1);
+                        const auto modes = tc->digitalPart()->findChildren<QComboBox*>(); for (auto* c : modes) if (c->count() == 2 && c->itemText(0) == "FT8") c->setCurrentIndex(1);
                         rx->setDecoderIndex(5); rx->myCallBox()->setText("M0OML"); tc->messageBox()->setText("CQ M0OML IO92");
                         QString logged; QObject scope; QObject::connect(tc, &TransmitCard::logQso, &scope, [&](const QString& c, const QString& g, const QString& a, const QString& b) { logged = c + "|" + g + "|" + a + "|" + b; });
                         auto wall = [] { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); };
@@ -671,7 +671,7 @@ int main(int argc, char** argv) {
                         w.logPanel()->setMyGrid("IO92AR");   // the Log tab's station profile is where the locator comes from: there is no built-in default
                         const size_t m1 = count(1292); tc->cqButton()->click(); pump(2);
                         step("CQ button: calls CQ with my grid (queued, or already joining this slot)", (tc->sendQueued() || tc->busy()) && tc->messageText() == "CQ M0OML IO92" && tc->qsoText().startsWith("Calling CQ"));
-                        QPushButton* sb = nullptr; for (auto* b : tc->findChildren<QPushButton*>()) if (b->text() == "Stop") sb = b;
+                        QPushButton* sb = nullptr; for (auto* b : tc->digitalPart()->findChildren<QPushButton*>()) if (b->text() == "Stop") sb = b;
                         if (sb) sb->click();
                         for (int i = 0; i < 200 && tc->busy(); ++i) pump(1); pump(10);
                         step("Stop ends the CQ: nothing queued, unkeyed", !tc->sendQueued() && !tc->busy() && !w.simRadio()->keyed && (count(1292) == m1 || count(1292) == m1 + 2) && !tc->qsoText().startsWith("Calling"));
@@ -694,16 +694,92 @@ int main(int argc, char** argv) {
                         step("releasing PTT unkeys", !w.simRadio()->keyed && count(1292) == m0 + 2 && tc->statusLabel()->text().contains("PTT released"));
                         w.audioPanel()->setInputFactoryForTests({});
                     }
+                    {   // keying by another program over CAT (Hamlib set_ptt): only with the tick, only the owning client, unkeys on T 0 / untick / disconnect / silence
+                        struct GenTone : fireside::txc::IAudioIn {
+                            size_t pos = 0; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+                            size_t read(float* x, size_t n, double) override { std::this_thread::sleep_until(t0 + std::chrono::microseconds(int64_t(1e6 * double(pos + n) / 48000)));
+                                for (size_t i = 0; i < n; ++i, ++pos) x[i] = float(0.9 * std::sin(2 * M_PI * 1500 * double(pos) / 48000)); return n; }
+                            std::string describe() const override { return "generated FT8-like tone"; }
+                        };
+                        w.audioPanel()->setExternalInputFactoryForTests([] { return std::unique_ptr<fireside::txc::IAudioIn>(new GenTone); });
+                        CatPanel* cp = w.catPanel(); step("CAT server for the keying test", cp && cp->startServer(0));
+                        auto open_client = [&](QTcpSocket& so) { so.connectToHost(QHostAddress::LocalHost, quint16(cp->port())); for (int i = 0; i < 200 && so.state() != QAbstractSocket::ConnectedState; ++i) { QApplication::processEvents(); QThread::msleep(5); } };
+                        auto ask = [&](QTcpSocket& so, const QByteArray& cmd) { QByteArray got; so.write(cmd);
+                            for (int i = 0; i < 400 && !got.endsWith("\n"); ++i) { QApplication::processEvents(); so.waitForReadyRead(5); got += so.readAll(); } return got; };
+                        auto wait_keyed = [&](bool k) { for (int i = 0; i < 300 && w.simRadio()->keyed != k; ++i) pump(1); for (int i = 0; i < 300 && !k && tc->busy(); ++i) pump(1); return w.simRadio()->keyed == k; };
+                        QTcpSocket a, b; open_client(a); open_client(b);
+                        rx->setDialHz(14.074e6); pump(5); const size_t m0 = count(1292);
+                        step("the tick starts off (every new window)", !tc->extAllowBox()->isChecked());
+                        step("CAT T 1 refused without the tick", ask(a, "T 1\n") == "RPRT -9\n" && !w.simRadio()->keyed && count(1292) == m0);
+                        tc->extAllowBox()->setChecked(true);
+                        step("CAT T 1 accepted with the tick", ask(a, "T 1\n") == "RPRT 0\n");
+                        step("the program's over keys", wait_keyed(true) && tc->statusLabel()->text().startsWith("Keyed by another program over CAT"));
+                        step("get_ptt reports it", ask(a, "t\n") == "1\n");
+                        step("a second program cannot key or release it", ask(b, "T 1\n") == "RPRT -9\n" && ask(b, "T 0\n") == "RPRT 0\n" && w.simRadio()->keyed);
+                        step("the dial is locked while keyed", ask(a, "F 14080000\n") == "RPRT -9\n" && std::fabs(rx->dialHz() - 14.074e6) < 1);
+                        step("T 0 unkeys", ask(a, "T 0\n") == "RPRT 0\n" && wait_keyed(false) && tc->statusLabel()->text().contains("PTT released"));
+                        step("T 1 keys again, unticking unkeys", ask(a, "T 1\n") == "RPRT 0\n" && wait_keyed(true));
+                        tc->extAllowBox()->setChecked(false); step("unticking unkeys", wait_keyed(false));
+                        tc->extAllowBox()->setChecked(true);
+                        step("T 1 keys again, the program disconnecting unkeys", ask(a, "T 1\n") == "RPRT 0\n" && wait_keyed(true));
+                        a.abort(); step("a disconnect unkeys", wait_keyed(false));
+                        tc->setExtWatchdogForTests(600);
+                        step("T 1 keys again, a program that goes quiet is unkeyed", ask(b, "T 1\n") == "RPRT 0\n" && wait_keyed(true));
+                        for (int i = 0; i < 100 && w.simRadio()->keyed; ++i) pump(1); pump(10);
+                        step("the watchdog unkeys a quiet program", !w.simRadio()->keyed && tc->statusLabel()->text().contains("stopped talking"));
+                        tc->setExtWatchdogForTests(15000);
+                        rx->setDialHz(14.400e6); pump(5);
+                        step("outside the amateur bands refused", ask(b, "T 1\n") == "RPRT -9\n" && !w.simRadio()->keyed);
+                        rx->setDialHz(14.074e6); pump(5);
+                        step("every over keyed and unkeyed through the gate", (count(1292) - m0) % 2 == 0 && !w.simRadio()->keyed);
+                        tc->extAllowBox()->setChecked(false); b.abort(); cp->stopServer(); w.audioPanel()->setExternalInputFactoryForTests({});
+                    }
+                    {   // a safety stop (here: a power limit on the fixed simulated reading) shows the red box above the tabs for 5 s; a normal end does not
+                        for (int i = 0; i < 250 && w.tripBox() && w.tripBox()->isVisible(); ++i) pump(1);                  // an earlier step may have tripped on purpose: let its box expire
+                        step("no red box once earlier trips have expired", w.tripBox() && !w.tripBox()->isVisible());
+                        const int fwd0 = w.simRadio()->adc_fwd, rev0 = w.simRadio()->adc_rev; const bool pfl = w.simRadio()->pa_from_level;
+                        w.simRadio()->pa_from_level = false; w.simRadio()->adc_fwd = 966; w.simRadio()->adc_rev = 800;       // a strong forward reading: the power limit trips
+                        rx->setDialHz(14.100e6); pump(5); tc->testToneButton()->click();
+                        for (int i = 0; i < 300 && !w.tripBox()->isVisible(); ++i) pump(1);
+                        for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(3);                                         // the card's own status line follows the box
+                        step("a limit stop shows the red box with the reason", w.tripBox()->isVisible() && w.tripBox()->text().startsWith("TRANSMITTER STOPPED: ") && w.tripBox()->text().contains(" above ") && tc->statusLabel()->text().contains(w.tripBox()->text().mid(21).left(20)));
+                        step("and the radio is unkeyed", !w.simRadio()->keyed);
+                        pump(60); step("the box is still there 2 s later", w.tripBox()->isVisible());
+                        for (int i = 0; i < 200 && w.tripBox()->isVisible(); ++i) pump(1);
+                        step("it goes away after 5 s", !w.tripBox()->isVisible());
+                        w.simRadio()->adc_fwd = fwd0; w.simRadio()->adc_rev = rev0; w.simRadio()->pa_from_level = pfl;
+                    }
                     w.simRadio()->silent = true; tc->tuneButton()->click();                    // a tuner that never answers: Stop unkeys it
                     for (int i = 0; i < 300 && !w.simRadio()->keyed; ++i) pump(1);
                     step("the never-ending tune is keyed", w.simRadio()->keyed); pump(10);
-                    QPushButton* stop = nullptr; for (auto* b : tc->findChildren<QPushButton*>()) if (b->text() == "Stop") stop = b;
+                    QPushButton* stop = nullptr; for (auto* b : tc->digitalPart()->findChildren<QPushButton*>()) if (b->text() == "Stop") stop = b;
                     step("stop is usable while tuning", stop && stop->isEnabled());
                     if (stop) stop->click();
                     wait_idle(20000); w.simRadio()->silent = false;
                     step("stop unkeyed the tune", !w.simRadio()->keyed && !tc->busy() && (tc->statusLabel()->text().contains("abort") || tc->statusLabel()->text().contains("stopped")));
                 }
-                if (!shot.empty()) { w.resize(2536, 1377); w.showReceiver(); rx->setDecoderIndex(4); rx->myCallBox()->setText("M0OML"); rx->addDecodedText("093300  -3  0.2 1200 ~  CQ DL2AL JO31\n093315  -6  0.1 2576 ~  M0OML DK0ULR JN58\n"); pump(4); w.grab().save(QString::fromStdString(shot).replace(".png", "-transmit.png")); if (auto* ap = w.audioPanel()) { ap->resize(2000, 700); ap->grab().save(QString::fromStdString(shot).replace(".png", "-audio.png")); } rx->setDecoderIndex(0); }
+                {   // the master switch: Voice / CW / Digital decide which cards exist (nothing here transmits)
+                    w.showReceiver(); rx->setModeGroup(0); pump(3);
+                    {   // the S-meter: the factory RX level table per band, the preamp row only while the preamp is on, the placeholder without a table
+                        std::array<double, 11> mt{}, pa{}; mt.fill(-33.0); pa.fill(-14.0); mt[5] = -32.7; const double dial0 = rx->dialHz();
+                        rx->setRxLevelCal(true, mt, pa); rx->setDialHz(14.2e6); rx->setPreampChecked(false); pump(1);
+                        step("S-meter: the 20 m factory meter offset", rx->meterCalibrated() && std::fabs(rx->meterOffsetDb() + 32.7) < 1e-9);
+                        rx->setPreampChecked(true); step("S-meter: preamp on subtracts its gain", std::fabs(rx->meterOffsetDb() + 46.7) < 1e-9); rx->setPreampChecked(false);
+                        rx->setDialHz(5.0e6); step("S-meter: outside the bands the placeholder", !rx->meterCalibrated());
+                        rx->setRxLevelCal(false, mt, pa); rx->setDialHz(14.2e6); step("S-meter: no table, no calibration", !rx->meterCalibrated()); rx->setDialHz(dial0); pump(1);
+                    }
+                    rx->setMeterTx(true); step("meter tile: the power meter replaces the signal meter while keyed", rx->powerMeterShown());
+                    step("Voice: USB-type mode, no decoder, voice strip shown", rx->modeGroup() == 0 && rx->decoderIndex() == 0 && rx->modeIndex() != 3 && !rx->decoderRowVisible() && rx->voiceStripVisible() && !rx->sendCardVisible());
+                    rx->setModeGroup(2); pump(3);
+                    step("Digital: FT8 decoder, message controls shown, voice strip gone", rx->modeGroup() == 2 && rx->decoderIndex() >= 4 && rx->decoderRowVisible() && rx->sendCardVisible() && !rx->voiceStripVisible());
+                    rx->setModeGroup(1); pump(3);
+                    step("CW: CW mode, decoder card without the message controls", rx->modeGroup() == 1 && rx->modeIndex() == 3 && rx->decoderRowVisible() && !rx->sendCardVisible() && !rx->voiceStripVisible());
+                    rx->setDecoderIndex(2); pump(3);
+                    step("picking PSK31 moves the switch to Digital", rx->modeGroup() == 2 && rx->sendCardVisible());
+                    rx->setModeGroup(0); pump(3);
+                    step("back to Voice: decoder off again", rx->modeGroup() == 0 && rx->decoderIndex() == 0 && !rx->decoderRowVisible());
+                }
+                if (!shot.empty()) { w.resize(2536, 1377); w.showReceiver(); rx->setDecoderIndex(4); rx->myCallBox()->setText("M0OML"); rx->addDecodedText("093300  -3  0.2 1200 ~  CQ DL2AL JO31\n093315  -6  0.1 2576 ~  M0OML DK0ULR JN58\n"); pump(4); w.grab().save(QString::fromStdString(shot).replace(".png", "-transmit.png")); w.resize(1400, 860); pump(4); w.grab().save(QString::fromStdString(shot).replace(".png", "-small.png")); rx->setModeGroup(0); pump(4); w.grab().save(QString::fromStdString(shot).replace(".png", "-voice.png")); rx->setModeGroup(1); pump(4); w.grab().save(QString::fromStdString(shot).replace(".png", "-cw.png")); if (auto* ap = w.audioPanel()) { ap->resize(2000, 700); ap->grab().save(QString::fromStdString(shot).replace(".png", "-audio.png")); } rx->setDecoderIndex(0); }
             }
         }
         step("stop radio", rp->stopRadio());

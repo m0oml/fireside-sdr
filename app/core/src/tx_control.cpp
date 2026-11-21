@@ -15,6 +15,10 @@
 #include "fireside/tx_render.h"
 
 namespace fireside::txc {
+bool TxControl::is_safety_stop(const std::string& r) {
+    for (const char* k : {" above ", "time limit", "FAILED", " failed", "under 5 mW", "refused the key"}) if (r.find(k) != std::string::npos) return true;
+    return false;                                     // "ramp finished", "over finished", "tune finished", "PTT released", "aborted", ...: normal ends
+}
 namespace { void say(const LogFn& l, const std::string& s) { if (l) l(s); } }
 
 TxControl::TxControl(Flex& fx, PcmFactory pcm, atu::Clock clock) : fx_(fx), pcm_(std::move(pcm)), clk_(clock), atu_(fx, clock) {
@@ -110,7 +114,7 @@ RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const 
     GateConfig gc; gc.max_key_s = (target_w > 5 ? 10.0 : 6.0) + hold_s; gc.max_fwd_w = std::min(22.5, std::max(1.0, 2 * target_w)); gc.max_swr = 3.0; gc.swr_min_fwd_w = 0.5;
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
-    if (!gate.key("drive ramp", gc.max_key_s, &why)) { r.stop = why; return r; }
+    if (!gate.key("drive ramp", gc.max_key_s, &why)) { r.stop = why; note_stop(why); return r; }
     keyed_ = true; src.set_keyed(true);
     const double step = std::pow(10.0, 0.1), t0 = clk_.now(); double drive = d1w / 10, hold = -1, next = 0.2, last_step = 0, last_trim = 0, kmax = 0, cmp_t = -1;
     MeterCompare cmp_; bool cmp_pending = false;
@@ -150,7 +154,7 @@ RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const 
         clk_.sleep(0.05);
     }
     src.set_keyed(false); keyed_ = false;
-    r.stop = gate.last_unkey_reason(); r.seconds = now(); r.k = kmax; r.unkey_failed = gate.unkey_failed();
+    r.stop = gate.last_unkey_reason(); r.seconds = now(); r.k = kmax; r.unkey_failed = gate.unkey_failed(); note_stop(r.stop);
     if (r.reached && kmax > 1000) set_k(band, kmax);
     char m[160]; std::snprintf(m, sizeof m, "ramp: %s, max %.2f W, %.0f W per drive^2", r.stop.c_str(), r.max_fwd_w, kmax); say(log, m);
     for (const auto& c : r.compare) {
@@ -197,7 +201,7 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     r.outcome = run_atu_tune(gate, atu_, cal_.meter, band, threshold, true, 1, ready, &meter, &r.why_not, carrier, poll);
     if (!r.outcome && abort_) r.why_not = "stopped before keying";
     for (auto& x : meter.readings) { if (x.fwd_w > 0.5) { r.last_fwd_w = x.fwd_w; r.last_swr = x.swr; } }
-    r.max_fwd_w = meter.max_fwd_w; r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); keyed_ = false;
+    r.max_fwd_w = meter.max_fwd_w; r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); keyed_ = false; note_stop(r.stop);
     if (r.outcome && r.outcome->result == atu::Atu::TuneResult::Pass && r.outcome->status.ind && r.outcome->status.cap && r.outcome->status.hiz) {
         const auto& s = r.outcome->status; atu::Setting set; set.ind = *s.ind; set.cap = *s.cap; set.hiz = *s.hiz != 0;
         set.swr = s.swr ? *s.swr : 0; set.fwd_w = s.fwd_w ? *s.fwd_w : 0; set.freq_hz = mhz * 1e6;
@@ -278,7 +282,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     GateConfig gc; gc.max_key_s = slot_len; gc.max_fwd_w = std::max(2.0, 1.5 * power_w); gc.max_rev_w = std::max(2.0, 0.5 * power_w); gc.max_swr = 3.0;
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
-    if (!gate.key(std::string(ft4 ? "FT4 " : "FT8 ") + text, gc.max_key_s, &why)) return no(why);
+    if (!gate.key(std::string(ft4 ? "FT4 " : "FT8 ") + text, gc.max_key_s, &why)) { note_stop(why); return no(why); }
     keyed_ = true;
     src.seek((long long)std::llround((utc_() + latency_s - plan.slot.start_utc) * o.rate)); src.set_keyed(true);
     const double sig_start = plan.slot.start_utc + off, sig_end = sig_start + sig, t0 = clk_.now();
@@ -301,7 +305,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
         clk_.sleep(0.05);
     }
     src.set_keyed(false); keyed_ = false; r.unkeyed_utc = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-    r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.drive = drive;
+    r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.drive = drive; note_stop(r.stop);
     if (n_fwd > 3) {
         r.mean_fwd_w = sum_fwd / n_fwd; r.k = r.mean_fwd_w / (drive * drive);
         if (r.sent && (!r.swr || *r.swr < 2.5)) set_k(band, k > 1000 ? 0.7 * k + 0.3 * r.k : r.k);   // the band's drive level learns from every clean over
@@ -354,7 +358,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     GateConfig gc; gc.max_key_s = v.max_key_s; gc.max_fwd_w = 1.5 * v.peak_w; gc.max_rev_w = std::max(2.0, 0.5 * v.peak_w); gc.max_swr = 3.0;
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
-    if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) return no(why);
+    if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) { note_stop(why); return no(why); }
     keyed_ = true; r.keyed = true; src.set_keyed(true); const double t0 = clk_.now(); double last_trim = t0;
     while (gate.keyed()) {
         if (abort_) { gate.unkey("aborted"); break; }
@@ -370,7 +374,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
         clk_.sleep(0.02);
     }
     src.set_keyed(false); keyed_ = false;
-    r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns();
+    r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns(); note_stop(r.stop);
     char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, v.peak_w); say(log, m);
     return r;
 }

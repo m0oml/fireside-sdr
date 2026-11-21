@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <QList>
 #include <functional>
 #include <QHash>
@@ -18,7 +19,7 @@ class RecordController;
 #include "fireside/playback.h"
 #include "fireside/rx_engine.h"
 class QPlainTextEdit; class AudioOut; class FrequencyDisplay; class SMeter; class SpectrumWidget; class WaterfallWidget;
-class QBoxLayout; class QAbstractButton; class QButtonGroup; class QCheckBox; class QComboBox; class QFrame; class QHBoxLayout; class QLabel; class QPushButton; class QSlider; class QSpinBox; class QTimer;
+class QBoxLayout; class QGridLayout; class QVBoxLayout; class QAbstractButton; class QButtonGroup; class QCheckBox; class QComboBox; class QFrame; class QHBoxLayout; class QLabel; class QPushButton; class QSlider; class QSpinBox; class QStackedWidget; class QTimer;
 
 // Receiver view on recorded, synthetic or live (read-only) I/Q. Layout: header (frequency + signal meter), spectrum over waterfall, then a control deck of labelled cards
 // (Band, Mode, Filter, Audio, Noise, Source, Advanced). All DSP runs in fireside::RxEngine (worker thread); this widget only draws and plays what the engine hands over.
@@ -64,7 +65,20 @@ public:
     void lockIfOffset(bool locked);                     // while a radio session is started the DSP must use the session's 9 kHz IF offset (the DDS sits 9 kHz below the dial)
     void setMuted(bool m);
     void setTransmitWidget(QWidget* w);
-    void setTransmitSideWidget(QWidget* w);              // the radio's transmit card: to the right of the decoder (the decoder list takes the rest)                 // the offline transmit section: sits under the decoder, opened with the Transmit button (closed by default)
+    void setTransmitParts(QWidget* digi, QWidget* voice);   // the message controls (beside the decoder, Digital only) and the voice controls (under the waterfall, Voice only)
+    void setTransmitMeters(QWidget* power, QLabel* status, QWidget* arm);   // the power meter joins the signal meter; transmit status under both
+    void setMeterTx(bool keyed);                        // the meter tile shows the power meter while keyed (and 5 s after), the signal meter otherwise
+    bool powerMeterShown() const { return tx_meter_ && tx_meter_->isVisibleTo(this); }
+    void setTxLamp(QLabel* lamp);
+    // The radio's factory RX level table (from the EEPROM, read with the transmit check): dBm = dBFS + meter[band] (+ preamp[band] while the preamp is on).
+    void setRxLevelCal(bool valid, const std::array<double, 11>& meter, const std::array<double, 11>& preamp);
+    bool meterCalibrated() const; double meterOffsetDb() const;                       // the TX light, left of the frequency
+    int modeGroup() const;                               // 0 Voice, 1 CW, 2 Digital: the master switch
+    void setModeGroup(int g) { chooseGroup(g); }
+    bool decoderRowVisible() const { return dec_row_ && dec_row_->isVisibleTo(this); }
+    bool voiceStripVisible() const { return voice_card_ && voice_card_->isVisibleTo(this); }
+    bool sendCardVisible() const { return send_card_ && send_card_->isVisibleTo(this); }
+    // the offline transmit section: sits under the decoder, opened with the Transmit button (closed by default)
     void setTransmitOpen(bool on); bool transmitOpen() const;
     void setLookupWidget(QWidget* w);                   // the small callsign lookup box (from the Log tab) lives in the control deck here; the card stays hidden until it is set
     void setLogFormWidget(QWidget* w);                  // the large log form (hidden until setLogActive(true))
@@ -76,6 +90,14 @@ public:
     // own transmissions. TransmitCard tells it the partner and what it sends.
     void setQsoPartner(const QString& call);
     void peekDecode();
+    // Receive audio for other programs: a second output on the virtual device "Fireside RX audio" (system/setup-system.sh), at a fixed level
+    // (level_db, dBFS gain on the demodulated audio) that the Volume slider and Mute do not touch. false if the device does not exist.
+    bool setDataOutput(bool on, double level_db);
+    bool dataOutputOn() const { return data_out_ != nullptr; }
+    // External program mode (the window wires the rest): the decoder is held off (a decoder choice still sets its mode and filter) and its box greyed.
+    QCheckBox* externalBox() const { return ext_box_; }
+    void setExternalMode(bool on);
+    bool externalMode() const { return external_; }
     void setTransmitting(bool keyed);                  // duplex: while keyed the radio's shared RX1/TX DDS sits ON the dial (no 9 kHz IF shift): receive follows it, so the spectrum stays right                                   // duplex: decode the slot so far now (we transmit next; receive keeps running)
     void addQsoTx(const QString& utcLabel, int audioHz, const QString& message);
     QString qsoPaneText() const;
@@ -86,7 +108,6 @@ public:
     void tickCallers();                                  // fades and expires (a 1 s timer calls it; tests call it with their own clock)
     void setCallersClockForTests(std::function<qint64()> now_ms) { callers_now_ = std::move(now_ms); }
     bool qsoPaneAtBottom(int* maximum = nullptr) const;   // the QSO pane is scrolled to its newest line (maximum = the scroll range, 0 while the pane is not laid out)
-    void setTxMeterWidget(QWidget* body);
     QWidget* takeOutputWidget();
     QWidget* takeAdvancedWidget();                      // Mirror I/Q, IF offset, Loop file: shown on the Device tab
     void setAntennaWidget(QWidget* body);
@@ -178,7 +199,7 @@ private slots:
     void settingsChanged();
 private:
     QHash<QString, QPair<QString, qint64>> heard_grids_;  // base call -> (grid it sent, UTC s)
-    fireside::RxEngine engine_; bool threaded_; AudioOut* audioOut_;
+    fireside::RxEngine engine_; bool threaded_; AudioOut* audioOut_; AudioOut* data_out_ = nullptr; float data_gain_ = 0.25f; QCheckBox* ext_box_ = nullptr; bool external_ = false;
     SpectrumWidget* spectrum_; WaterfallWidget* waterfall_; FrequencyDisplay* freq_; SMeter* meter_; QLabel *meter_text_, *mode_chip_, *status_, *source_label_;
     QButtonGroup *bands_, *modes_, *agcs_, *filters_, *steps_; QHBoxLayout* filter_row_; QBoxLayout* log_slot_ = nullptr; QWidget* log_card_ = nullptr; QBoxLayout* form_slot_ = nullptr; QWidget* form_card_ = nullptr; QWidget *band_card_ = nullptr, *mode_card_ = nullptr; QHBoxLayout* deck_ = nullptr;
     QPushButton *play_, *nb_, *nr_, *nr2_ = nullptr, *anf_, *mute_; QSpinBox *notch_, *squelch_; QSlider* volume_;
@@ -189,7 +210,7 @@ private:
     QHash<QString, QString> info_by_call_; QHash<QString, int> tag_by_call_;
     QPlainTextEdit* callers_ = nullptr; QWidget* dec_left_ = nullptr; QList<Caller> caller_list_; std::function<qint64()> callers_now_;
     void addCaller(const QString& call, const QString& line); void removeCaller(const QString& call); void renderCallers(); qint64 callersNow() const;
-    QTimer* ui_; QComboBox* mem_combo_; QComboBox* dec_mode_; QSpinBox* dec_tone_; QPlainTextEdit* dec_text_; QPlainTextEdit* qso_text_ = nullptr; QWidget* dec_split_ = nullptr; QHBoxLayout* header_ = nullptr; QString qso_partner_, logged_note_; bool tx_on_dial_ = false; QPushButton *ft8_btn_ = nullptr, *ft4_btn_ = nullptr; QCheckBox* auto_sb_ = nullptr; int last_band_idx_ = -2; bool recalling_ = false; QPushButton* clear_qso_ = nullptr; QString heard_note_; QWidget* advanced_ = nullptr; void syncFtButtons(); void addQsoLine(const QString& line, int kind); QLabel* dec_status_; QFrame* dec_card_; QPushButton* tx_btn_ = nullptr; QPushButton* preamp_ = nullptr; QWidget* tx_w_ = nullptr; QWidget* tx_side_ = nullptr; QComboBox* palette_; QComboBox* avg_ = nullptr; QLineEdit* my_call_ = nullptr; QComboBox* am_det_ = nullptr; QPushButton *rate_btn_[3] = {nullptr, nullptr, nullptr}, *stop_radio_ = nullptr; unsigned direct_rate_ = 0; QString rx_ant_text_; RecordController* rec_ = nullptr; QSlider* gain_ = nullptr; QLabel* gain_label_ = nullptr; QPushButton *grab_btn_ = nullptr, *rec_btn_ = nullptr; void updateRecordButtons(); QPushButton *zoom_in_ = nullptr, *zoom_out_ = nullptr, *zoom_full_ = nullptr; QCheckBox* bandplan_; QSlider* floor_; std::vector<Memory> memories_; std::vector<BandMem> band_mem_; bool band_recall_ = false; void noteBand(); bool restoring_ = false; double ref_hz_ = 0; bool tune_sw_ = false;
+    QTimer* ui_; QComboBox* mem_combo_; QComboBox* dec_mode_; QSpinBox* dec_tone_; QPlainTextEdit* dec_text_; QPlainTextEdit* qso_text_ = nullptr; QWidget* dec_split_ = nullptr; QHBoxLayout* header_ = nullptr; QString qso_partner_, logged_note_; bool tx_on_dial_ = false; QPushButton *ft8_btn_ = nullptr, *ft4_btn_ = nullptr; QCheckBox* auto_sb_ = nullptr; int last_band_idx_ = -2; bool recalling_ = false; QPushButton* clear_qso_ = nullptr; QString heard_note_; QWidget* advanced_ = nullptr; void syncFtButtons(); void addQsoLine(const QString& line, int kind); QLabel* dec_status_; QFrame* dec_card_; QPushButton* tx_btn_ = nullptr; QPushButton* preamp_ = nullptr; QWidget* tx_w_ = nullptr; QWidget* tx_side_ = nullptr; QButtonGroup* grp_mode_ = nullptr; QStackedWidget* mode_pages_ = nullptr; QPushButton *psk_btn_ = nullptr, *rtty_btn_ = nullptr; QWidget* dec_row_ = nullptr; QVBoxLayout* mode_switch_col_ = nullptr; QGridLayout* meters_grid_ = nullptr; QWidget* tx_meter_ = nullptr; bool cal_valid_ = false; std::array<double, 11> cal_meter_{}, cal_preamp_{}; QTimer* tx_meter_hold_ = nullptr; void showTxMeter(bool tx); QFrame *send_card_ = nullptr, *voice_card_ = nullptr, *signal_card_ = nullptr; int last_voice_mode_ = 0, last_digi_ = 4; void applyGroup(int g); void syncGroup(); void chooseGroup(int g); QComboBox* palette_; QComboBox* avg_ = nullptr; QLineEdit* my_call_ = nullptr; QComboBox* am_det_ = nullptr; QPushButton *rate_btn_[3] = {nullptr, nullptr, nullptr}, *stop_radio_ = nullptr; unsigned direct_rate_ = 0; QString rx_ant_text_; RecordController* rec_ = nullptr; QSlider* gain_ = nullptr; QLabel* gain_label_ = nullptr; QPushButton *grab_btn_ = nullptr, *rec_btn_ = nullptr; void updateRecordButtons(); QPushButton *zoom_in_ = nullptr, *zoom_out_ = nullptr, *zoom_full_ = nullptr; QCheckBox* bandplan_; QSlider* floor_; std::vector<Memory> memories_; std::vector<BandMem> band_mem_; bool band_recall_ = false; void noteBand(); bool restoring_ = false; double ref_hz_ = 0; bool tune_sw_ = false;
     bool playing_ = false; std::vector<double> notch_list_; double shift_acc_ = 0; double filter_width_ = 2700, filter_low_ = 150; int filter_shape_ = 1; QSpinBox *cut_lo_ = nullptr, *cut_hi_ = nullptr; QLabel *cut_lo_label_ = nullptr, *cut_hi_label_ = nullptr; QComboBox* shape_box_ = nullptr;
     double step_hz_ = 100;
     fireside::display::Scale scale_; fireside::display::ScaleTracker scale_tracker_; double peak_hz_ = 0, peak_db_ = -200, signal_dbfs_ = -200; size_t audio_total_ = 0;

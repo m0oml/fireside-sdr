@@ -183,6 +183,12 @@ TxChainConfig voice_chain_defaults() {
     m.limiter.ceiling = 0.95; c.ssb.lo_hz = 150; c.ssb.hi_hz = 2800; c.iq_limiter.ceiling = 0.9;
     return c;
 }
+TxChainConfig data_chain_defaults() {
+    TxChainConfig c; auto& m = c.mic;
+    m.highpass_hz = 0; m.lowpass_hz = 0; m.eq.clear(); m.gate = false; m.expander = false; m.leveler = false; m.compressor = false; m.clip_level = 0;
+    m.limiter.ceiling = 0.95; c.ssb.lo_hz = 100; c.ssb.hi_hz = 3000; c.iq_limiter.ceiling = 0.9;
+    return c;
+}
 MicChain::MicChain(const MicChainConfig& c) : c_(c), pre_(float(db2lin(c.mic_gain_db))), lim_(c.sample_rate, c.limiter) {
     if (!std::isfinite(c.mic_gain_db) || c.mic_gain_db > 40) throw std::invalid_argument("mic gain out of range");
     if (c.clip_level < 0 || c.clip_level > 1) throw std::invalid_argument("clip level must be 0 (off) or in (0, 1]");

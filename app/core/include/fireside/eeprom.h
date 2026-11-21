@@ -1,6 +1,7 @@
 // Read-only calibration EEPROM backup and decoder. Port of tools/firesidectl/eeprom.py (layout and checksum rules from PowerSDR fwc_eeprom.cs).
 // NEVER writes: only READ_*_EEPROM_UINT32 requests.
 #pragma once
+#include <array>
 #include <map>
 #include <optional>
 #include <string>
@@ -31,6 +32,10 @@ struct Decoded {
 };
 
 Decoded decode_eeprom(const std::vector<uint8_t>& data, const std::string& which = "TRX");   // never throws on garbage
+// The factory receive-level calibration: table "RX level", one row per band (160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 m) of {display, preamp, meter} in dB.
+// Read only. Valid only with its pointer and checksum good, 11 rows of 3, no NaN and every value in a plausible range (display -90..-30, preamp -30..5, meter -70..-10).
+struct RxLevelCal { bool valid = false; std::string problem; std::array<double, 11> display{}, preamp{}, meter{}; };
+RxLevelCal rx_level_cal(const Decoded& d);
 std::string csv_text(const std::vector<uint8_t>& data);          // PowerSDR Dump() format: hex bytes with NO leading zeros
 std::vector<uint8_t> parse_csv(const std::string& text);
 

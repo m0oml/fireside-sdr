@@ -49,13 +49,40 @@ class TuningIsOneOpcode(unittest.TestCase):
         for bad in ("Flex", "ILink", "PalMailbox", ".set(", "fx_", "link_"):
             self.assertNotIn(bad, c, bad)                                             # CAT only calls back; the Tuner is the sole route to the mailbox
 
-    def test_rigctl_cat_cannot_transmit_or_touch_the_radio(self):
-        """The Hamlib CAT server: no radio objects, no PTT call into the app (set_ptt is refused in the protocol engine itself)."""
+    def test_rigctl_cat_holds_nothing_that_can_transmit_or_touch_the_radio(self):
+        """The Hamlib CAT server: no radio objects and no keying code. A client's set_ptt goes only to rigctl::PttRequest (the app decides)."""
         c = code("core/src/rigctl.cpp") + code("core/include/fireside/rigctl.h") + code("gui/CatPanel.cpp", True) + code("gui/CatPanel.h", True)
-        for bad in ("Flex", "ILink", "PalMailbox", ".set(", "fx_", "link_", "MOX", "TxGate", "TxControl", "key(true", "startSend", "onSend", "setPtt", "set_ptt("):
+        for bad in ("Flex", "ILink", "PalMailbox", ".set(", "fx_", "link_", "MOX", "TxGate", "TxControl", "TransmitCard", "key(true", "startSend", "onSend", "setPttForTests", "voice("):
             self.assertNotIn(bad, c, bad)
         b = code("core/include/fireside/rigctl.h"); backend = b[b.index("struct Backend"):b.index("};", b.index("struct Backend"))]
         self.assertNotRegex(backend, r"ptt|transmit\(|key\(", "Backend must offer no way to transmit")
+        r = code("core/src/rigctl.cpp")
+        self.assertEqual(len(re.findall(r"request_ptt\(client_, true\)", r)), 1)          # one place asks to key: set_ptt 1/2/3
+        self.assertIn("!ptt_ || !ptt_->request_ptt(client_, true)", r)                     # no PttRequest attached = refused
+
+    def test_only_the_transmit_card_implements_ptt_request_and_it_keys_only_through_voice(self):
+        impl = []
+        for d, _, fs in os.walk(APP):
+            for f in fs:
+                p = os.path.relpath(os.path.join(d, f), APP)
+                if f.endswith((".cpp", ".h")) and not p.startswith("tests"):
+                    if re.search(r"\b(?:struct|class)\s+[\w:]+\s*:\s*(?:public\s+)?(?:fireside::)?rigctl::PttRequest\b", code(p)): impl.append(p)
+        self.assertEqual(sorted(impl), ["gui/CatPanel.cpp", "gui/TransmitCard.cpp"])         # CatPanel's only forwards to the attached one
+        fwd = code("gui/CatPanel.cpp"); body = fwd[fwd.index("struct CatPanel::Fwd"):fwd.index("};", fwd.index("struct CatPanel::Fwd"))]
+        self.assertIn("p->ptt_ ? p->ptt_->request_ptt(client, on) : !on", body)            # nothing attached: keying refused, releasing fine
+        t = code("gui/TransmitCard.cpp"); req = t[t.index("bool TransmitCard::requestExt("):t.index("\n}", t.index("bool TransmitCard::requestExt("))]
+        self.assertEqual(re.findall(r"\bt\.(\w+)\(", req), ["voice"])                      # an over from another program is TxControl::voice and nothing else
+        for need in ("ext_allow_->isChecked()", "tx_->armed()", "txm::band_of", "k_for(band) > 1000", "fw_iso_duplex_running()", "kExtMaxKeyS", "data_chain_defaults()"):
+            self.assertIn(need, req, need)
+        self.assertIn("now_ms() - ext_beat_ms_ < ext_watchdog_ms_", t)                       # the watchdog ...
+        self.assertIn("ext_watchdog_ms_{kExtWatchdogMs}", code("gui/TransmitCard.h"))        # ... 15 s unless a test shortens it
+        h = code("gui/TransmitCard.h"); self.assertRegex(h, r"kExtWatchdogMs = 15000;"); self.assertRegex(h, r"kExtMaxKeyS = 120;")
+        self.assertIn('ext_allow_->setChecked(false)', t)                                    # off in every new window ...
+        self.assertNotRegex(t, r"setValue\(\s*\"ext_allow")                                  # ... and never remembered
+
+    def test_kenwood_cat_still_refuses_transmit(self):
+        c = code("core/src/cat.cpp")
+        self.assertIn('if (name == "TX") { ++refused_tx_; return kErr; }', c)
 
     def test_gui_reaches_the_radio_only_through_radio_session(self):
         offenders = []

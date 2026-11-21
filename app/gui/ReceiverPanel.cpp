@@ -1,8 +1,11 @@
 #include "ReceiverPanel.h"
+#include "fireside/tx_meter.h"
 #include "fireside/bandplan.h"
 #include "AppLog.h"
 #include <QScrollBar>
 #include <QSplitter>
+#include <QStackedWidget>
+#include <QScrollArea>
 #include <QPointer>
 #include <QApplication>
 #include <QDateTime>
@@ -38,6 +41,7 @@
 #include <QRegularExpression>
 #include <QFile>
 #include <QVBoxLayout>
+#include <QFontDatabase>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -77,34 +81,35 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
     auto* header = new QHBoxLayout; header->setSpacing(12); header_ = header;
     freq_ = new FrequencyDisplay; freq_->setFixedHeight(64); freq_->setHz(7.1e6);
     mode_chip_ = new QLabel; mode_chip_->setObjectName("muted"); source_label_ = new QLabel; source_label_->setObjectName("muted"); source_label_->setAlignment(Qt::AlignRight);
+    {   // the master switch: which kind of operating the rest of the screen is laid out for
+        auto* col = new QVBoxLayout; col->setSpacing(6); mode_switch_col_ = col; grp_mode_ = group(this, true); const char* names[3] = {"Voice", "CW", "Digi"};
+        const char* tips[3] = {"Voice: USB, LSB, AM, FM. Shows the voice transmit controls; no decoder.", "CW: Morse. Shows the decoder (Morse).", "Digital: FT8, FT4, PSK31, RTTY. Shows the decoder and the message controls."};
+        for (int i = 0; i < 3; ++i) { auto* bt = pill(names[i]); bt->setToolTip(tips[i]); grp_mode_->addButton(bt, i); col->addWidget(bt); if (i == 0) bt->setChecked(true); }
+        header->addWidget(card("Mode", col), 0); }
     auto* freq_body = new QVBoxLayout; freq_body->setSpacing(4); freq_body->addWidget(freq_);
     auto* chips = new QHBoxLayout; chips->addWidget(mode_chip_); chips->addStretch(1); chips->addWidget(source_label_); freq_body->addLayout(chips);
-    header->addWidget(card("Frequency (MHz)", freq_body), 0);
-    auto* steps_row = new QHBoxLayout; steps_ = group(this, true);
+    auto* steps_row = new QHBoxLayout; steps_row->setSpacing(6); steps_ = group(this, true);
     const std::pair<const char*, double> steps[] = {{"10 Hz", 10}, {"100 Hz", 100}, {"1 kHz", 1000}, {"10 kHz", 10000}};
-    for (int i = 0; i < 4; ++i) { auto* b = pill(steps[i].first); steps_->addButton(b, i); steps_row->addWidget(b); if (i == 1) b->setChecked(true); }
-    auto* steps_col = new QVBoxLayout; steps_col->addLayout(steps_row); auto* hint = new QLabel("Click the spectrum to tune"); hint->setObjectName("muted"); steps_col->addWidget(hint);
-    header->addWidget(card("Tuning step", steps_col), 0);
-    { auto* col = new QVBoxLayout; col->setSpacing(6); mem_combo_ = new QComboBox; mem_combo_->setMinimumWidth(200); mem_combo_->setToolTip("Pick a memory to recall its frequency, mode and filter");
-      auto* row = new QHBoxLayout; row->setSpacing(6); auto* save = new QPushButton("Save"); auto* del = new QPushButton("Delete"); save->setToolTip("Save the current frequency, mode and filter"); row->addWidget(save); row->addWidget(del); row->addStretch(1);
-      col->addWidget(mem_combo_); col->addLayout(row); header->addWidget(card("Memories", col), 0);
-      connect(save, &QPushButton::clicked, this, [this] { bool ok = false; const QString def = QString("%1 MHz %2").arg(dialHz() / 1e6, 0, 'f', 4).arg(kModeNames[modeIndex()]);
-          const QString name = QInputDialog::getText(this, "Save memory", "Name:", QLineEdit::Normal, def, &ok); if (ok && !name.trimmed().isEmpty()) saveMemory(name.trimmed()); });
-      connect(del, &QPushButton::clicked, this, [this] { if (mem_combo_->currentIndex() >= 0) deleteMemory(mem_combo_->currentIndex()); });
-      connect(mem_combo_, &QComboBox::activated, this, [this](int i) { recallMemory(i); }); }
-    header->addStretch(1);
+    for (int i = 0; i < 4; ++i) { auto* bt = pill(steps[i].first); bt->setToolTip("Tuning step (click the spectrum to tune)"); steps_->addButton(bt, i); steps_row->addWidget(bt); if (i == 1) bt->setChecked(true); }
+    freq_body->addLayout(steps_row);
+    header->addWidget(card("Frequency (MHz)", freq_body), 0);
+    // (no memories box any more: the saved list still loads, nothing shows it)
+    mem_combo_ = new QComboBox(this); mem_combo_->setVisible(false);
+    connect(mem_combo_, &QComboBox::activated, this, [this](int i) { recallMemory(i); });
     meter_ = new SMeter; meter_text_ = new QLabel("no signal"); meter_text_->setObjectName("muted");
     meter_text_->ensurePolished();                                                       // measure with the themed font, then reserve the width of the longest possible text so the card never resizes as the numbers change
-    meter_text_->setMinimumWidth(std::max(meter_->minimumWidth(), meter_text_->fontMetrics().horizontalAdvance("S9+60   -999 dBm (uncal)   -999.9 dBFS   peak line -999.9 dBFS") + 4));
-    meter_text_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    meter_text_->setWordWrap(true); meter_text_->setMinimumWidth(std::max(meter_->minimumWidth(), 280));              // two lines, fixed height: the card never resizes as the numbers change
+    meter_text_->setFixedHeight(2 * meter_text_->fontMetrics().lineSpacing() + 2); meter_text_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     auto* meter_body = new QVBoxLayout; meter_body->setSpacing(2); meter_body->addWidget(meter_); meter_body->addWidget(meter_text_);
-    header->addWidget(card("Signal (dBFS, not yet calibrated)", meter_body), 0);
+    meters_grid_ = new QGridLayout; meters_grid_->setHorizontalSpacing(16); meters_grid_->setVerticalSpacing(2); meters_grid_->addLayout(meter_body, 0, 0);
+    signal_card_ = card("Meters: signal (dBFS, not calibrated) and transmit power", meters_grid_);
     root->addLayout(header);
 
     // ---- display: spectrum over waterfall in one panel
     spectrum_ = new SpectrumWidget; waterfall_ = new WaterfallWidget;
     auto* disp = new QFrame; disp->setObjectName("card"); auto* dcol = new QVBoxLayout(disp); dcol->setContentsMargins(1, 1, 1, 1); dcol->setSpacing(0);
     dcol->addWidget(spectrum_, 2); dcol->addWidget(waterfall_, 3);
+    disp->setMinimumHeight(280);                               // the spectrum and waterfall always keep room, whatever the cards below ask for
     root->addWidget(disp, 1);
 
     // ---- decoder: text from CW / PSK31 / RTTY
@@ -118,7 +123,10 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
       connect(my_call_, &QLineEdit::editingFinished, this, [this] { my_call_->setText(my_call_->text().trimmed().toUpper()); if (decoderIndex() == 4) rebuildDecoder(); });
       clear_qso_ = new QPushButton("Clear QSO"); clear_qso_->setVisible(false); clear_qso_->setToolTip("Empties the QSO pane (right) and forgets the station being worked there. Transmitting is not affected: Stop does that.");
       connect(clear_qso_, &QPushButton::clicked, this, [this] { clearQso(); });
-      row->addWidget(dec_mode_); row->addWidget(dec_tone_); row->addWidget(my_call_); row->addWidget(clear); row->addWidget(clear_qso_); row->addWidget(dec_status_, 1); row->addWidget(tx_btn_);
+      ext_box_ = new QCheckBox("External program");
+      ext_box_->setToolTip("Another program (WSJT-X, JS8Call, fldigi ...) decodes, logs and spots: our decoder, auto sequence + log and PSK Reporter uploads are turned off "
+                           "(and come back as they were when you untick this). Receive audio goes to \"Fireside RX audio\" (Audio tab).");
+      row->addWidget(dec_mode_); row->addWidget(ext_box_); row->addWidget(dec_tone_); row->addWidget(my_call_); row->addWidget(clear); row->addWidget(clear_qso_); row->addWidget(dec_status_, 1); row->addWidget(tx_btn_);
       dec_text_ = new QPlainTextEdit; dec_text_->setReadOnly(true); dec_text_->setMaximumBlockCount(1000); dec_text_->setFixedHeight(84); dec_text_->setVisible(false); dec_text_->setPlaceholderText("Decoded text appears here");
       body->addLayout(row);
       qso_text_ = new QPlainTextEdit; qso_text_->setReadOnly(true); qso_text_->setMaximumBlockCount(400); qso_text_->setPlaceholderText("Your QSOs: what is sent to you, and what you send"); qso_text_->setVisible(false);
@@ -137,36 +145,44 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
       connect(clear, &QPushButton::clicked, this, [this] { clearDecoded(); }); }
 
     // ---- control deck
-    auto* deck = new QHBoxLayout; deck_ = deck; deck->setSpacing(12);
+    auto* deck = new QHBoxLayout; deck_ = deck; deck->setSpacing(12); 
     { auto* g = new QGridLayout; g->setSpacing(6); bands_ = group(this, false);
       for (int i = 0; i < int(std::size(kBands)); ++i) { auto* b = pill(kBands[i].name); b->setToolTip(QString("%1 m: back where you left it (frequency, mode, filter, decoder)").arg(kBands[i].name)); bands_->addButton(b, i); g->addWidget(b, i / 6, i % 6); }
       preamp_ = pill("Preamp"); preamp_->setEnabled(false); preamp_->setToolTip("Receive preamp (more gain for weak signals; can overload on strong ones). Usable once the radio is started; off at every start-up and shutdown. Receive only.");
       g->addWidget(preamp_, int((std::size(kBands) + 5) / 6), 0, 1, 2); connect(preamp_, &QPushButton::clicked, this, [this](bool on) { emit preampRequested(on); });
-      band_card_ = card("Band (m)", g); deck->addWidget(band_card_); }
-    { auto* g = new QGridLayout; g->setSpacing(6); modes_ = group(this, true);
-      for (int i = 0; i < 5; ++i) { auto* b = pill(kModeNames[i]); modes_->addButton(b, i); g->addWidget(b, i / 3, i % 3); if (i == 0) b->setChecked(true); }
-      ft8_btn_ = pill("FT8"); ft4_btn_ = pill("FT4");                                    // not modes of their own: USB + the band's FT frequency + the decoder
-      ft8_btn_->setToolTip("FT8: the band's FT8 frequency, USB, the wide filter and the FT8 decoder"); ft4_btn_->setToolTip("FT4: the band's FT4 frequency, USB, the wide filter and the FT4 decoder");
-      g->addWidget(ft8_btn_, 1, 2); g->addWidget(ft4_btn_, 2, 0);
-      auto_sb_ = new QCheckBox("Auto LSB / USB"); auto_sb_->setChecked(true); auto_sb_->setToolTip("Entering a band in USB or LSB picks its sideband: LSB on 160, 80 and 40 m, USB on 60 m and above");
-      g->addWidget(auto_sb_, 2, 1, 1, 2);
+      band_card_ = card("Band (m)", g); }
+    auto* filter_col = new QVBoxLayout; filter_col->setSpacing(6);                    // the passband controls: they live in the Noise card, not the mode tile
+    { modes_ = group(this, true); for (int i = 0; i < 5; ++i) { auto* b = pill(kModeNames[i]); modes_->addButton(b, i); if (i == 0) b->setChecked(true); }
+      mode_pages_ = new QStackedWidget;                                                  // three pages, one per master-switch group; the buttons live on exactly one
+      { auto* pg = new QWidget; auto* g = new QGridLayout(pg); g->setContentsMargins(0, 0, 0, 0); g->setSpacing(6);       // Voice: USB LSB AM FM
+        g->addWidget(modes_->button(0), 0, 0); g->addWidget(modes_->button(1), 0, 1); g->addWidget(modes_->button(2), 1, 0); g->addWidget(modes_->button(4), 1, 1);
+        auto_sb_ = new QCheckBox("Auto LSB / USB"); auto_sb_->setChecked(true); auto_sb_->setToolTip("Entering a band in USB or LSB picks its sideband: LSB on 160, 80 and 40 m, USB on 60 m and above");
+        g->addWidget(auto_sb_, 2, 0, 1, 2); mode_pages_->addWidget(pg); }
+      { auto* pg = new QWidget; auto* g = new QGridLayout(pg); g->setContentsMargins(0, 0, 0, 0); g->setSpacing(6);       // CW
+        g->addWidget(modes_->button(3), 0, 0); g->setColumnStretch(1, 1); mode_pages_->addWidget(pg); }
+      { auto* pg = new QWidget; auto* g = new QGridLayout(pg); g->setContentsMargins(0, 0, 0, 0); g->setSpacing(6);       // Digital: not modes of their own: USB + the decoder (FT8 / FT4 also the band's FT frequency)
+        ft8_btn_ = pill("FT8"); ft4_btn_ = pill("FT4"); psk_btn_ = pill("PSK31"); rtty_btn_ = pill("RTTY");
+        ft8_btn_->setToolTip("FT8: the band's FT8 frequency, USB, the wide filter and the FT8 decoder"); ft4_btn_->setToolTip("FT4: the band's FT4 frequency, USB, the wide filter and the FT4 decoder");
+        psk_btn_->setToolTip("PSK31: USB and the PSK31 decoder (the dial stays where it is)"); rtty_btn_->setToolTip("RTTY: USB and the RTTY decoder (the dial stays where it is)");
+        g->addWidget(ft8_btn_, 0, 0); g->addWidget(ft4_btn_, 0, 1); g->addWidget(psk_btn_, 1, 0); g->addWidget(rtty_btn_, 1, 1); mode_pages_->addWidget(pg); }
       connect(ft8_btn_, &QPushButton::clicked, this, [this] { selectFt(false); }); connect(ft4_btn_, &QPushButton::clicked, this, [this] { selectFt(true); });
+      connect(psk_btn_, &QPushButton::clicked, this, [this] { setDecoderIndex(2); }); connect(rtty_btn_, &QPushButton::clicked, this, [this] { setDecoderIndex(3); });
       filter_row_ = new QHBoxLayout; filter_row_->setSpacing(6); filters_ = group(this, true); rebuildFilterButtons();
-      auto* col = new QVBoxLayout; col->setSpacing(8); col->addLayout(g); auto* fl = new QLabel("Passband width"); fl->setObjectName("muted"); col->addWidget(fl); col->addLayout(filter_row_);
+      auto* col = new QVBoxLayout; col->setSpacing(8); col->addWidget(mode_pages_); auto* fl = new QLabel("Passband width"); fl->setObjectName("muted"); filter_col->addWidget(fl); filter_col->addLayout(filter_row_);
       { auto* cr = new QHBoxLayout; cr->setSpacing(6); cut_lo_label_ = new QLabel("Low"); cut_hi_label_ = new QLabel("High"); cut_lo_label_->setObjectName("muted"); cut_hi_label_->setObjectName("muted");
         cut_lo_ = new QSpinBox; cut_lo_->setRange(0, 5000); cut_lo_->setSingleStep(10); cut_lo_->setSuffix(" Hz"); cut_hi_ = new QSpinBox; cut_hi_->setRange(100, 8000); cut_hi_->setSingleStep(10); cut_hi_->setSuffix(" Hz");
         cut_lo_->setToolTip("Low cut of the passband (audio Hz). Also: drag the edges of the shaded passband on the spectrum"); cut_hi_->setToolTip("High cut of the passband (audio Hz). For AM, CW and FM this is the total width");
         shape_box_ = new QComboBox; shape_box_->addItems({"Soft", "Normal", "Sharp"}); shape_box_->setCurrentIndex(1); shape_box_->setToolTip("Filter skirt: Sharp rejects neighbours better but rings more (best for CW and data); Soft sounds more natural on voice");
-        cr->addWidget(cut_lo_label_); cr->addWidget(cut_lo_); cr->addWidget(cut_hi_label_); cr->addWidget(cut_hi_); cr->addWidget(shape_box_); col->addLayout(cr); syncFilterEdits();
+        cr->addWidget(cut_lo_label_); cr->addWidget(cut_lo_); cr->addWidget(cut_hi_label_); cr->addWidget(cut_hi_); cr->addWidget(shape_box_); filter_col->addLayout(cr); syncFilterEdits();
         am_det_ = new QComboBox; am_det_->addItems({"Sync AM", "Sync AM: lower sideband", "Sync AM: upper sideband", "Envelope (plain)"});
         am_det_->setToolTip("AM detector. Sync AM locks to the carrier: no distortion when the carrier fades (medium wave at night), a little quieter on weak stations. "
                             "One sideband: drops a whistle or a neighbour on the other side. Envelope: the plain detector (use it if a station has no steady carrier).");
-        am_det_->setVisible(false); col->addWidget(am_det_);
+        am_det_->setVisible(false); filter_col->addWidget(am_det_);
         connect(am_det_, &QComboBox::activated, this, [this](int) { applySettings(); }); }
       col->addStretch(1);
-      mode_card_ = card("Mode / filter", col); deck->addWidget(mode_card_); }
+      mode_card_ = card("Voice modes", col); header->addWidget(mode_card_, 0); header->addWidget(band_card_, 0); header->addWidget(signal_card_, 1); }       // after Frequency: the modes of the chosen group, then the bands
     { auto* col = new QVBoxLayout; col->setSpacing(8); form_slot_ = col; form_card_ = card("Log QSO", col); form_card_->setVisible(false); deck->addWidget(form_card_, 6); }       // the large log form: shown only while a contact is being logged (it sits where Band and Mode are)
-    { auto* col = new QVBoxLayout; col->setSpacing(8); log_slot_ = col; log_card_ = theme::makeCard("Lookup", col, true); log_card_->setVisible(false); deck->addWidget(log_card_, 3); }       // filled by setLookupWidget (callsign, Enter, who is it)
+    { auto* col = new QVBoxLayout; col->setSpacing(8); log_slot_ = col; log_card_ = theme::makeCard("Lookup", col, true); log_card_->setVisible(false); log_card_->setMaximumWidth(640); deck->addWidget(log_card_, 3); }       // filled by setLookupWidget (callsign, Enter, who is it)
     { auto* col = new QVBoxLayout; col->setSpacing(8); auto* agc_row = new QHBoxLayout; agc_row->setSpacing(6); agcs_ = group(this, true);
       for (int i = 0; i < 4; ++i) { auto* b = pill(kAgcNames[i]); agcs_->addButton(b, i); agc_row->addWidget(b); if (i == 2) b->setChecked(true); }
       auto* vol = new QHBoxLayout; volume_ = new QSlider(Qt::Horizontal); volume_->setRange(0, 100); volume_->setValue(60); volume_->setMinimumWidth(110); mute_ = pill("Mute");
@@ -192,7 +208,7 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
           { QSignalBlocker a(out_target_), b(out_pair_); out_target_->setCurrentIndex(i == 0 ? 0 : 1); out_pair_->setCurrentIndex(pair[std::clamp(i, 0, 3)]); }
           outputControlsChanged(); syncOutDest(); });
       setRadioOutputsAvailable(false);
-      deck->addWidget(card("Audio", col)); }
+      deck->addWidget(card("Audio", col), 2); }
     { auto* col = new QVBoxLayout; col->setSpacing(8); auto* r1 = new QHBoxLayout; r1->setSpacing(6);
       nb_ = pill("NB"); nr_ = pill("NR"); anf_ = pill("Auto notch"); nb_->setToolTip("Impulse noise blanker"); nr_->setToolTip("Adaptive line filter: keeps steady tones (CW, whistles) and drops the rest. For speech use NR2"); anf_->setToolTip("Removes steady tones automatically");
       nr2_ = pill("NR2"); nr2_->setVisible(fireside::dsp::spectral_nr_available());
@@ -200,7 +216,7 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
       r1->addWidget(nb_); r1->addWidget(nr_); r1->addWidget(nr2_); r1->addWidget(anf_);
       auto* r2 = new QHBoxLayout; r2->setSpacing(6); notch_ = new QSpinBox; notch_->setRange(0, 5000); notch_->setSingleStep(50); notch_->setSpecialValueText("Notch off"); notch_->setSuffix(" Hz");
       squelch_ = new QSpinBox; squelch_->setRange(-120, 0); squelch_->setValue(-120); squelch_->setSpecialValueText("Squelch off"); squelch_->setSuffix(" dB"); r2->addWidget(notch_); r2->addWidget(squelch_);
-      col->addLayout(r1); col->addLayout(r2); deck->addWidget(card("Noise", col)); }
+      col->addLayout(r1); col->addLayout(r2); col->addLayout(filter_col); deck->addWidget(card("Noise and filter", col), 2); }
     { auto* col = new QVBoxLayout; col->setSpacing(8); auto* r1 = new QHBoxLayout; r1->setSpacing(6);
       auto* open = new QPushButton("Open file..."); auto* demo = new QPushButton("Demo");
       auto* rr = new QHBoxLayout; rr->setSpacing(4); auto* grp = new QButtonGroup(this); grp->setExclusive(true);
@@ -223,7 +239,7 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
       connect(recopt, &QPushButton::clicked, this, [this] { if (rec_) rec_->showOptions(this); });
       col->addLayout(rr); col->addWidget(stop_radio_); col->addLayout(r1); col->addWidget(play_); col->addLayout(rr2);
       connect(open, &QPushButton::clicked, this, &ReceiverPanel::openFile); connect(demo, &QPushButton::clicked, this, [this] { loadDemo(); });
-      deck->addWidget(card("Source", col)); }
+      deck->addWidget(card("Source", col), 1); }
     { auto* col = new QVBoxLayout; col->setSpacing(8); mirror_ = pill("Mirror I/Q"); mirror_->setToolTip("The radio's I/Q is mirrored: ON for the live radio (comes up on by itself). Recordings keep their own setting: tick it for files captured from the radio");
       if_ = new QComboBox; if_->addItems({"IF offset 9 kHz", "IF offset 0"}); if_->setToolTip("9 kHz = the radio's DDS sits 9 kHz below the dial (what the start-up does, as PowerSDR; keeps carriers out of the radio's 0 Hz hole). 0 = the I/Q is centred on the dial (most recordings)");
       loop_ = new QCheckBox("Loop file"); loop_->setChecked(true);
@@ -247,15 +263,23 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
       zoom_out_->setToolTip("Zoom out (Ctrl+-). Ctrl+wheel over the spectrum or waterfall also zooms, about the mouse."); zoom_in_->setToolTip("Zoom in (Ctrl+=)"); zoom_full_->setToolTip("Whole span (Ctrl+0)");
       for (auto* b : {zoom_out_, zoom_in_, zoom_full_}) { b->setAutoDefault(false); b->setFocusPolicy(Qt::NoFocus); zr->addWidget(b); }
       wg->addWidget(l5, 4, 0); wg->addLayout(zr, 5, 0);
-      bandplan_ = new QCheckBox("Band plan"); bandplan_->setChecked(true); bandplan_->setToolTip("Strip along the top of the spectrum: RSGB 2026 usage (CW, narrow/digital, all modes, beacons, FM) inside the Ofcom Full-licence allocations (OFW611, Feb 2024); red = inside a band but NOT a UK allocation (60 m gaps); FT8/FT4 dial frequencies. Hover for details. A guide only."); wg->addWidget(bandplan_, 5, 1); col->addLayout(wg); col->addStretch(1); deck->addWidget(card("Waterfall", col)); }
+      bandplan_ = new QCheckBox("Band plan"); bandplan_->setChecked(true); bandplan_->setToolTip("Strip along the top of the spectrum: RSGB 2026 usage (CW, narrow/digital, all modes, beacons, FM) inside the Ofcom Full-licence allocations (OFW611, Feb 2024); red = inside a band but NOT a UK allocation (60 m gaps); FT8/FT4 dial frequencies. Hover for details. A guide only."); wg->addWidget(bandplan_, 5, 1); col->addLayout(wg); col->addStretch(1); deck->addWidget(card("Waterfall", col), 1); }
     root->addLayout(deck);
 
-    status_ = new QLabel; status_->setObjectName("status"); status_->setTextInteractionFlags(Qt::TextSelectableByMouse); root->addWidget(status_);
+    status_ = new QLabel; status_->setObjectName("status"); status_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    {   // the bottom line changes ~30 times a second: a fixed-pitch font and fixed-width number fields keep every character where it is, and the label
+        // never asks the window for more room (a long line is clipped; the tooltip has all of it)
+        QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont); f.setPointSizeF(status_->font().pointSizeF() > 0 ? status_->font().pointSizeF() : 9.0); status_->setFont(f);
+        status_->setTextFormat(Qt::PlainText); status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); status_->setMinimumWidth(0);
+        status_->setFixedHeight(QFontMetrics(f).height() + 8);
+    }
+    root->addWidget(status_);
 
     ui_ = new QTimer(this); ui_->setInterval(30); connect(ui_, &QTimer::timeout, this, &ReceiverPanel::refresh);
     connect(play_, &QPushButton::toggled, this, [this](bool on) { setPlaying(on); });
     connect(bands_, &QButtonGroup::idClicked, this, [this](int i) { recallBand(i); });
-    connect(modes_, &QButtonGroup::idToggled, this, [this](int, bool on) { if (!on) return; filter_width_ = dsp::default_filter_width(static_cast<dsp::Mode>(modeIndex())); filter_low_ = 150; rebuildFilterButtons(); settingsChanged(); });
+    connect(modes_, &QButtonGroup::idToggled, this, [this](int, bool on) { if (!on) return; filter_width_ = dsp::default_filter_width(static_cast<dsp::Mode>(modeIndex())); filter_low_ = 150; rebuildFilterButtons(); syncGroup(); settingsChanged(); });
+    connect(grp_mode_, &QButtonGroup::idClicked, this, [this](int g) { chooseGroup(g); });
     connect(cut_lo_, &QSpinBox::editingFinished, this, [this] { cutsEdited(); }); connect(cut_hi_, &QSpinBox::editingFinished, this, [this] { cutsEdited(); });
     connect(shape_box_, &QComboBox::activated, this, [this](int i) { setFilterShape(i); });
     connect(spectrum_, &SpectrumWidget::passbandEdgeDragged, this, [this](double lo, double hi) {                 // dragging an edge on the spectrum
@@ -332,7 +356,10 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
     note_ = "Open an I/Q WAV (RX1 I/Q = channels 1 and 2), press Demo, or try Live.   Keys: arrows tune, PgUp/PgDn change band, M mute, Space play/pause."; updateStatus();
     loadSettings();
 }
-ReceiverPanel::~ReceiverPanel() { saveSettings(); engine_.stop(); }
+ReceiverPanel::~ReceiverPanel() {
+    saveSettings(); engine_.stop();
+    delete rec_; rec_ = nullptr;      // its destructor unhooks the engine's taps: it must run here, while engine_ still exists (as a child it would be deleted after the members)
+}
 
 void ReceiverPanel::rebuildFilterButtons() {
     // Five buttons are created once; a mode change only relabels and hides them (deleting and recreating widgets left the card half-painted).
@@ -554,6 +581,7 @@ void ReceiverPanel::refresh() {
     }
     if (!frames.empty()) { spectrum_->setScale(scale_); spectrum_->setFrame(frames.back()); }
     audio_buf_.clear(); engine_.take_audio(audio_buf_);
+    if (data_out_ && !audio_buf_.empty()) data_out_->push(audio_buf_, data_gain_);                     // other programs: fixed level, not muted
     if (!mute_->isChecked() && !audio_buf_.empty()) {
         if (radio_out_) { radio_out_->set_volume(float(volume_->value()) / 100.0f); try { radio_out_->push(audio_buf_.data(), audio_buf_.size()); } catch (const std::exception& e) { note_ = QString("Radio audio stopped: ") + e.what(); radio_out_.reset(); QSignalBlocker b(out_target_); out_target_->setCurrentIndex(0); out_pair_->setEnabled(false); } }
         else audioOut_->push(audio_buf_, float(volume_->value()) / 100.0f);
@@ -565,7 +593,9 @@ void ReceiverPanel::refresh() {
     { std::string t; if (engine_.take_text(t) > 0) addDecodedText(QString::fromStdString(t));
       if (decoderIndex() != 0) dec_status_->setText(st.decoder.empty() ? "Waiting for a signal..." : QString::fromStdString(st.decoder)); }
     meter_->setLevel(st.signal_dbfs <= -199 ? -120 : st.signal_dbfs);
-    meter_text_->setText(st.signal_dbfs <= -199 ? "no signal" : QString("%1   %2 dBm (uncal)   %3 dBFS   peak line %4 dBFS").arg(SMeter::sText(SMeter::dbm(st.signal_dbfs)), 0).arg(SMeter::dbm(st.signal_dbfs), 0, 'f', 0).arg(st.signal_dbfs, 0, 'f', 1).arg(st.peak_db, 0, 'f', 1));
+    const double off = meterOffsetDb(); meter_->setOffsetDb(off); const bool cal = meterCalibrated();
+    meter_text_->setText(st.signal_dbfs <= -199 ? "no signal" : QString("%1   %2 dBm %5   %3 dBFS   peak line %4 dBFS").arg(SMeter::sText(st.signal_dbfs + off), 0).arg(st.signal_dbfs + off, 0, 'f', 0).arg(st.signal_dbfs, 0, 'f', 1).arg(st.peak_db, 0, 'f', 1)
+                         .arg(cal ? "(factory table)" : "(uncal)"));
     updateStatus();
 }
 
@@ -577,17 +607,17 @@ void ReceiverPanel::updateStatus() {
     const RxStatus st = engine_.status(); QString s;
     mode_chip_->setText(QString("%1  ·  %2  ·  AGC %3").arg(kModeNames[modeIndex()], width_text(filter_width_), QString(kAgcNames[agcIndex()]).toLower()));
     source_label_->setText(QString::fromStdString(st.source));
-    if (st.fft_size && !st.source.empty()) s = QString("peak %1 dBFS at %2 Hz (%3)   |   AGC gain %4 dB").arg(peak_db_, 0, 'f', 1).arg(peak_hz_, 0, 'f', 0)
-                                                    .arg(QString::fromStdString(display::format_mhz(dialHz() + peak_hz_))).arg(st.agc_gain_db, 0, 'f', 1);
+    if (st.fft_size && !st.source.empty()) s = QString("peak %1 dBFS at %2 Hz = %3   |   AGC gain %4 dB").arg(peak_db_, 7, 'f', 1).arg(peak_hz_, 7, 'f', 0)
+                                                    .arg(QString::fromStdString(display::format_mhz(dialHz() + peak_hz_)), 13).arg(st.agc_gain_db, 6, 'f', 1);
     if (modeIndex() == 2 && am_det_ && am_det_->currentIndex() != 3 && st.fft_size && !st.source.empty())
-        s += st.am_locked ? QString("   |   Sync AM locked, carrier %1 Hz").arg(st.am_carrier_hz, 0, 'f', 0) : QString("   |   Sync AM: no carrier lock");
+        s += st.am_locked ? QString("   |   Sync AM locked, carrier %1 Hz").arg(st.am_carrier_hz, 6, 'f', 0) : QString("   |   Sync AM: no carrier lock");
     if (rec_ && rec_->recording()) s += (s.isEmpty() ? "" : "   |   ") + rec_->recordingText();
     if (!rx_ant_text_.isEmpty()) s += (s.isEmpty() ? "" : "   |   ") + QString("RX %1").arg(rx_ant_text_ == "RX1IN" ? QString("RX1 IN") : rx_ant_text_);
     if (!heard_note_.isEmpty()) s += (s.isEmpty() ? "" : "   |   ") + heard_note_;
-    if (st.live) s += QString("   |   %1 xruns%2").arg(qulonglong(st.xruns)).arg(st.stream_dead ? ", STREAM DEAD (all zero > 1 s)" : "");
-    if (st.frames_dropped || st.audio_dropped) s += QString("   |   dropped %1 frames, %2 audio").arg(qulonglong(st.frames_dropped)).arg(qulonglong(st.audio_dropped));
+    if (st.live) s += QString("   |   %1 xruns%2").arg(qulonglong(st.xruns), 5).arg(st.stream_dead ? ", STREAM DEAD (all zero > 1 s)" : "");
+    if (st.frames_dropped || st.audio_dropped) s += QString("   |   dropped %1 frames, %2 audio").arg(qulonglong(st.frames_dropped), 5).arg(qulonglong(st.audio_dropped), 5);
     if (!note_.isEmpty()) s += (s.isEmpty() ? "" : "   |   ") + note_;
-    status_->setText(s);
+    if (status_->text() != s) { status_->setText(s); status_->setToolTip(s); }
 }
 
 // ---------------------------------------------------------------- keyboard helpers, memories, remembered settings
@@ -697,19 +727,40 @@ void ReceiverPanel::loadSettings() {
 int ReceiverPanel::decoderIndex() const { return dec_mode_->currentIndex(); }
 QString ReceiverPanel::decodedText() const { return dec_text_->toPlainText(); }
 void ReceiverPanel::clearDecoded() { dec_text_->clear(); clearCallers(); }
+void ReceiverPanel::setExternalMode(bool on) {
+    external_ = on; { QSignalBlocker b(ext_box_); ext_box_->setChecked(on); }
+    dec_mode_->setEnabled(!on);
+    if (on && decoderIndex() != 0) setDecoderIndex(0);
+    dec_status_->setText(on ? "External program: it decodes, logs and spots" : (decoderIndex() == 0 ? "Decoder off" : dec_status_->text()));
+}
+bool ReceiverPanel::setDataOutput(bool on, double level_db) {
+    data_gain_ = float(std::pow(10.0, std::clamp(level_db, -40.0, 0.0) / 20.0));
+    if (!on) { if (data_out_) { data_out_->deleteLater(); data_out_ = nullptr; } return true; }
+    if (data_out_) return true;
+    auto* o = new AudioOut(true, this, "Fireside RX audio");
+    if (!o->available()) { o->deleteLater(); return false; }
+    data_out_ = o; return true;
+}
 void ReceiverPanel::setDecoderTone(int hz) { dec_tone_->setValue(hz); rebuildDecoder(); applySettings(); }
 void ReceiverPanel::setDecoderIndex(int i) {
     QTimer::singleShot(0, this, [this] { syncFtButtons(); });
-    i = std::clamp(i, 0, 5); { QSignalBlocker b(dec_mode_); dec_mode_->setCurrentIndex(i); }
+    i = std::clamp(i, 0, 5);
+    if (external_ && i > 0) {                                                   // External program: the mode and filter a decoder brings, but no decoder of ours
+        if (i == 1 && modeIndex() != 3) setModeIndex(3);
+        if (i >= 2 && modeIndex() != 0) setModeIndex(0);
+        if (i == 4 || i == 5) filter_width_ = 3600, rebuildFilterButtons();
+        i = 0;
+    }
+    { QSignalBlocker b(dec_mode_); dec_mode_->setCurrentIndex(i); }
     static const int tone[] = {700, 700, 1000, 2125, 1500, 1500};
     if (i > 0) dec_tone_->setValue(tone[i]);
     if (i == 1 && modeIndex() != 3) setModeIndex(3);                                                       // Morse: CW mode (tone at the pitch)
     if (i >= 2 && modeIndex() != 0) setModeIndex(0);                                                          // PSK31 / RTTY / FT8 / FT4: always USB (LSB too: digital modes are USB on every band), tones inside the voice filter
     if (i == 4 || i == 5) filter_width_ = 3600, rebuildFilterButtons();                                              // FT8 spans 200-3000 Hz: the widest voice filter (applySettings below)
     dec_text_->setVisible(i != 0); if (callers_) callers_->setVisible(i >= 4); clearCallers(); if (qso_text_) qso_text_->setVisible(i >= 4); if (clear_qso_) clear_qso_->setVisible(i >= 4);
-    if (tx_side_) { dec_text_->setMinimumHeight(i >= 4 ? 190 : 84); dec_text_->setMaximumHeight(QWIDGETSIZE_MAX); }   // beside the transmit card: fill its height
+    if (tx_side_) { dec_text_->setMinimumHeight(i >= 4 ? 110 : 60); dec_text_->setMaximumHeight(QWIDGETSIZE_MAX); }   // beside the transmit card: fill its height
     else dec_text_->setFixedHeight(i >= 4 ? 190 : 84); dec_tone_->setEnabled(i != 0 && i < 4);    // FT8 prints a dozen lines per slot dec_status_->setText(i == 0 ? "Decoder off" : "Waiting for a signal...");
-    rebuildDecoder(); applySettings(); emit decoderSelected(i);
+    rebuildDecoder(); applySettings(); syncGroup(); emit decoderSelected(i);
 }
 QString ReceiverPanel::myCall() const {                                    // the Decoder card's box, else the Log tab's station callsign (from Wavelog)
     const QString c = my_call_->text().trimmed().toUpper(); if (!c.isEmpty() || qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) return c;
@@ -908,11 +959,6 @@ void ReceiverPanel::addQsoTx(const QString& utc, int hz, const QString& msg) {
     addQsoLine(QString("%1  TX      %2 ~  %3").arg(utc).arg(hz, 4).arg(msg), 2);
 }
 QString ReceiverPanel::qsoPaneText() const { return qso_text_ ? qso_text_->toPlainText() : QString(); }
-void ReceiverPanel::setTxMeterWidget(QWidget* body) {
-    if (!header_) return;
-    auto* l = new QVBoxLayout; l->setSpacing(2); l->addWidget(body);
-    header_->addWidget(theme::makeCard("Transmit power", l), 0);
-}
 bool ReceiverPanel::selectFt(bool ft4) {
     const double hz = dialHz(); int idx = -1; for (int i = 0; i < int(std::size(kBands)); ++i) if (hz >= kBands[i].lo && hz <= kBands[i].hi) idx = i;
     if (idx < 0) for (int i = 0; i < int(std::size(kBands)); ++i) if (QString(kBands[i].name) == "20") idx = i;     // between bands: 20 m
@@ -922,14 +968,40 @@ bool ReceiverPanel::selectFt(bool ft4) {
     setDialHz(f); syncFtButtons(); return true;
 }
 void ReceiverPanel::syncFtButtons() {
-    if (!ft8_btn_) return; QSignalBlocker a(ft8_btn_), b(ft4_btn_);
-    ft8_btn_->setChecked(decoderIndex() == 4); ft4_btn_->setChecked(decoderIndex() == 5);
+    if (!ft8_btn_) return; QSignalBlocker a(ft8_btn_), b(ft4_btn_), c(psk_btn_), d(rtty_btn_);
+    ft8_btn_->setChecked(decoderIndex() == 4); ft4_btn_->setChecked(decoderIndex() == 5); psk_btn_->setChecked(decoderIndex() == 2); rtty_btn_->setChecked(decoderIndex() == 3);
 }
 void ReceiverPanel::setHeardNote(const QString& t) { if (t != heard_note_) { heard_note_ = t; updateStatus(); } }
 void ReceiverPanel::setAntennaWidget(QWidget* body) {
     if (!header_) return; auto* l = new QVBoxLayout; l->setSpacing(4); l->addWidget(body);
-    header_->insertWidget(3, theme::makeCard("Antenna", l), 0);                    // after Frequency, Tuning step, Memories
+    header_->insertWidget(header_->indexOf(signal_card_), theme::makeCard("Antenna and tuner", l), 0);       // top row: after Frequency, Mode, Band; before the meters
 }
+void ReceiverPanel::setTransmitMeters(QWidget* power, QLabel* status, QWidget* arm) {   // one tile: the signal meter while receiving, the power meter while keyed (and 5 s after); the transmit status runs under both
+    status->setFixedHeight(status->fontMetrics().height() + 2);
+    tx_meter_ = power; meters_grid_->addWidget(power, 0, 0); power->setVisible(false);
+    auto* sr = new QHBoxLayout; sr->setSpacing(8); sr->addWidget(arm); sr->addWidget(status, 1); meters_grid_->addLayout(sr, 1, 0);
+    meters_grid_->setColumnStretch(0, 1);
+    tx_meter_hold_ = new QTimer(this); tx_meter_hold_->setSingleShot(true); tx_meter_hold_->setInterval(5000);
+    connect(tx_meter_hold_, &QTimer::timeout, this, [this] { showTxMeter(false); });
+}
+void ReceiverPanel::showTxMeter(bool tx) { if (!tx_meter_) return; meter_->setVisible(!tx); meter_text_->setVisible(!tx); tx_meter_->setVisible(tx); }
+void ReceiverPanel::setMeterTx(bool keyed) {      // called by the transmit card: keyed -> the power meter; after the over it stays 5 s to read the last over
+    if (!tx_meter_) return;
+    if (keyed) { tx_meter_hold_->stop(); showTxMeter(true); }
+    else if (tx_meter_->isVisibleTo(this) && !tx_meter_hold_->isActive()) tx_meter_hold_->start();
+}
+void ReceiverPanel::setRxLevelCal(bool valid, const std::array<double, 11>& meter, const std::array<double, 11>& preamp) {
+    cal_valid_ = valid; cal_meter_ = meter; cal_preamp_ = preamp;
+    meter_->setToolTip(valid ? "dBm from the radio's factory RX level table (EEPROM): per band, minus the preamp's gain when it is on. Not yet checked against a known signal."
+                             : "dBm uses a placeholder offset: the radio's RX level table has not been read (it is read with the transmit check at start-up)");
+}
+bool ReceiverPanel::meterCalibrated() const { return cal_valid_ && fireside::txm::band_of(dialHz()) >= 0; }
+double ReceiverPanel::meterOffsetDb() const {      // dBm = dBFS + this: the band's factory meter offset (+ the preamp row while the preamp is on), else the placeholder
+    const int b = fireside::txm::band_of(dialHz());
+    if (!cal_valid_ || b < 0 || b >= 11) return SMeter::kUncalOffsetDb;
+    return cal_meter_[size_t(b)] + (preamp_ && preamp_->isChecked() ? cal_preamp_[size_t(b)] : 0.0);
+}
+void ReceiverPanel::setTxLamp(QLabel* lamp) { if (mode_switch_col_) mode_switch_col_->insertWidget(0, lamp); }   // left of the frequency: the TX light
 QWidget* ReceiverPanel::takeAdvancedWidget() { QWidget* w = advanced_; advanced_ = nullptr; return w; }
 QWidget* ReceiverPanel::takeOutputWidget() { if (out_dest_) out_dest_->setParent(nullptr); return out_dest_; }
 int ReceiverPanel::highlightedLines() const {
@@ -986,22 +1058,48 @@ bool ReceiverPanel::eventFilter(QObject* o, QEvent* e) {
 
 void ReceiverPanel::setTransmitWidget(QWidget* w) {
     tx_w_ = w; tx_w_->setVisible(false); tx_btn_->setVisible(true);
-    auto* root = qobject_cast<QVBoxLayout*>(layout()); root->insertWidget(root->indexOf(dec_card_) + 1, w);       // straight under the decoder, above the control deck
+    auto* root = qobject_cast<QVBoxLayout*>(layout()); root->insertWidget(root->indexOf(dec_row_ ? static_cast<QWidget*>(dec_row_) : static_cast<QWidget*>(dec_card_)) + 1, w);       // straight under the decoder, above the control deck
     connect(tx_btn_, &QPushButton::toggled, this, [this](bool on) { setTransmitOpen(on); });
 }
 void ReceiverPanel::setTransmitOpen(bool on) { if (!tx_w_) return; { QSignalBlocker b(tx_btn_); tx_btn_->setChecked(on); } tx_w_->setVisible(on); tx_btn_->setText(on ? QStringLiteral("TX lab  \u25BE") : QStringLiteral("TX lab  \u25B8")); }
-void ReceiverPanel::setTransmitSideWidget(QWidget* w) {
-    tx_side_ = w;
-    auto* root = qobject_cast<QVBoxLayout*>(layout()); const int at = root->indexOf(dec_card_); root->removeWidget(dec_card_);
-    auto* box = new QWidget; auto* h = new QHBoxLayout(box); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(12);
-    h->addWidget(dec_card_, 1); h->addWidget(w, 0); root->insertWidget(at, box);
+void ReceiverPanel::setTransmitParts(QWidget* digi, QWidget* voice) {
+    tx_side_ = digi;
+    auto* root = qobject_cast<QVBoxLayout*>(layout());
+    { auto* l = new QVBoxLayout; l->addWidget(voice); voice_card_ = theme::makeCard("Voice transmit", l); root->insertWidget(root->indexOf(dec_card_), voice_card_); }   // under the waterfall, voice only
+    const int at = root->indexOf(dec_card_); root->removeWidget(dec_card_);
+    dec_row_ = new QWidget; auto* h = new QHBoxLayout(dec_row_); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(12);
+    auto* l = new QVBoxLayout; l->addWidget(digi); send_card_ = theme::makeCard("Send FT8 / FT4", l); send_card_->setFixedWidth(520);
+    h->addWidget(dec_card_, 1); h->addWidget(send_card_, 0); root->insertWidget(at, dec_row_);
     dec_card_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     setDecoderIndex(decoderIndex());                               // re-apply the decoder list's sizing
+    syncGroup();
+}
+int ReceiverPanel::modeGroup() const { return std::max(0, grp_mode_->checkedId()); }
+void ReceiverPanel::applyGroup(int g) {                              // what each group shows; nothing here changes the radio
+    if (!grp_mode_) return; { QSignalBlocker b(grp_mode_); if (auto* bt = grp_mode_->button(g)) bt->setChecked(true); }
+    mode_pages_->setCurrentIndex(g);
+    if (auto* t = mode_card_->findChild<QLabel*>("cardTitle")) t->setText(g == 0 ? "VOICE MODES" : g == 1 ? "CW" : "DIGITAL MODES");
+    if (dec_row_) dec_row_->setVisible(g != 0);                       // the decoder: CW (Morse) and Digital only
+    if (send_card_) send_card_->setVisible(g == 2);                   // the FT8 / FT4 message controls: Digital only
+    if (voice_card_) voice_card_->setVisible(g == 0);                 // the voice transmit controls: Voice only
+}
+void ReceiverPanel::syncGroup() {                                    // the group the receiver's own state belongs to (a band recall, a memory, a decoder pick)
+    const int d = decoderIndex(); int g = modeGroup();
+    if (d >= 2) g = 2; else if (d == 1 || modeIndex() == 3) g = 1; else if (!(external_ && g == 2)) g = 0;   // decoder off in External mode: stay in Digital
+    if (g == 0 && modeIndex() != 3) last_voice_mode_ = modeIndex() == 1 ? 1 : (modeIndex() == 0 ? 0 : last_voice_mode_);
+    if (g == 2 && d >= 2) last_digi_ = d;
+    applyGroup(g);
+}
+void ReceiverPanel::chooseGroup(int g) {                             // the user clicked Voice / CW / Digi: go to a sensible mode of that group
+    if (g == 0) { if (decoderIndex() != 0) setDecoderIndex(0); setModeIndex(modeIndex() == 3 ? last_voice_mode_ : modeIndex()); }
+    else if (g == 1) { if (decoderIndex() > 1) setDecoderIndex(0); setModeIndex(3); }
+    else { if (last_digi_ == 4 || last_digi_ == 5) selectFt(last_digi_ == 5); else setDecoderIndex(last_digi_); }
+    syncGroup(); applyGroup(g);
 }
 bool ReceiverPanel::transmitOpen() const { return tx_w_ && tx_w_->isVisibleTo(this); }
 void ReceiverPanel::setLookupWidget(QWidget* w) { log_slot_->addWidget(w, 1); log_card_->setVisible(true); }
 void ReceiverPanel::setLogFormWidget(QWidget* w) { form_slot_->addWidget(w); }
 void ReceiverPanel::setLogActive(bool on) {                                  // while the log form is open it takes the Band and Mode cards' place
-    band_card_->setVisible(!on); mode_card_->setVisible(!on); form_card_->setVisible(on);
+    form_card_->setVisible(on);
 }
-bool ReceiverPanel::logActive() const { return !band_card_->isVisibleTo(const_cast<ReceiverPanel*>(this)) && form_card_->isVisibleTo(const_cast<ReceiverPanel*>(this)); }
+bool ReceiverPanel::logActive() const { return form_card_->isVisibleTo(const_cast<ReceiverPanel*>(this)); }

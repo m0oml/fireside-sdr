@@ -196,4 +196,17 @@ std::vector<std::string> save_backup(const std::string& dir, const std::map<std:
     }
     return paths;
 }
+RxLevelCal rx_level_cal(const Decoded& d) {
+    RxLevelCal c; auto bad = [&](const std::string& w) { c.problem = w; return c; };
+    const TableResult* t = nullptr; for (const auto& x : d.tables) if (x.name == "RX level") t = &x;
+    if (!t) return bad("no RX level table");
+    if (!t->pointer_ok || !t->checksum_ok) return bad("RX level table: pointer or checksum wrong");
+    if (t->has_nan || t->values.size() != 11) return bad("RX level table: not 11 bands");
+    for (size_t b = 0; b < 11; ++b) {
+        const auto& r = t->values[b]; if (r.size() != 3) return bad("RX level table: row size");
+        if (!(r[0] >= -90 && r[0] <= -30) || !(r[1] >= -30 && r[1] <= 5) || !(r[2] >= -70 && r[2] <= -10)) return bad("RX level table: a value out of range");
+        c.display[b] = r[0]; c.preamp[b] = r[1]; c.meter[b] = r[2];
+    }
+    c.valid = true; return c;
+}
 }  // namespace fireside

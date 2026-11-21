@@ -58,7 +58,7 @@ std::string dump_state() {
     o << "1\n2\n0\n";                                                                          // protocol 1, rig model 2 (NET rigctl), ITU region
     std::snprintf(b, sizeof b, "100000.000000 %.6f 0x%x -1 -1 0x1 0x1\n", kMaxHz, kModes); o << b;   // receive: 100 kHz .. 65 MHz
     o << "0 0 0 0 0 0 0\n";
-    o << "0 0 0 0 0 0 0\n";                                                                    // no transmit ranges: this server cannot transmit
+    o << "0 0 0 0 0 0 0\n";                                                                    // no transmit ranges listed (Hamlib still sends PTT; the app decides)
     for (int st : {10, 100, 1000, 10000}) { std::snprintf(b, sizeof b, "0x%x %d\n", kModes, st); o << b; }
     o << "0 0\n";
     std::snprintf(b, sizeof b, "0x%x 2400\n0x%x 1800\n0x%x 3600\n0x2 500\n0x2 250\n0x1 6000\n0x20 12000\n0 0\n", kSsbModes, kSsbModes, kSsbModes); o << b;
@@ -89,7 +89,7 @@ std::string Session::line(const std::string& text) {
         std::string t = tok[i++]; bool ext = false; char sep = '\n';
         if (std::strchr("+;|,", t[0])) { ext = true; sep = t[0] == '+' ? '\n' : t[0]; t.erase(0, 1); if (t.empty()) { if (i >= tok.size()) break; t = tok[i++]; } }
         const Cmd* c = find(t);
-        ++commands_; last_ = t;
+        ++commands_; last_ = t; if (ptt_) ptt_->heartbeat(client_);
         if (!c) { out += "RPRT -4\n"; break; }                                                  // unknown: nothing done, the rest of the line dropped
         std::vector<std::string> a; while (int(a.size()) < c->nargs && i < tok.size()) a.push_back(tok[i++]);
         const std::string n = c->name;
@@ -115,7 +115,12 @@ std::string Session::line(const std::string& text) {
         else if (n == "get_vfo") kv = {{"VFO", "VFOA"}};
         else if (n == "set_vfo") { if (need(1) && !vfo_is_a(a[0])) code = kENavail; }
         else if (n == "get_ptt") kv = {{"PTT", b_.keyed() ? "1" : "0"}};
-        else if (n == "set_ptt") { if (need(1) && a[0] != "0") { code = kERejected; ++refused_ptt_; } }   // never keys: transmit is the app's own buttons only
+        else if (n == "set_ptt") {                                                             // 0 off; 1 on, 2 on (mic), 3 on (data): Hamlib's RIG_PTT_*
+            if (!need(1)) {}
+            else if (a[0] == "0") { if (ptt_) ptt_->request_ptt(client_, false); }              // releasing is never refused
+            else if (a[0] != "1" && a[0] != "2" && a[0] != "3") code = kEInval;
+            else if (!ptt_ || !ptt_->request_ptt(client_, true)) { code = kERejected; ++refused_ptt_; }   // the app decides; no PttRequest = refused
+        }
         else if (n == "get_split_vfo") kv = {{"Split", "0"}, {"TX VFO", "VFOA"}};
         else if (n == "set_split_vfo") { if (need(1) && a[0] != "0") code = kENavail; }
         else if (n == "get_split_freq") kv = {{"TX Frequency", num(b_.freq())}};

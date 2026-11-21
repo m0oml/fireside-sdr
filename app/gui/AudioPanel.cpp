@@ -1,4 +1,5 @@
 #include "AudioPanel.h"
+#include "ReceiverPanel.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -86,6 +87,17 @@ AudioPanel::AudioPanel(RadioPanel* radio, QWidget* parent) : QWidget(parent), ra
       g->addWidget(in_note_, r++, 0, 1, 3); g->setColumnStretch(1, 1);
       top->addWidget(theme::makeCard("Transmit input", g), 3); }
     outer->addLayout(top);
+    // other programs: the virtual devices
+    { auto* g = new QGridLayout; other_grid_ = g; g->setHorizontalSpacing(10); g->setVerticalSpacing(6); int r = 0;
+      data_out_ = new QCheckBox("Send receive audio to \"Fireside RX audio\"");
+      data_out_->setToolTip("A second copy of the receive audio, at a fixed level (not the Volume slider or Mute), on the virtual device other programs record from");
+      data_level_ = new QSpinBox; data_level_->setRange(-40, 0); data_level_->setValue(-12); data_level_->setSuffix(" dB"); data_level_->setToolTip("Level of that copy");
+      ext_note_ = new QLabel(" "); ext_note_->setObjectName("muted"); ext_note_->setWordWrap(true);
+      g->addWidget(data_out_, r, 0); g->addWidget(new QLabel("level"), r, 1); g->addWidget(data_level_, r++, 2);
+      g->addWidget(ext_note_, r++, 0, 1, 3); g->setColumnStretch(0, 1);
+      connect(data_out_, &QCheckBox::toggled, this, [this] { applyDataOut(); save(); });
+      connect(data_level_, qOverload<int>(&QSpinBox::valueChanged), this, [this] { applyDataOut(); save(); });
+      outer->addWidget(theme::makeCard("Other programs (WSJT-X, JS8Call, fldigi ...)", g)); }
     // processing
     auto* mid = new QHBoxLayout; mid->setSpacing(12);
     { auto* g = new QGridLayout; g->setHorizontalSpacing(10); g->setVerticalSpacing(6); int r = 0;
@@ -164,6 +176,34 @@ std::unique_ptr<txc::IAudioIn> AudioPanel::openInput(QString* err) {
 #endif
     } catch (const std::exception& e) { if (err) *err = QString::fromUtf8(e.what()); return nullptr; }
 }
+void AudioPanel::setReceiver(ReceiverPanel* rx) { rx_ = rx; applyDataOut(); }
+void AudioPanel::applyDataOut() {
+    QString note;
+    if (rx_) {
+        if (!rx_->setDataOutput(data_out_->isChecked(), data_level_->value())) note = "\"Fireside RX audio\" not found: run system/setup-system.sh (it adds the two virtual devices), then restart this app. ";
+        else if (data_out_->isChecked()) note = "Receive audio is going to \"Fireside RX audio\": in the other program record from \"Monitor of Fireside RX audio\". ";
+    }
+    note += externalInputExists() ? "Transmit audio from other programs: they play into \"Fireside TX audio\" (we record \"Fireside TX audio (input)\")."
+                                  : "No \"Fireside TX audio\" device: other programs cannot send audio to transmit (run system/setup-system.sh).";
+    ext_note_->setText(note);
+}
+bool AudioPanel::externalInputExists() {
+#ifdef FIRESIDE_QT_AUDIO
+    for (const auto& d : QMediaDevices::audioInputs()) if (d.description().contains("Fireside TX audio", Qt::CaseInsensitive)) return true;
+#endif
+    return false;
+}
+std::unique_ptr<txc::IAudioIn> AudioPanel::openExternalInput(QString* err) {
+    if (ext_factory_) return ext_factory_();                            // tests
+    try {
+#ifdef FIRESIDE_QT_AUDIO
+        for (const auto& d : QMediaDevices::audioInputs()) if (d.description().contains("Fireside TX audio", Qt::CaseInsensitive)) return std::make_unique<PcAudioIn>(d, 0.0);
+        if (err) *err = "no \"Fireside TX audio\" device (run system/setup-system.sh)"; return nullptr;
+#else
+        if (err) *err = "built without Qt audio"; return nullptr;
+#endif
+    } catch (const std::exception& e) { if (err) *err = QString::fromUtf8(e.what()); return nullptr; }
+}
 void AudioPanel::applyMicGain() {
     if (!radioMic() || radio_->simulated()) return;                      // only the radio's mic socket uses it (the simulated radio has no codec)
     std::string e; if (radio_->session().set_mic_gain_db(mic_gain_->value(), &e)) emit message(QString("Audio: radio mic gain %1 dB").arg(mic_gain_->value()));
@@ -194,6 +234,7 @@ void AudioPanel::load() {
     lev_on_->setChecked(q.value("lev_on", lev_on_->isChecked()).toBool()); lev_target_->setValue(q.value("lev_target", lev_target_->value()).toDouble()); lev_max_->setValue(q.value("lev_max", lev_max_->value()).toDouble());
     comp_on_->setChecked(q.value("comp_on", comp_on_->isChecked()).toBool()); comp_thr_->setValue(q.value("comp_thr", comp_thr_->value()).toDouble()); comp_ratio_->setValue(q.value("comp_ratio", comp_ratio_->value()).toDouble()); comp_makeup_->setValue(q.value("comp_makeup", comp_makeup_->value()).toDouble());
     eq_on_->setChecked(q.value("eq_on", false).toBool()); for (int i = 0; i < 10; ++i) eq_[i]->setValue(q.value(QString("eq%1").arg(i), 0).toInt());
+    data_out_->setChecked(q.value("data_out", false).toBool()); data_level_->setValue(q.value("data_level_db", -12).toInt());
     loading_ = false;
 }
 void AudioPanel::save() {
@@ -205,4 +246,10 @@ void AudioPanel::save() {
     q.setValue("lev_on", lev_on_->isChecked()); q.setValue("lev_target", lev_target_->value()); q.setValue("lev_max", lev_max_->value());
     q.setValue("comp_on", comp_on_->isChecked()); q.setValue("comp_thr", comp_thr_->value()); q.setValue("comp_ratio", comp_ratio_->value()); q.setValue("comp_makeup", comp_makeup_->value());
     q.setValue("eq_on", eq_on_->isChecked()); for (int i = 0; i < 10; ++i) q.setValue(QString("eq%1").arg(i), eq_[i]->value());
+    q.setValue("data_out", data_out_->isChecked()); q.setValue("data_level_db", data_level_->value());
+}
+
+void AudioPanel::addKeyingWidget(QWidget* w) {                      // "Let other programs key (CAT)" and its power, from the Transmit card: it sits with the other-program audio
+    if (!other_grid_) return; auto* l = new QLabel("Keying by the other program (CAT)"); l->setObjectName("muted");
+    const int r = other_grid_->rowCount(); other_grid_->addWidget(l, r, 0, 1, 3); other_grid_->addWidget(w, r + 1, 0, 1, 3);
 }

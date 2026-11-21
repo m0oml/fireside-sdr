@@ -23,20 +23,27 @@ struct CatPanel::Rx : fireside::rigctl::Backend {
     void set_mode(int i, double w) override { if (rx->modeIndex() != i) rx->setModeIndex(i); if (w > 0) rx->setFilterWidth(w); }
 };
 
+struct CatPanel::Fwd : fireside::rigctl::PttRequest {
+    CatPanel* p; explicit Fwd(CatPanel* c) : p(c) {}
+    bool request_ptt(int client, bool on) override { return p->ptt_ ? p->ptt_->request_ptt(client, on) : !on; }
+    void heartbeat(int client) override { if (p->ptt_) p->ptt_->heartbeat(client); }
+};
+
 static bool no_settings() { return qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS"); }
 
 CatPanel::CatPanel(ReceiverPanel* rx, std::function<bool()> keyed, std::function<bool()> tx_busy, QWidget* parent)
-    : QWidget(parent), backend_(new Rx), server_(new QTcpServer(this)) {
+    : QWidget(parent), backend_(new Rx), server_(new QTcpServer(this)), fwd_(new Fwd(this)) {
     backend_->rx = rx; backend_->key = std::move(keyed); backend_->busy = std::move(tx_busy);
     auto* col = new QVBoxLayout(this); col->setContentsMargins(0, 0, 0, 0); col->setSpacing(6);
     auto* row = new QHBoxLayout; row->setSpacing(8);
     enable_ = new QCheckBox("CAT server for other programs (Hamlib NET rigctl)");
-    enable_->setToolTip("Lets WSJT-X, JTDX, fldigi, GridTracker, WaveLogGate and other Hamlib programs read and set the frequency and mode. This computer only (127.0.0.1). It cannot transmit.");
+    enable_->setToolTip("Lets WSJT-X, JTDX, fldigi, GridTracker, WaveLogGate and other Hamlib programs read and set the frequency and mode. This computer only (127.0.0.1). They can key the radio only while \"Let other programs key\" is ticked on the Transmit card.");
     port_ = new QSpinBox; port_->setRange(1024, 65535); port_->setValue(fireside::rigctl::kDefaultPort); port_->setPrefix("port ");
     row->addWidget(enable_); row->addWidget(port_); row->addStretch(1); col->addLayout(row);
     status_ = new QLabel; status_->setObjectName("muted"); status_->setWordWrap(true); col->addWidget(status_);
-    auto* help = new QLabel(QString("In the other program pick the rig \"Hamlib NET rigctl\" (model 2) with the address 127.0.0.1:%1. Set its PTT to None or VOX: "
-                                    "transmit requests from CAT are refused, transmitting stays on this app's own buttons.").arg(fireside::rigctl::kDefaultPort));
+    auto* help = new QLabel(QString("In the other program pick the rig \"Hamlib NET rigctl\" (model 2) with the address 127.0.0.1:%1, PTT method CAT, Split None. "
+                                    "Its transmit requests are refused unless \"Let other programs key\" is ticked on the Transmit card (never remembered). "
+                                    "Audio: it records \"Monitor of Fireside RX audio\" and plays into \"Fireside TX audio\" (Audio tab).").arg(fireside::rigctl::kDefaultPort));
     help->setObjectName("muted"); help->setWordWrap(true); col->addWidget(help);
     connect(server_, &QTcpServer::newConnection, this, &CatPanel::onNewConnection);
     connect(enable_, &QCheckBox::toggled, this, [this](bool on) { if (on) startServer(port_->value()); else stopServer(); save(); });
@@ -62,17 +69,18 @@ bool CatPanel::startServer(int port) {
     updateStatus(); return true;
 }
 void CatPanel::stopServer() {
-    for (auto& [s, sess] : sessions_) { s->disconnect(this); s->abort(); s->deleteLater(); }
-    sessions_.clear(); server_->close(); updateStatus();
+    for (auto& [s, sess] : sessions_) { release(s); s->disconnect(this); s->abort(); s->deleteLater(); }
+    sessions_.clear(); ids_.clear(); server_->close(); updateStatus();
 }
 bool CatPanel::listening() const { return server_->isListening(); }
 int CatPanel::port() const { return server_->isListening() ? int(server_->serverPort()) : 0; }
 
 void CatPanel::onNewConnection() {
     while (QTcpSocket* s = server_->nextPendingConnection()) {
-        sessions_[s] = std::make_unique<fireside::rigctl::Session>(*backend_);
+        const int id = next_id_++; ids_[s] = id;
+        sessions_[s] = std::make_unique<fireside::rigctl::Session>(*backend_, fwd_.get(), id);
         connect(s, &QTcpSocket::readyRead, this, [this, s] { onReadyRead(s); });
-        connect(s, &QTcpSocket::disconnected, this, [this, s] { sessions_.erase(s); s->deleteLater(); updateStatus(); });
+        connect(s, &QTcpSocket::disconnected, this, [this, s] { release(s); sessions_.erase(s); ids_.erase(s); s->deleteLater(); updateStatus(); });
     }
     updateStatus();
 }
@@ -87,6 +95,7 @@ void CatPanel::onReadyRead(QTcpSocket* s) {
     if (sess.closed()) s->disconnectFromHost();
 }
 
+void CatPanel::release(QTcpSocket* s) { auto it = ids_.find(s); if (ptt_ && it != ids_.end()) ptt_->request_ptt(it->second, false); }   // gone: never left keyed
 QString CatPanel::statusText() const { return status_->text(); }
 void CatPanel::updateStatus() {
     QString t;
@@ -95,7 +104,7 @@ void CatPanel::updateStatus() {
     else {
         t = QString("Listening on 127.0.0.1:%1, %2 program%3 connected").arg(server_->serverPort()).arg(sessions_.size()).arg(sessions_.size() == 1 ? "" : "s");
         if (commands_) t += QString(", %1 commands (last: %2)").arg(commands_).arg(last_);
-        if (refused_ptt_) t += QString(". Transmit requests refused: %1").arg(refused_ptt_);
+        if (refused_ptt_) t += QString(". Transmit requests refused: %1 (see the Transmit card's status)").arg(refused_ptt_);
     }
     if (status_->text() != t) status_->setText(t);
 }

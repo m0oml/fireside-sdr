@@ -19,7 +19,7 @@ void SMeter::paintEvent(QPaintEvent*) {
     QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
     const double lo = -127, hi = -13; const int w = width(), barY = 4, barH = 18, left = 2, right = w - 2;           // S1 (-121 dBm) .. S9 (-73) .. S9+60 (-13)
     auto xFor = [&](double dbm) { return left + int((std::clamp(dbm, lo, hi) - lo) / (hi - lo) * double(right - left)); };
-    const double lvl = dbm(level_), pk = dbm(peak_);
+    const double lvl = level_ + offset_, pk = peak_ + offset_;
     const int segs = 38; const double segw = double(right - left) / segs;
     for (int i = 0; i < segs; ++i) {                                              // accent up to S9 (-73 dBm), amber above
         const double d = lo + (hi - lo) * (double(i) + 0.5) / segs; const bool on = d <= lvl;
@@ -27,7 +27,7 @@ void SMeter::paintEvent(QPaintEvent*) {
         if (!on) c = QColor("#222938");
         p.fillRect(QRectF(left + i * segw + 1, barY, segw - 2, barH), c);
     }
-    if (dbm(peak_) > lo) { p.setPen(QPen(QColor("#ffffff"), 2)); p.drawLine(xFor(pk), barY - 2, xFor(pk), barY + barH + 2); }
+    if (pk > lo) { p.setPen(QPen(QColor("#ffffff"), 2)); p.drawLine(xFor(pk), barY - 2, xFor(pk), barY + barH + 2); }
     p.setPen(QColor(theme::kMuted)); QFont f = font(); f.setPixelSize(10); p.setFont(f);
     struct T { double dbm; const char* s; };
     for (const T& t : {T{-121, "S1"}, T{-109, "3"}, T{-97, "5"}, T{-85, "7"}, T{-73, "9"}, T{-53, "+20"}, T{-33, "+40"}, T{-13, "+60"}}) {

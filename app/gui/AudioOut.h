@@ -1,13 +1,17 @@
 #pragma once
 #include <QObject>
+#include <QString>
 #include <vector>
 class QAudioSink; class QIODevice;
 
 // Optional speaker output for the demodulated audio (48 kHz; the mono audio is played on both left and right). Compiles to a stub without Qt Multimedia. Drops audio rather than letting latency grow.
+// `device`: empty = the system's default output; otherwise the output whose description contains it (e.g. "Fireside RX audio", the virtual device
+// other programs record from); not available() if there is none.
 class AudioOut : public QObject {
     Q_OBJECT
 public:
-    explicit AudioOut(bool enable, QObject* parent = nullptr);
+    explicit AudioOut(bool enable, QObject* parent = nullptr, const QString& device = QString());
+    static bool deviceExists(const QString& device);              // an output whose description contains `device`
     bool available() const { return available_; }
     void push(const std::vector<float>& audio, float volume);   // volume 0..1
 private:

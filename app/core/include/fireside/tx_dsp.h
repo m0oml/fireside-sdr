@@ -159,6 +159,10 @@ struct TxChainConfig { MicChainConfig mic; SsbConfig ssb; LimiterConfig iq_limit
 // -18 dBFS with +12 dB make-up (speech drives into the limiters), audio limiter 0.95, SSB 150..2800 Hz, I/Q ceiling 0.9: speech peaks reach the ceiling, so the power
 // setting is the peak envelope power.
 TxChainConfig voice_chain_defaults();
+// Data from another program (WSJT-X, fldigi ...): no processing at all (no filters, EQ, expander, leveler, compressor or clipper), so a tone goes
+// out as a clean tone; SSB 100..3000 Hz; the audio limiter (0.95) and the I/Q ceiling (0.9) stay as the hard ceilings. The power setting is
+// reached when the program's audio is at full scale.
+TxChainConfig data_chain_defaults();
 class TxChain {
 public:
     explicit TxChain(const TxChainConfig& c);

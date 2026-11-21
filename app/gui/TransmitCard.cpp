@@ -1,5 +1,6 @@
 #include "TransmitCard.h"
 #include <QCheckBox>
+#include <QDialog>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDir>
@@ -31,6 +32,7 @@
 #include <QApplication>
 #include <QKeyEvent>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QAbstractSpinBox>
 #include "RadioPanel.h"
 #include "ReceiverPanel.h"
@@ -38,6 +40,7 @@
 #include "fireside/fw_iso.h"
 #include "fireside/logbook.h"
 #include "fireside/session.h"
+#include "fireside/tx_dsp.h"
 #include "fireside/tx_dsp.h"
 #include "fireside/tx_render.h"
 #include "fireside/tx_meter.h"
@@ -101,6 +104,11 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     ptt_ = new QPushButton("PTT (hold)"); ptt_->setToolTip("Hold to talk: an SSB over with the Audio tab's input and processing (time-out 3 min)");
     space_ptt_ = new QCheckBox("Space bar"); space_ptt_->setToolTip("Hold the space bar to talk (not while typing in a box)"); space_ptt_->setChecked(false);
     mic_ptt_ = new QCheckBox("Mic / RCA PTT"); mic_ptt_->setChecked(true); mic_ptt_->setToolTip("The mic's PTT (front socket) or the rear RCA PTT keys an over");
+    ext_allow_ = new QCheckBox("Let other programs key (CAT)"); ext_allow_->setChecked(false);
+    ext_allow_->setToolTip("WSJT-X, JS8Call, fldigi ... may key the radio over the CAT server (PTT: CAT), sending what they play into \"Fireside TX audio\". "
+                           "Off in every new window. Needs the direct stream, a measured drive level for the band; at most 2 minutes per over; unkeys if the program goes quiet for 15 s.");
+    ext_w_ = new QDoubleSpinBox; ext_w_->setRange(1, 20); ext_w_->setDecimals(0); ext_w_->setValue(10); ext_w_->setSuffix(" W");
+    ext_w_->setToolTip("Power when the other program's audio is at full scale (less if it is quieter; never more)");
     ft_timer_ = new QTimer(this); ft_timer_->setSingleShot(true); connect(ft_timer_, &QTimer::timeout, this, &TransmitCard::startSend);
     mem_ = new QLabel; mem_->setWordWrap(false); status_ = new QLabel("Transmit gets ready by itself once the radio is started (EEPROM check, about 16 s)."); status_->setWordWrap(true);
     auto row = [](std::initializer_list<QWidget*> ws, bool stretch = true) { auto* h = new QHBoxLayout; h->setSpacing(8); for (auto* w : ws) h->addWidget(w); if (stretch) h->addStretch(1); return h; };
@@ -109,19 +117,27 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
                         "QProgressBar::chunk{background:%1;border-radius:3px}";
     fwd_->setStyleSheet(bar.arg("#2e7d32")); rev_->setStyleSheet(bar.arg("#c77700")); fwd_->setMinimumWidth(150); rev_->setMinimumWidth(150);
     mem_->setWordWrap(true); status_->setWordWrap(true); ft_msg_->setMinimumWidth(160);
-    auto* atu_lbl = new QLabel("ATU"); auto* ft_lbl = new QLabel("FT8 / FT4"); auto* meter_lbl = new QLabel("Power");
-    for (auto* l : {atu_lbl, ft_lbl, meter_lbl}) l->setObjectName("muted");
-    auto* v = new QVBoxLayout; v->setSpacing(6); g->addLayout(v, 0, 0);
-    v->addLayout(row({arm_, lamp_, stop_}));
-    v->addWidget(atu_lbl); v->addLayout(row({tl, power_, thr_, tune_})); v->addLayout(row({restore_, auto_restore_})); v->addWidget(mem_);
-    v->addLayout(row({measure_, test_, test_w_, mirror_}));
-    meter_lbl->setVisible(false); fwd_->setVisible(false); rev_->setVisible(false); swr_->setVisible(false);   // the power meter lives at the top now (powerMeter())
-    v->addWidget(ft_lbl); v->addLayout(row({ft_mode_, ft_hz_, ft_par_})); v->addLayout(row({ft_msg_, ft_w_}, false)); v->addLayout(row({send_, cq_, ft_repeat_, auto_seq_}));
-    { auto* vl = new QLabel("Voice"); vl->setObjectName("muted"); v->addWidget(vl); }
-    v->addLayout(row({voice_mode_, voice_w_})); v->addLayout(row({ptt_, space_ptt_, mic_ptt_}));
-    v->addWidget(status_);
-    setMinimumWidth(470); setMaximumWidth(560);
-    auto* outer = new QVBoxLayout(this); outer->setContentsMargins(0, 0, 0, 0); outer->addWidget(theme::makeCard("Transmit", g));
+    fwd_->setVisible(false); rev_->setVisible(false); swr_->setVisible(false);       // the power meter lives at the top (powerMeter())
+    auto part = [this](std::initializer_list<QLayout*> ls) { auto* w = new QWidget(this); auto* v = new QVBoxLayout(w); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(6); for (auto* l : ls) v->addLayout(l); return w; };
+    status_->setWordWrap(false); status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); status_->setMinimumWidth(0);          // one clipped line (the tooltip has all of it)
+    auto_restore_->setText("on band change");
+    stop2_ = new QPushButton("Stop"); stop2_->setToolTip("Unkey now (the same as the Stop button on the digital message card)"); connect(stop2_, &QPushButton::clicked, this, [this] { stop_->click(); });
+    {   // the tuner settings: a window of their own, so the antenna card stays short
+        tuner_dialog_ = new QDialog(this, Qt::Tool); tuner_dialog_->setWindowTitle("Tuner settings"); auto* dv = new QVBoxLayout(tuner_dialog_); dv->setSpacing(8);
+        auto* cal = new QPushButton("Calibration  \u25B8"); cal->setCheckable(true); cal->setToolTip("Measure drive and the test tone: used once per band, not for everyday operation");
+        cal_body_ = part({row({measure_, test_, test_w_, mirror_})}); cal_body_->setVisible(false);
+        connect(cal, &QPushButton::toggled, this, [this, cal](bool on) { cal_body_->setVisible(on); cal->setText(on ? QStringLiteral("Calibration  \u25BE") : QStringLiteral("Calibration  \u25B8")); tuner_dialog_->adjustSize(); });
+        mem_->setWordWrap(true); mem_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        dv->addLayout(row({tl, power_, thr_})); dv->addLayout(row({restore_, auto_restore_})); dv->addWidget(mem_); dv->addLayout(row({cal, stop2_})); dv->addWidget(cal_body_);
+        { auto* close = new QPushButton("Close"); close->setDefault(true); connect(close, &QPushButton::clicked, tuner_dialog_, &QDialog::hide); auto* cr = new QHBoxLayout; cr->addStretch(1); cr->addWidget(close); dv->addLayout(cr); }
+        tuner_btn_ = new QPushButton("Tuner settings..."); tuner_btn_->setToolTip("Tune power, the SWR limit, Restore ATU, calibration (Measure drive, Test tone)");
+        connect(tuner_btn_, &QPushButton::clicked, this, [this] { tuner_dialog_->show(); tuner_dialog_->raise(); tuner_dialog_->activateWindow(); });
+        atu_part_ = part({row({tune_, tuner_btn_}, false)}); }
+    ext_part_ = part({row({ext_allow_, ext_w_})});                                      // goes on the Audio tab
+    digi_part_ = part({row({ft_mode_, ft_hz_, ft_par_}), row({ft_msg_, ft_w_}, false), row({send_, cq_, ft_repeat_, auto_seq_, stop_}, false)});
+    voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_})});
+    { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
+    hide();                                                                           // this object only owns the parts: the window places them (Antenna, Transmit, decoder row, voice strip)
     timer_ = new QTimer(this); timer_->setInterval(100); connect(timer_, &QTimer::timeout, this, &TransmitCard::tick); timer_->start();
     connect(arm_, &QPushButton::toggled, this, &TransmitCard::onArm);
     connect(tune_, &QPushButton::clicked, this, &TransmitCard::onTune); connect(measure_, &QPushButton::clicked, this, &TransmitCard::onMeasure);
@@ -129,8 +145,11 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     connect(test_, &QPushButton::clicked, this, &TransmitCard::onTestTone);
     connect(mirror_, &QCheckBox::toggled, this, [this] { saveState(); });
     connect(stop_, &QPushButton::clicked, this, [this] { ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } if (seq_) seq_->stop();
-                                                       if (tx_) tx_->abort(); report("Stop pressed: unkeying, nothing queued."); updateButtons(); });
+                                                       ext_ptt_ = false; if (tx_) tx_->abort(); report("Stop pressed: unkeying, nothing queued."); updateButtons(); });
     connect(send_, &QPushButton::clicked, this, &TransmitCard::onSend);
+    connect(ext_allow_, &QCheckBox::toggled, this, [this](bool on) {
+        ext_allowed_ = on; if (!on) ext_ptt_ = false;                                            // a running over sees it and unkeys
+        report(on ? "Other programs may key the radio over CAT (this window only)." : "Other programs can no longer key the radio."); });
     connect(ptt_, &QPushButton::pressed, this, [this] { ptt_btn_ = true; onPttChanged(); });
     connect(ptt_, &QPushButton::released, this, [this] { ptt_btn_ = false; onPttChanged(); });
     qApp->installEventFilter(this);
@@ -160,7 +179,60 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     last_band_ = txm::band_of(rx_->dialHz());
     updateButtons(); updateMemoryLabel();
 }
-TransmitCard::~TransmitCard() { if (tx_) tx_->abort(); if (worker_.joinable()) worker_.join(); }
+void TransmitCard::connectTrip() {
+    if (!tx_) return;
+    QPointer<TransmitCard> me(this);                                                         // the hook runs on the worker thread: hand the reason to the GUI thread
+    tx_->set_trip_hook([me](const std::string& why) { if (me) { const QString q = QString::fromStdString(why); QMetaObject::invokeMethod(me.data(), [me, q] { if (me) emit me->safetyTrip(q); }, Qt::QueuedConnection); } });
+}
+TransmitCard::~TransmitCard() { ext_ptt_ = false; ext_allowed_ = false; if (tx_) tx_->abort(); if (worker_.joinable()) worker_.join(); }
+
+// ---- keying by other programs over CAT --------------------------------------------------------------------------------------------------
+struct TransmitCard::ExtPtt : rigctl::PttRequest {
+    TransmitCard* c;
+    explicit ExtPtt(TransmitCard* t) : c(t) {}
+    bool request_ptt(int client, bool on) override { return c->requestExt(client, on); }
+    void heartbeat(int client) override { c->extHeartbeat(client); }
+};
+rigctl::PttRequest* TransmitCard::pttRequest() { if (!ext_) ext_ = std::make_unique<ExtPtt>(this); return ext_.get(); }
+static qint64 now_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+void TransmitCard::extHeartbeat(int client) { if (client == ext_owner_) ext_beat_ms_ = now_ms(); }
+bool TransmitCard::extActive() const {                                       // asked by the over's loop on the worker thread: atomics only
+    return ext_ptt_ && ext_allowed_ && now_ms() - ext_beat_ms_ < ext_watchdog_ms_;
+}
+bool TransmitCard::requestExt(int client, bool on) {                         // GUI thread (the CAT sockets live here)
+    if (!on) { if (client == ext_owner_) ext_ptt_ = false; return true; }    // releasing is never refused; a running over sees it and unkeys
+    auto refuse = [&](const QString& why) { report("Transmit request from another program refused: " + why + "."); return false; };
+    if (!ext_allow_->isChecked()) return refuse("\"Let other programs key\" is off");
+    if (!tx_ || !tx_->armed()) return refuse("transmit is not ready");
+    if (ext_over_) { if (client == ext_owner_) { ext_ptt_ = true; ext_beat_ms_ = now_ms(); return true; } return refuse("another program is transmitting"); }
+    if (worker_running_ || ft_pending_) return refuse("this app is transmitting or has an over queued");
+    const double hz = rx_->dialHz(); const int band = txm::band_of(hz);
+    if (band < 0) return refuse("the dial is outside the amateur bands");
+    if (!(tx_->k_for(band) > 1000)) return refuse("no measured drive level on this band (press Measure drive first)");
+    if (!simulated_ && !fw_iso_duplex_running()) return refuse("it needs the direct FireWire stream (48 / 96 / 192 on the Radio screen) so receive keeps running");
+    QString err; voice_in_ = audio_ ? audio_->openExternalInput(&err) : nullptr;
+    if (!voice_in_) return refuse("cannot open \"Fireside TX audio\" (" + err + ")");
+    txc::VoiceOptions v; v.o.rate = simulated_ ? 48000 : txRate(); v.o.mirror_q = mirror_->isChecked(); v.o.tx_ant = txAnt();
+    v.peak_w = ext_w_->value(); v.max_key_s = kExtMaxKeyS; v.chain = tx::data_chain_defaults(); v.lsb = rx_->modeIndex() == 1;
+    if (!(v.o.rate > 0)) { voice_in_.reset(); return refuse("no playback rate for transmit"); }
+    const double mhz = hz / 1e6; auto* in = voice_in_.get();
+    ext_owner_ = client; ext_beat_ms_ = now_ms(); ext_ptt_ = true; ext_over_ = true;
+    run(QString("Keyed by another program over CAT: %1 on %2 MHz, up to %3 W").arg(v.lsb ? "LSB" : "USB").arg(mhz, 0, 'f', 4).arg(v.peak_w, 0, 'f', 0), false,
+        [this, mhz, v, in](txc::TxControl& t) {
+            txc::VoiceResult r;
+            try { r = t.voice(mhz, *in, [this] { return extActive(); }, v, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; }); }
+            catch (...) { ext_ptt_ = false; ext_owner_ = -1; ext_over_ = false; throw; }
+            const bool quiet = ext_ptt_ && now_ms() - ext_beat_ms_ >= ext_watchdog_ms_;
+            ext_ptt_ = false; ext_owner_ = -1; ext_over_ = false;                                   // the program's next T 1 starts a new over
+            if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
+            if (!r.keyed) return QString("Other program: not keyed: ") + QString::fromStdString(r.why_not.empty() ? r.stop : r.why_not);
+            QString stop = QString::fromStdString(r.stop); if (quiet) stop = "the program stopped talking to us for 15 s";
+            if (quiet) QMetaObject::invokeMethod(this, [this] { emit safetyTrip("the other program stopped talking to us for 15 s"); }, Qt::QueuedConnection);
+            return QString("Other program's over: %1, %2 s, peak %3 W (set %4 W)").arg(stop).arg(r.seconds, 0, 'f', 1).arg(r.max_fwd_w, 0, 'f', 1).arg(v.peak_w, 0, 'f', 0);
+        });
+    if (!worker_running_) { ext_ptt_ = false; ext_owner_ = -1; ext_over_ = false; voice_in_.reset(); return refuse("the transmit worker did not start"); }
+    return true;
+}
 
 void TransmitCard::setSimulatedRadio(sim::RadioModel* m) {
     sim_radio_ = m; if (!m) return;
@@ -334,15 +406,21 @@ void TransmitCard::offerBackup() {
              "It takes about half a minute (the EEPROM is read twice and both reads must match). It is read-only: nothing is written to the radio's EEPROM. Receive carries on.")) {
         report("No EEPROM backup was saved, so transmit stays off. Press Retry transmit check later to be asked again."); { QSignalBlocker b(arm_); arm_->setChecked(false); } return;
     }
-    tx_ = s.transmit(pcmFactory());
+    tx_ = s.transmit(pcmFactory()); connectTrip();
     if (!tx_) { report("The radio is not started."); return; }
     run("Reading the EEPROM twice and saving a backup", false, [this, dir](txc::TxControl& t) {
         const auto log = [this](const std::string& m) { const QString q = QString::fromStdString(m); QMetaObject::invokeMethod(this, [this, q] { emit message("Transmit: " + q); }, Qt::QueuedConnection); };
         const auto b = t.backup_eeprom(dir.toStdString(), log);
         t.arm(b.image, b.image, log); eeprom_verified_ = true;                       // just read twice and identical: that is the reference for this run
+        { const auto cal = rx_level_cal(decode_eeprom(b.image, "TRX")); QMetaObject::invokeMethod(this, [this, cal] { applyRxCal(cal); }, Qt::QueuedConnection); }   // the S-meter's factory table, from the image just verified
         loadState();
         return QString("EEPROM read twice (identical) and saved to %1. Transmit ready: PA bias set.").arg(b.paths.empty() ? dir : QString::fromStdString(b.paths.front()));
     });
+}
+void TransmitCard::applyRxCal(const RxLevelCal& c) {
+    rx_->setRxLevelCal(c.valid, c.meter, c.preamp);
+    emit message(c.valid ? QString("S-meter: using the radio's factory RX level table (20 m: meter %1 dB, preamp %2 dB); not yet checked against a known signal").arg(c.meter[5], 0, 'f', 1).arg(c.preamp[5], 0, 'f', 1)
+                         : QString("S-meter: the RX level table is not usable (%1); the meter stays uncalibrated").arg(QString::fromStdString(c.problem)));
 }
 void TransmitCard::onArm(bool on) {
     if (!on) { if (tx_) tx_->disarm(); report("Transmit disarmed."); updateButtons(); return; }
@@ -356,12 +434,13 @@ void TransmitCard::onArm(bool on) {
         return;
     }
     QFile f(bpath); std::vector<uint8_t> backup; if (f.open(QIODevice::ReadOnly)) { const QByteArray a = f.readAll(); backup.assign(a.begin(), a.end()); }
-    tx_ = s.transmit(pcmFactory());
+    tx_ = s.transmit(pcmFactory()); connectTrip();
     if (!tx_) { QSignalBlocker b(arm_); arm_->setChecked(false); report("The radio is not started."); return; }
     run("Arming (reading the EEPROM)", false, [this, backup](txc::TxControl& t) {
         // once per app run: the EEPROM is read and compared at start-up only (later arms rely on that check)
         if (eeprom_verified_) t.arm(backup, backup);
         else { t.arm_from_radio(backup, [this](const std::string& m) { const QString s = QString::fromStdString(m); QMetaObject::invokeMethod(this, [this, s] { emit message("Transmit: " + s); }, Qt::QueuedConnection); }); eeprom_verified_ = true; }
+        { const auto cal = rx_level_cal(decode_eeprom(backup, "TRX")); QMetaObject::invokeMethod(this, [this, cal] { applyRxCal(cal); }, Qt::QueuedConnection); }   // the S-meter's factory table, from the image just verified
         loadState();
         return QString("Transmit ready: the EEPROM matches the backup, PA bias set.");
     });
@@ -493,7 +572,7 @@ void TransmitCard::onRestore() {
 }
 
 void TransmitCard::onRadioRunning(bool on) {
-    if (!on) { tx_.reset(); QSignalBlocker b(arm_); arm_->setChecked(false); arm_tried_ = false; report("Radio stopped: transmit disarmed."); }
+    if (!on) { ext_ptt_ = false; tx_.reset(); QSignalBlocker b(arm_); arm_->setChecked(false); arm_tried_ = false; report("Radio stopped: transmit disarmed."); }
     else if (auto_arm_) QTimer::singleShot(300, this, [this] { autoArm(); });               // the EEPROM check runs as soon as the radio is up
     updateButtons();
 }
@@ -551,6 +630,9 @@ void TransmitCard::onDial(double hz) {
 bool TransmitCard::keyedNow() const { return tx_ && tx_->keyed(); }
 void TransmitCard::tick() {
     const bool keyed = tx_ && tx_->keyed();
+    rx_->setMeterTx(keyed);
+    stop2_->setEnabled(stop_->isEnabled()); stop3_->setEnabled(stop_->isEnabled());
+    if (status_->toolTip() != status_->text()) status_->setToolTip(status_->text());    // the line is clipped: the tooltip has all of it
     if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running());           // duplex: receive follows the DDS onto the dial for the over
     lamp_->setStyleSheet(keyed ? "background:#c62828;color:white;font-weight:bold;border-radius:4px;padding:2px" : "background:#3a3a3a;color:#888;border-radius:4px;padding:2px");
     txc::Progress p; bool have; { std::lock_guard<std::mutex> l(m_); p = last_; have = have_last_; }
@@ -571,6 +653,7 @@ void TransmitCard::updateButtons() {
     restore_->setEnabled(armed && idle && band >= 0 && on_atu && tx_->memory().recall(band).has_value());
     if (!on_atu) { tune_->setToolTip(QString("This band transmits on ANT%1: the ATU is on ANT1 only (Antennas tab)").arg(txAnt())); }
     power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr);
+    ext_allow_->setEnabled(armed || ext_allow_->isChecked());                      // can always be unticked
 }
 void TransmitCard::updateMemoryLabel() {
     const int band = txm::band_of(rx_->dialHz());

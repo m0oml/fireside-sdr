@@ -9,10 +9,19 @@
 #include <algorithm>
 #include <cmath>
 
-AudioOut::AudioOut(bool enable, QObject* parent) : QObject(parent) {
+bool AudioOut::deviceExists(const QString& device) {
+#ifdef FIRESIDE_QT_AUDIO
+    for (const auto& d : QMediaDevices::audioOutputs()) if (d.description().contains(device, Qt::CaseInsensitive)) return true;
+#else
+    (void)device;
+#endif
+    return false;
+}
+AudioOut::AudioOut(bool enable, QObject* parent, const QString& device) : QObject(parent) {
 #ifdef FIRESIDE_QT_AUDIO
     if (!enable) return;
-    const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
+    QAudioDevice dev = device.isEmpty() ? QMediaDevices::defaultAudioOutput() : QAudioDevice();
+    if (!device.isEmpty()) for (const auto& d : QMediaDevices::audioOutputs()) if (d.description().contains(device, Qt::CaseInsensitive)) { dev = d; break; }
     if (dev.isNull()) return;
     QAudioFormat fmt; fmt.setSampleRate(48000); fmt.setChannelCount(2); fmt.setSampleFormat(QAudioFormat::Int16);      // stereo: the same audio on left and right, so it does not depend on the sound server upmixing mono
     if (!dev.isFormatSupported(fmt)) { fmt.setChannelCount(1); if (!dev.isFormatSupported(fmt)) return; }          // a device that only does mono: the server handles it
@@ -21,7 +30,7 @@ AudioOut::AudioOut(bool enable, QObject* parent) : QObject(parent) {
     io_ = sink_->start(); available_ = io_ != nullptr;
     if (available_) { auto* t = new QTimer(this); t->setInterval(40); connect(t, &QTimer::timeout, this, [this] { keepAlive(); }); t->start(); }
 #else
-    (void)enable;
+    (void)enable; (void)device;
 #endif
 }
 void AudioOut::push(const std::vector<float>& audio, float volume) {

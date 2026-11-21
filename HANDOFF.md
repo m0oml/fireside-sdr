@@ -55,7 +55,7 @@ right of the decoder. Tests: 24 CTest groups (523 core tests) + 124 Python; the 
 4c. DONE 2026-11-20: band memory (each band returns where it was left) and a Hamlib NET rigctl CAT server (Device tab, 127.0.0.1:4532,
    frequency / mode). Not yet tried with WSJT-X / GridTracker / WaveLogGate on the user's PC (checked with `rigctl -m 2`).
 4g. DONE 2026-11-20 (user's OK, Opus): other programs. Virtual devices Fireside RX audio / Fireside TX audio (system/53-fireside-virtual-audio.conf), CAT PTT
-   through rigctl::PttRequest -> the Transmit card -> TxControl::voice with the data chain ("Let other programs key", never remembered; 1..20 W; 2 min; 15 s
+   through rigctl::PttRequest -> the Transmit card -> TxControl::voice with the data chain ("Let other programs key", never remembered; 1..100 W, default 20; 2 min; 15 s
    watchdog; owner only; duplex stream), and the "External program" switch. Tested on the simulated radio and with real Hamlib rigctl. Receive VERIFIED
    2026-11-20: WSJT-X decoded from Monitor of Fireside RX audio. Keying by WSJT-X NOT yet tried on the air. First try (2026-11-20 23:38) was refused
    safely: Qt does not list PipeWire monitor sources, so "Monitor of Fireside TX audio" could not be opened. Fixed: Fireside TX audio is now a loopback

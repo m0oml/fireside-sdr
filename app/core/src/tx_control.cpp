@@ -90,12 +90,16 @@ void TxControl::prepare(double mhz, uint32_t mode, int ant) {
     txs::write_carrier_null(fx_, cal_, mhz); fx_.sync();
 }
 
-double TxControl::drive_cap(int band) const {
-    // The drive ceiling for any over on this band: 30 W by the band's MEASURED drive level when there is one (the EEPROM power table reads
-    // ~5-10 dB low on this radio: its "100 W" drive gave only ~11-13 W), else the table's 100 W drive (errs low). Never above kAbsoluteMaxDrive
-    // (~20 W at this radio's measured levels), which ToneSource enforces again whatever is asked.
+double TxControl::test_cap(int band) const {     // tunes, drive ramps and test tones (15 W at most): the hard clamp stays at 30 W, as during bring-up
     const double k = k_for(band);
-    const double d = k > 1000 ? std::sqrt(30.0 / k) : txs::drive_for_watts(cal_, band, 100.0);
+    return std::min(drive_cap(band), k > 1000 ? std::sqrt(30.0 / k) : txs::drive_for_watts(cal_, band, 30.0));
+}
+double TxControl::drive_cap(int band) const {
+    // The drive ceiling for any over on this band: kMaxWatts + 10 % (room for the closed loop) by the band's MEASURED drive level when there is one,
+    // else the EEPROM table's 100 W drive (it reads ~5-10 dB low on this radio: that gives far less than 100 W). Never above kAbsoluteMaxDrive,
+    // which ToneSource enforces again whatever is asked.
+    const double k = k_for(band);
+    const double d = k > 1000 ? std::sqrt(1.1 * txs::kMaxWatts / k) : txs::drive_for_watts(cal_, band, 100.0);
     return std::min(d, txs::kAbsoluteMaxDrive);
 }
 RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const ProgressFn& p, const LogFn& log, double hold_s) {
@@ -105,7 +109,7 @@ RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const 
     if (band < 0) { r.stop = "outside the amateur bands"; return r; }
     if (!(target_w > 0) || target_w > 15) { r.stop = "ramp target must be 0..15 W"; return r; }   // 15 W (user 2026-11-19: test tones)
     if (!(hold_s > 0) || hold_s > 10) { r.stop = "hold must be 0..10 s"; return r; }
-    const double d1w = txs::drive_for_watts(cal_, band, 1.0), dcap = drive_cap(band);
+    const double d1w = txs::drive_for_watts(cal_, band, 1.0), dcap = test_cap(band);
     if (o.tx_ant < 1 || o.tx_ant > 3) { r.stop = "transmit antenna must be ANT1..ANT3"; return r; }
     prepare(mhz, 1, o.tx_ant);
     txo::ToneSource src(o.rate, 8); src.set_cap(dcap); src.set_target(0); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
@@ -177,12 +181,12 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     if (!atu::threshold_request(threshold)) { r.why_not = "the tuner only knows thresholds 1.1, 1.3, 1.5, 1.7, 2.0, 2.5, 3.0"; return r; }
     // The drive: this band's measured level if there is one; otherwise the EEPROM power table, which on 20 m gave ~5 dB LESS than the power it names
     // (so a first tune on a new band errs low; the tuner says "no RF" if it is too little). A measurement needs a match, so the first tune comes first.
-    const double k = k_for(band), dcap = drive_cap(band);
+    const double k = k_for(band), dcap = test_cap(band);
     const double drive = k > 1000 ? std::sqrt(power_w / k) : txs::drive_for_watts(cal_, band, power_w);
     r.estimated_drive = !(k > 1000);
     if (!(drive > 0)) { r.why_not = "no drive for this band"; return r; }
     if (r.estimated_drive) say(log, std::string("no measured drive on ") + txm::band_name(band) + ": using the EEPROM power table (errs low); press Measure drive after a good tune");
-    if (drive > dcap) { r.why_not = "the drive for this power is above the table's 100 W drive"; return r; }
+    if (drive > dcap) { r.why_not = "the drive for this power is above the tune ceiling (30 W)"; return r; }
     prepare(mhz, 1, 1);                                           // tune: ANT1 (the ATU's)
     atu_.drain(); atu_.init(); clk_.sleep(1.5); atu_.drain();                  // relays settle (two runs keyed straight after a reset saw an open-like load)
     auto rep = atu_report();
@@ -257,7 +261,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     if (f.buf.empty() || f.rate != o.rate) return no("the prepared signal does not match the stream rate");
     const int band = txm::band_of((mhz * 1e6) + audio_hz + 50);
     if (band < 0 || txm::band_of(mhz * 1e6) != band) return no("outside the amateur bands");
-    if (!(power_w >= 1) || power_w > 25) return no("power must be 1..25 W");
+    if (!(power_w >= 1) || power_w > txs::kMaxWatts) return no("power must be 1..100 W");
     const tx::DigiMode mode = ft4 ? tx::DigiMode::FT4 : tx::DigiMode::FT8;
     const double off = tx::default_start_offset_s(mode), sig = tx::signal_seconds(mode), slot_len = tx::slot_seconds(mode);
     auto buf = f.buf;
@@ -265,7 +269,11 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     // drive: measured level, else the EEPROM table (errs low); the closed loop below trims it either way
     const double k = k_for(band), dcap = drive_cap(band);
     double drive = k > 1000 ? std::sqrt(power_w / k) : txs::drive_for_watts(cal_, band, power_w); r.estimated_drive = !(k > 1000);
-    if (!(drive > 0) || drive > dcap) return no("no usable drive for this power on this band");
+    if (!(drive > 0)) return no("no usable drive for this power on this band");
+    if (drive > dcap) {                                              // more than the band's drive ceiling allows: send at the ceiling, never above it
+        const double was = power_w; drive = dcap; if (k > 1000) power_w = std::max(1.0, dcap * dcap * k);
+        r.limited_to_w = power_w; char m[160]; std::snprintf(m, sizeof m, "%.0f W is above this band's limit: sending at %.1f W (the drive ceiling)", was, power_w); say(log, m);
+    }
     const double drive_max = std::min(dcap, drive * 2.0);          // the loop may raise the drive by at most 6 dB
     tx::TxPlan plan;
     try { plan = tx::plan_tx(utc_(), mode, parity, off, 2.0, min_lead_s); } catch (const std::exception& e) { return no(e.what()); }
@@ -323,12 +331,17 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     if (!armed_) return no("transmit is not armed");
     const int band = txm::band_of(mhz * 1e6);
     if (band < 0 || txm::band_of(mhz * 1e6 + (v.lsb ? -3000.0 : 3000.0)) != band) return no("outside the amateur bands");
-    if (!(v.peak_w >= 1 && v.peak_w <= 20)) return no("peak power must be 1..20 W");
+    if (!(v.peak_w >= 1 && v.peak_w <= txs::kMaxWatts)) return no("peak power must be 1..100 W");
     if (!(v.max_key_s > 0 && v.max_key_s <= 600)) return no("time-out must be 1..600 s");
     const double k = k_for(band); if (!(k > 1000)) return no("no measured drive level on this band: press Measure drive first");
     const double ceiling = v.chain.iq_limiter.ceiling, dcap = drive_cap(band);
-    double drive = std::sqrt(v.peak_w / k) / ceiling;                          // full-scale processed audio (= the ceiling) -> peak_w
-    if (!(drive > 0) || drive * ceiling > dcap) return no("no usable drive for this power on this band");
+    double peak_w = v.peak_w;
+    double drive = std::sqrt(peak_w / k) / ceiling;                            // full-scale processed audio (= the ceiling) -> peak_w
+    if (!(drive > 0)) return no("no usable drive for this power on this band");
+    if (drive * ceiling > dcap) {                                              // above the band's drive ceiling: the ceiling, never above it
+        drive = dcap / ceiling; peak_w = std::max(1.0, dcap * dcap * k); r.limited_to_w = peak_w;
+        char m[160]; std::snprintf(m, sizeof m, "%.0f W PEP is above this band's limit: %.1f W PEP (the drive ceiling)", v.peak_w, peak_w); say(log, m);
+    }
     tx::TxChainConfig cc = v.chain; cc.mic.sample_rate = 48000; cc.ssb.sideband = v.lsb ? tx::Sideband::LSB : tx::Sideband::USB;
     tx::TxChain chain(cc);
     if (v.o.tx_ant < 1 || v.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
@@ -356,7 +369,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     if (failed) return no("audio input: " + prod_err);
     if (st.failed()) return no("the I/Q stream failed to start");
     if (!ptt()) { r.stop = "PTT released before keying"; return r; }
-    GateConfig gc; gc.max_key_s = v.max_key_s; gc.max_fwd_w = 1.5 * v.peak_w; gc.max_rev_w = std::max(2.0, 0.5 * v.peak_w); gc.max_swr = 3.0;
+    GateConfig gc; gc.max_key_s = v.max_key_s; gc.max_fwd_w = 1.5 * peak_w; gc.max_rev_w = std::max(2.0, 0.5 * peak_w); gc.max_swr = 3.0;
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
     if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) { note_stop(why); return no(why); }
@@ -371,12 +384,12 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
         catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
         r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (p) p({clk_.now() - t0, src.level(), rd});
         gate.report(rd); gate.tick(); if (!gate.keyed()) break;
-        if (rd.fwd_w > 1.1 * v.peak_w && clk_.now() - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = clk_.now(); }   // ALC: only ever down
+        if (rd.fwd_w > 1.1 * peak_w && clk_.now() - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = clk_.now(); }   // ALC: only ever down
         clk_.sleep(0.02);
     }
     src.set_keyed(false); keyed_ = false;
     r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns(); note_stop(r.stop);
-    char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, v.peak_w); say(log, m);
+    char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, peak_w); say(log, m);
     return r;
 }
 }  // namespace fireside::txc

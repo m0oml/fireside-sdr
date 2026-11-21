@@ -31,6 +31,7 @@ public:
     bool reply_to(const Heard& h);        // a double-clicked line: their CQ, or a message to me (any step), or a message to someone else (call them)
     void call_cq();                       // CQ ME GRID until someone answers
     void stop();                          // Idle
+    void limit_tries(int n) { limit_ = n; }   // the current message only (e.g. 2 tries to raise a waiting caller); the next step has the normal limit again
     // A decoded message. Returns true if it moved the QSO on (the next message changed).
     bool heard(const Heard& h);
     // Our slot is due: the message to send now (empty = nothing: idle, done or gave up). Counts a try of the current message.
@@ -44,7 +45,7 @@ public:
     std::string describe() const;         // one line for the status: "QSO DK0ULR: sent R-08, rcvd -12 (waiting for RR73)"
     int tries() const { return tries_; }
 private:
-    std::string me_, grid_, dx_, dx_grid_, sent_, rcvd_, msg_; Stage st_ = Stage::Idle; int max_tries_, tries_ = 0; bool log_due_ = false, logged_ = false, last_send_ = false, again_ = false, rr73_done_ = false; int reopened_ = 0;
+    std::string me_, grid_, dx_, dx_grid_, sent_, rcvd_, msg_; Stage st_ = Stage::Idle; int max_tries_, tries_ = 0; bool log_due_ = false, logged_ = false, last_send_ = false, again_ = false, rr73_done_ = false; int reopened_ = 0, limit_ = 0;
     void set(Stage s, std::string m);
     bool to_me(const Heard& h) const;
 };

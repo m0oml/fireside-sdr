@@ -94,7 +94,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     ft_msg_ = new QLineEdit; ft_msg_->setPlaceholderText("CQ YOURCALL GRID"); ft_msg_->setMinimumWidth(220); ft_msg_->setToolTip("The FT8 / FT4 message (standard forms: CQ CALL GRID, CALL CALL REPORT, RR73, 73 ...)");
     ft_hz_ = new QSpinBox; ft_hz_->setRange(200, 3000); ft_hz_->setValue(1500); ft_hz_->setSuffix(" Hz"); ft_hz_->setToolTip("Audio frequency above the dial (USB)");
     ft_par_ = new QComboBox; ft_par_->addItems({"Even (:00 :30)", "Odd (:15 :45)"}); ft_par_->setMinimumContentsLength(20); ft_par_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    ft_w_ = new QDoubleSpinBox; ft_w_->setRange(1, 25); ft_w_->setDecimals(0); ft_w_->setValue(5); ft_w_->setSuffix(" W"); ft_w_->setToolTip("Power. Held by the forward meter during the first 3 s of each over (closed loop)");
+    ft_w_ = new QDoubleSpinBox; ft_w_->setRange(1, 100); ft_w_->setDecimals(0); ft_w_->setValue(20); ft_w_->setSuffix(" W"); ft_w_->setToolTip("Power. Held by the forward meter during the first 3 s of each over (closed loop)");
     cq_ = new QPushButton("CQ"); cq_->setToolTip("Call CQ (CQ yourcall yourgrid) in the chosen slot; with Auto sequence the first station answering is worked and logged. Stop ends it.");
     pm_ = new PowerMeter;
     send_ = new QPushButton("Send"); send_->setToolTip("Transmit the message in the next slot of the chosen parity (no question: Stop cancels a queued send). Receive pauses only for the over itself.");
@@ -102,14 +102,14 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     auto_seq_->setToolTip("Double-click a decoded CQ or caller to reply. Each answer moves the QSO on (report, R-report, RR73, 73), repeated up to 6 times; the finished QSO is logged to Wavelog. Send with a CQ message calls CQ the same way.");
     ft_repeat_ = new QCheckBox("Repeat"); ft_repeat_->setToolTip("Send again in every slot of this parity until Stop (calling CQ)");
     voice_mode_ = new QComboBox; voice_mode_->addItems({"Auto (as the receiver)", "USB", "LSB"}); voice_mode_->setToolTip("Sideband for voice: Auto = the receiver's USB / LSB (its Auto LSB / USB picks it per band), else USB above 10 MHz");
-    voice_w_ = new QDoubleSpinBox; voice_w_->setRange(1, 20); voice_w_->setDecimals(0); voice_w_->setValue(10); voice_w_->setSuffix(" W PEP"); voice_w_->setToolTip("Peak envelope power: speech peaks reach it (the processing drives them into the limiter)");
+    voice_w_ = new QDoubleSpinBox; voice_w_->setRange(1, 100); voice_w_->setDecimals(0); voice_w_->setValue(20); voice_w_->setSuffix(" W PEP"); voice_w_->setToolTip("Peak envelope power: speech peaks reach it (the processing drives them into the limiter)");
     ptt_ = new QPushButton("PTT (hold)"); ptt_->setToolTip("Hold to talk: an SSB over with the Audio tab's input and processing (time-out 3 min)");
     space_ptt_ = new QCheckBox("Space bar"); space_ptt_->setToolTip("Hold the space bar to talk (not while typing in a box)"); space_ptt_->setChecked(false);
     mic_ptt_ = new QCheckBox("Mic / RCA PTT"); mic_ptt_->setChecked(true); mic_ptt_->setToolTip("The mic's PTT (front socket) or the rear RCA PTT keys an over");
     ext_allow_ = new QCheckBox("Let other programs key (CAT)"); ext_allow_->setChecked(false);
     ext_allow_->setToolTip("WSJT-X, JS8Call, fldigi ... may key the radio over the CAT server (PTT: CAT), sending what they play into \"Fireside TX audio\". "
                            "Off in every new window. Needs the direct stream, a measured drive level for the band; at most 2 minutes per over; unkeys if the program goes quiet for 15 s.");
-    ext_w_ = new QDoubleSpinBox; ext_w_->setRange(1, 20); ext_w_->setDecimals(0); ext_w_->setValue(10); ext_w_->setSuffix(" W");
+    ext_w_ = new QDoubleSpinBox; ext_w_->setRange(1, 100); ext_w_->setDecimals(0); ext_w_->setValue(20); ext_w_->setSuffix(" W");
     ext_w_->setToolTip("Power when the other program's audio is at full scale (less if it is quieter; never more)");
     ft_timer_ = new QTimer(this); ft_timer_->setSingleShot(true); connect(ft_timer_, &QTimer::timeout, this, &TransmitCard::startSend);
     mem_ = new QLabel; mem_->setWordWrap(false); status_ = new QLabel("Transmit gets ready by itself once the radio is started (EEPROM check, about 16 s)."); status_->setWordWrap(true);
@@ -151,7 +151,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     connect(restore_, &QPushButton::clicked, this, &TransmitCard::onRestore);
     connect(test_, &QPushButton::clicked, this, &TransmitCard::onTestTone);
     connect(mirror_, &QCheckBox::toggled, this, [this] { saveState(); });
-    connect(stop_, &QPushButton::clicked, this, [this] { ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } if (seq_) { seq_->stop(); noteSeqEnd(); }   // a logged QSO stopped during its RR73 repeats is still done
+    connect(stop_, &QPushButton::clicked, this, [this] { ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false; if (seq_) { seq_->stop(); noteSeqEnd(false); }   // a logged QSO stopped during its RR73 repeats is still done
                                                        ext_ptt_ = false; if (tx_) tx_->abort(); report("Stop pressed: unkeying, nothing queued."); updateButtons(); });
     connect(send_, &QPushButton::clicked, this, &TransmitCard::onSend);
     connect(ext_allow_, &QCheckBox::toggled, this, [this](bool on) {
@@ -306,6 +306,7 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
             if (res.endsWith(" #sent")) res.chop(6);
             report(res + rxnote); saveState(); updateButtons(); updateMemoryLabel();
             if (resend) QTimer::singleShot(200, this, [this, g = stop_gen_] { if (g == stop_gen_) queueSend(); });   // Stop in between cancels it             // calling: the next slot of the same parity
+            if (!resend) QTimer::singleShot(300, this, [this] { autoNext(); });               // an ended QSO waiting for this over to finish
             voice_in_.reset();                                                                  // a voice over's input (a PC capture lives on this thread)
             if (after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }               // start-up: receiving starts once the check is done
             if (unkey_failed_) { unkey_failed_ = false; if (auto_confirm_ < 0) QMessageBox::critical(this, "The radio may still be transmitting",
@@ -375,6 +376,7 @@ QString TransmitCard::messageText() const { return ft_msg_->text(); }
 double TransmitCard::recentTxPowerW() const { return QDateTime::currentSecsSinceEpoch() - last_tx_t_.load() < 600 ? last_tx_w_.load() : 0.0; }
 void TransmitCard::replyTo(const QString& line) {
     if (!auto_seq_->isChecked()) return;
+    if (!auto_reply_) { auto_tried_.clear(); from_cq_ = false; follow_pending_ = false; }   // the operator's own choice: a fresh start
     int snr = 0; const std::string text = fireside::logbook::ftx_line_text(line.toStdString(), &snr); const auto h = fireside::seq::parse(text, snr);
     if (!h.ok) { report("That line has nothing to answer."); return; }
     if (!haveStation()) return;
@@ -390,7 +392,9 @@ void TransmitCard::replyTo(const QString& line) {
 void TransmitCard::heardLine(const QString& line) {
     if (!seq_ || !auto_seq_->isChecked()) return;
     int snr = 0; const std::string text = fireside::logbook::ftx_line_text(line.toStdString(), &snr); const auto h = fireside::seq::parse(text, snr);   // two statements: argument order is unspecified
+    const bool was_cq = seq_->stage() == fireside::seq::Stage::Cq;
     if (seq_->heard(h)) {
+        if (was_cq && seq_->stage() != fireside::seq::Stage::Cq) from_cq_ = true;            // someone answered our CQ: afterwards, back to CQ
         emit qsoPartner(QString::fromStdString(seq_->dx()));
         if (!seq_->current().empty()) ft_msg_->setText(QString::fromStdString(seq_->current()));
         report(QString::fromStdString(seq_->describe()) + (seq_->current().empty() ? QString() : QString(": next ") + QString::fromStdString(seq_->current())));
@@ -407,12 +411,27 @@ void TransmitCard::takeLog() {
     }
     noteSeqEnd();
 }
-void TransmitCard::noteSeqEnd() {                        // the sequence has ended: say so once in the QSO pane (done = it was logged; else only if it gave up)
+void TransmitCard::noteSeqEnd(bool may_continue) {      // the sequence has ended: say so once in the QSO pane (done = it was logged; else only if it gave up)
     if (!seq_ || seq_->active()) return;
     const QString dx = QString::fromStdString(seq_->dx()); if (dx.isEmpty() || dx == ended_for_) return;
     const bool logged = dx == logged_for_;
     if (!logged && seq_->stage() != fireside::seq::Stage::GaveUp) return;                // stopped before anything was logged: nothing to announce
     ended_for_ = dx; emit qsoEnded(dx, logged);
+    if (may_continue) { follow_pending_ = true; QTimer::singleShot(300, this, [this] { autoNext(); }); }
+}
+void TransmitCard::autoNext() {                         // auto mode, a QSO (or a 2-try call) has ended: answer the next station waiting in the callers area
+    if (!follow_pending_ || !auto_seq_->isChecked() || !tx_ || !tx_->armed() || worker_running_ || ft_pending_ || (seq_ && seq_->active())) return;   // (an over still running: the run's end calls this again)
+    follow_pending_ = false;
+    const auto c = rx_->nextCaller(auto_tried_);
+    if (!c.first.isEmpty()) {
+        auto_tried_.insert(c.first); auto_reply_ = true; replyTo(c.second); auto_reply_ = false;
+        if (seq_ && seq_->active() && QString::fromStdString(seq_->dx()).contains(c.first)) {
+            seq_->limit_tries(2); report(QString("Answering %1, who called earlier (2 tries, then the next one): %2").arg(c.first, ft_msg_->text()));
+        }
+        return;
+    }
+    auto_tried_.clear();
+    if (from_cq_) { from_cq_ = false; report("No one else is waiting: calling CQ again."); cq_->click(); }   // we were calling CQ: carry on
 }
 
 void TransmitCard::offerBackup() {
@@ -622,6 +641,8 @@ void TransmitCard::startSend() {
         const QString when = QDateTime::fromMSecsSinceEpoch(qint64(r.slot_utc * 1000), Qt::UTC).toString("HH:mm:ss");
         QString res = QString("%1 %2 at %3 UTC: %4, %5 W (set %6 W)%7.").arg(prep->ft4 ? "FT4" : "FT8", r.sent ? "sent" : "stopped", when, QString::fromStdString(r.stop))
                       .arg(r.mean_fwd_w, 0, 'f', 1).arg(w, 0, 'f', 0).arg(r.late_s > 0 ? ", joined late" : "");
+        if (r.limited_to_w > 0) res += QString(" This band's limit is %1 W: set the power to %1 W or less.").arg(r.limited_to_w, 0, 'f', 0);
+        if (r.limited_to_w > 0) res += QString(" This band's limit is %1 W: set the power to %1 W or less.").arg(r.limited_to_w, 0, 'f', 0);
         unkeyed_utc_ = r.unkeyed_utc;
         if (r.sent && r.mean_fwd_w > 0.1) { last_tx_w_ = r.mean_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }   // for the log's TX_PWR
         if (r.sent) res += " #sent";

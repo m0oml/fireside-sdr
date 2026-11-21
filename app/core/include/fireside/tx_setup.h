@@ -25,7 +25,8 @@ struct TxCal {
 };
 inline constexpr double kAudioVolts = 2.23;                       // PowerSDR audio_volts1
 inline constexpr double kPowerPoints[13] = {1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
-inline constexpr double kAbsoluteMaxDrive = 0.04;                 // ~20 W at this radio's measured drive levels (12 500 W per drive^2 on 20 m): nothing above it, whatever is asked
+inline constexpr double kMaxWatts = 100.0;                         // the radio's rating: no over is planned above it (power boxes, CAT, voice), 2026-11-21 (was 20 W during bring-up)
+inline constexpr double kAbsoluteMaxDrive = 0.15;                 // the hard I/Q clamp: 100 W even at 4400 W per drive^2 (this radio measures 10 000 to 12 800 on HF); the band's measured ceiling is lower
 
 // From a full TRX image (read_verified). Invalid (with the reason) unless: header valid with checksums present, PA bias pointer 0x2C0..0x7FF and row 0 not
 // blank (0x00 / 0xFF), PA power + meter tables usable, at least one carrier-null entry.

@@ -54,10 +54,10 @@ struct VoiceOptions {
     double max_key_s = 180;                       // the time-out timer
     tx::TxChainConfig chain = tx::voice_chain_defaults();   // the whole audio processing (EQ, expander, leveler, compressor, clipper, limiters, SSB filter)
 };
-struct VoiceResult { bool keyed = false, unkey_failed = false; std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0; uint64_t underruns = 0; };
+struct VoiceResult { bool keyed = false, unkey_failed = false; std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0, limited_to_w = 0; uint64_t underruns = 0; };
 
 struct SendResult {
-    bool sent = false, unkey_failed = false, estimated_drive = false; std::string why_not, stop;
+    bool sent = false, unkey_failed = false, estimated_drive = false; std::string why_not, stop; double limited_to_w = 0;   // > 0: sent at the band's drive ceiling (this many W), below the power asked
     double slot_utc = 0, late_s = 0, max_fwd_w = 0, mean_fwd_w = 0, drive = 0, k = 0; std::optional<double> swr;
     double unkeyed_utc = 0;              // when the gate dropped MOX (the system clock, for timing what follows)
 };
@@ -85,7 +85,8 @@ public:
     const txs::TxCal& cal() const { return cal_; }
     // Drive calibration (W per drive^2) per band: 0 until measured (ramp) or loaded (set_k / set_all_k).
     double k_for(int band) const;
-    double drive_cap(int band) const;                             // the drive ceiling on this band (30 W by the measured level, else the table's 100 W; <= kAbsoluteMaxDrive)
+    double test_cap(int band) const;                              // tunes, drive ramps and test tones: 30 W by the measured level (the table's 30 W without one)
+    double drive_cap(int band) const;                             // the drive ceiling on this band (110 W by the measured level, else the table's 100 W; <= kAbsoluteMaxDrive)
     const std::map<int, double>& all_k() const { return k_; }
     void set_all_k(const std::map<int, double>& k) { for (auto& [b, v] : k) set_k(b, v); }
     void set_k(int band, double k);

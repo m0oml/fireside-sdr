@@ -186,7 +186,7 @@ Open **Transmit** under the decoder: the **Radio transmit (ATU, power, SWR)** ca
 - **Other programs (WSJT-X, JS8Call, fldigi ...)** (user 2026-11-20): `system/53-fireside-virtual-audio.conf` (installed by `setup-system.sh`) makes two
   PipeWire null sinks. **Fireside RX audio**: the receiver pushes a second copy of its audio there at a fixed level (Audio tab, not the Volume slider or Mute);
   the other program records its monitor. **Fireside TX audio**: a loopback; the other program plays into its sink and we capture "Fireside TX audio (input)" (Qt does not list monitor sources). **Keying over CAT**: the Transmit
-  card's "Let other programs key" (off in every new window, never remembered) and power (1..20 W). An accepted `T 1` runs `TxControl::voice()` with
+  card's "Let other programs key" (off in every new window, never remembered) and power (1..100 W, default 20). An accepted `T 1` runs `TxControl::voice()` with
   `tx::data_chain_defaults()` (no processing, SSB 100..3000 Hz, the same ceilings), that input, `max_key_s` 120, while: the tick is on, transmit is armed,
   the owning client holds PTT and has sent a command in the last 15 s; amateur band with a measured drive level; the direct duplex stream running. One owner;
   `T 0`, a disconnect, unticking, Stop or a radio stop unkey. Tests: rigctl PTT tests, a simulated data over (`test_atu_tx.cpp`), and `--smoke-radio`
@@ -206,7 +206,7 @@ Open **Transmit** under the decoder: the **Radio transmit (ATU, power, SWR)** ca
   = the radio's front mic socket (input ch7 of the duplex stream, same clock, mic gain 0..-40 dB in the radio's codec) or any PC capture device
   (drift-corrected FIFO); input gain; a level meter (Test input, nothing transmits); processing: high / low-pass, downward expander, leveler,
   compressor, 10-band graphic EQ (32 Hz..16 kHz, +-15 dB). Saved in QSettings fireside/audio.
-- **Voice (Transmit card)**: Auto (LSB < 10 MHz) / USB / LSB, PEP 1..20 W, PTT: hold the button, the space bar (if ticked; never while
+- **Voice (Transmit card)**: Auto (LSB < 10 MHz) / USB / LSB, PEP 1..100 W (default 20), PTT: hold the button, the space bar (if ticked; never while
   typing) or the mic / rear RCA PTT (READ_PTT polled, if ticked). `TxControl::voice`: input -> processing -> SSB -> the clamped transmit
   path; gate: forward 1.5 x PEP, SWR 3, 3-minute time-out; drive from the band's measured level, trimmed only down. Tested on the simulated
   radio (sideband, PEP, PTT, time-out, mic failure); not on the air yet (no microphone).

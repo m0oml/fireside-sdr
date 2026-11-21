@@ -3,7 +3,7 @@
 //   * a single tone (offset Hz from the TX DDS; 0 = a carrier on the DDS frequency), or a rendered buffer (FT8 ...), at amplitude `target`, slewed over
 //     ~5 ms so keying never clicks
 //   * the radio's TX image correction (EEPROM, per band) so the unwanted sideband is suppressed
-//   * a HARD clamp on |I| and |Q| at `cap` (the band's drive for the gate's power limit) and never above txs::kAbsoluteMaxDrive (~20 W at this radio's measured drive levels), applied
+//   * a HARD clamp on |I| and |Q| at `cap` (the band's drive for the gate's power limit) and never above txs::kAbsoluteMaxDrive (100 W even at a low measured drive levels), applied
 //     after everything else: no setting, bug or race can send more
 // Used by TxControl (firesidekey and the GUI transmit card).
 #pragma once

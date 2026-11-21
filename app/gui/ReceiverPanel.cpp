@@ -919,6 +919,7 @@ void ReceiverPanel::removeCaller(const QString& call) {
 }
 void ReceiverPanel::clearCallers() { caller_list_.clear(); if (callers_) callers_->clear(); }
 void ReceiverPanel::tickCallers() {
+    fadeQsos();
     if (caller_list_.isEmpty()) return;
     const bool ft4 = decoderIndex() == 5; const double cycle_ms = ft4 ? 7500.0 : 15000.0; const int limit = ft4 ? 10 : 6;   // unanswered for this many cycles: gone
     const qint64 now = callersNow();
@@ -965,13 +966,13 @@ void ReceiverPanel::setTransmitting(bool keyed) {
     tx_on_dial_ = keyed; const QString keep = note_; applySettings(); note_ = keep; updateStatus();
 }
 void ReceiverPanel::peekDecode() { engine_.peek_decoder(); std::string t; if (engine_.take_text(t) > 0) addDecodedText(QString::fromStdString(t)); }
-void ReceiverPanel::clearQso() { if (qso_text_) qso_text_->clear(); qso_partner_.clear(); emit qsoCleared(); }
+void ReceiverPanel::clearQso() { if (qso_text_) qso_text_->clear(); qso_partner_.clear(); done_qsos_.clear(); qso_start_block_ = -1; emit qsoCleared(); }
 void ReceiverPanel::setQsoPartner(const QString& call) {
     const QString b = QString::fromStdString(fireside::qrz::base_call(call.toStdString()));
     if (b == qso_partner_) return;
     qso_partner_ = b; removeCaller(b); pushFocus();                            // replying to a caller answers them; the partner's frequency goes first
     if (!b.isEmpty() && qso_text_) { qso_text_->moveCursor(QTextCursor::End); QTextCursor c = qso_text_->textCursor(); if (!qso_text_->document()->isEmpty()) c.insertBlock();
-        QTextCharFormat f; f.setForeground(QColor("#8b93a7")); c.setBlockFormat(QTextBlockFormat()); c.insertText(QString::fromUtf8("\u2500\u2500 QSO with %1 \u2500\u2500").arg(b), f); qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
+        QTextCharFormat f; f.setForeground(QColor("#8b93a7")); c.setBlockFormat(QTextBlockFormat()); c.insertText(QString::fromUtf8("\u2500\u2500 QSO with %1 \u2500\u2500").arg(b), f); qso_start_block_ = qso_text_->document()->blockCount() - 1; qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
 }
 void ReceiverPanel::endQso(const QString& call, bool done) {               // the sequence finished: a closing line, and the pane takes callers again
     const QString b = QString::fromStdString(fireside::qrz::base_call(call.toStdString()));
@@ -979,7 +980,43 @@ void ReceiverPanel::endQso(const QString& call, bool done) {               // th
         QTextCharFormat f; f.setForeground(done ? QColor("#3ddc84") : QColor("#8b93a7")); f.setFontWeight(QFont::Bold); c.setBlockFormat(QTextBlockFormat());
         c.insertText(done ? QString::fromUtf8("\u2500\u2500 QSO with %1 done \u2500\u2500").arg(b) : QString::fromUtf8("\u2500\u2500 QSO with %1 not completed (no answer) \u2500\u2500").arg(b), f);
         qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
+    if (qso_text_) {                                                                // the finished QSO fades out like a caller does, then goes
+        DoneQso d; d.last = qso_text_->document()->blockCount() - 1; d.first = qso_start_block_ >= 0 && qso_start_block_ <= d.last ? qso_start_block_ : d.last; d.ms = callersNow();
+        for (int i = d.first; i <= d.last; ++i) { const QTextBlock bl = qso_text_->document()->findBlockByNumber(i);
+            d.bg.push_back(bl.blockFormat().background().style() == Qt::NoBrush ? QColor("#12161d") : bl.blockFormat().background().color());
+            d.fg.push_back(bl.begin().atEnd() ? QColor("#c9d1dc") : bl.begin().fragment().charFormat().foreground().color()); }
+        done_qsos_.append(d); qso_start_block_ = -1;
+    }
     if (b == qso_partner_) qso_partner_.clear();
+}
+void ReceiverPanel::fadeQsos() {                                                    // same time as the callers: 6 FT8 / 10 FT4 cycles
+    if (!qso_text_ || done_qsos_.isEmpty()) return;
+    const bool ft4 = decoderIndex() == 5; const double span_ms = (ft4 ? 10 : 6) * (ft4 ? 7500.0 : 15000.0); const qint64 now = callersNow();
+    auto mix = [](const QColor& a, const QColor& b, double t) { return QColor(int(a.red() + (b.red() - a.red()) * t), int(a.green() + (b.green() - a.green()) * t), int(a.blue() + (b.blue() - a.blue()) * t)); };
+    QTextDocument* doc = qso_text_->document();
+    for (int k = done_qsos_.size() - 1; k >= 0; --k) {                            // newest first; removing a range moves the later ranges up (fixed below)
+        DoneQso& d = done_qsos_[k]; const double t = std::clamp(double(now - d.ms) / span_ms, 0.0, 1.0);
+        if (t >= 1.0) {
+            QTextCursor c(doc->findBlockByNumber(d.first)); const QTextBlock lastb = doc->findBlockByNumber(d.last);
+            c.setPosition(lastb.position() + lastb.length() - 1, QTextCursor::KeepAnchor);
+            if (lastb.next().isValid()) c.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);   // and the line break after it
+            else if (d.first > 0) { c.setPosition(doc->findBlockByNumber(d.first - 1).position() + doc->findBlockByNumber(d.first - 1).length() - 1); c.setPosition(lastb.position() + lastb.length() - 1, QTextCursor::KeepAnchor); }
+            c.removeSelectedText();
+            const int n = d.last - d.first + 1; const int first = d.first; done_qsos_.removeAt(k);
+            for (auto& o : done_qsos_) if (o.first > first) { o.first -= n; o.last -= n; }
+            if (qso_start_block_ > first) qso_start_block_ -= n;
+            continue;
+        }
+        for (int i = d.first; i <= d.last; ++i) {
+            const QTextBlock bl = doc->findBlockByNumber(i); if (!bl.isValid()) continue; const size_t j = size_t(i - d.first);
+            QTextCursor c(bl); QTextBlockFormat bf = bl.blockFormat(); bf.setBackground(mix(d.bg[j], QColor("#12161d"), t)); c.setBlockFormat(bf);
+            c.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor); QTextCharFormat cf; cf.setForeground(mix(d.fg[j], QColor("#4a5261"), t)); c.mergeCharFormat(cf);
+        }
+    }
+}
+QPair<QString, QString> ReceiverPanel::nextCaller(const QSet<QString>& skip) const {   // the newest waiting caller not tried yet: {call, decoded line}
+    for (int i = caller_list_.size() - 1; i >= 0; --i) if (!skip.contains(caller_list_[i].call) && caller_list_[i].call != qso_partner_) return {caller_list_[i].call, caller_list_[i].line};
+    return {};
 }
 void ReceiverPanel::addQsoTx(const QString& utc, int hz, const QString& msg) {
     { QString to = msg.section(' ', 0, 0).trimmed(); to.remove('<').remove('>'); removeCaller(QString::fromStdString(fireside::qrz::base_call(to.toStdString()))); }   // our over to them answers them

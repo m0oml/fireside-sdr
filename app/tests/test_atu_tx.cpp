@@ -403,7 +403,7 @@ TEST(ft_send_refuses_what_it_cannot_send_and_stops_on_abort) {
     TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o;
     CHECK(!r.tx->send_ft(14.080, "THIS IS NOT FT8 !!!", 1500, false, tx::Parity::Even, 5, o).sent);
     CHECK(!r.tx->send_ft(14.349, "CQ M0OML IO91", 2000, false, tx::Parity::Even, 5, o).sent);         // would end above the band edge
-    CHECK(!r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, false, tx::Parity::Even, 30, o).sent);        // > 25 W
+    CHECK(!r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, false, tx::Parity::Even, 101, o).sent);       // > 100 W (the radio's rating)
     CHECK(write_ops(r.bus).size() == 8);                                                               // nothing but the arm's bias pots went out
     const double now = wall_utc(), next = std::ceil(now / 15.0) * 15.0, shift = (next - 3.0) - now;
     r.tx->set_utc_source([shift] { return wall_utc() + shift; });
@@ -611,7 +611,8 @@ TEST(tx_control_ramp_to_15_w_and_never_past_its_ceiling) {   // the test tone at
     if (!res.reached) std::printf("  ramp stop: %s, max %.2f W, %.1f s\n", res.stop.c_str(), res.max_fwd_w, res.seconds);
     CHECK(res.reached); CHECK(res.max_fwd_w > 12.0 && res.max_fwd_w < 1.5 * 15.0); CHECK(!r.sim.keyed);
     CHECK(!r.tx->ramp(14.10, 16.0, o).reached);                                       // above 15 W: refused before keying
-    CHECK_NEAR(r.tx->drive_cap(5), std::min(std::sqrt(30.0 / r.tx->k_for(5)), txs::kAbsoluteMaxDrive), 1e-12);   // the ceiling: measured 30 W, absolute clamp
+    CHECK_NEAR(r.tx->drive_cap(5), std::min(std::sqrt(110.0 / r.tx->k_for(5)), txs::kAbsoluteMaxDrive), 1e-12);  // the ceiling: 100 W + 10 % by the measured level, absolute clamp
+    CHECK_NEAR(r.tx->test_cap(5), std::sqrt(30.0 / r.tx->k_for(5)), 1e-12);                                      // tunes and test tones: still 30 W
     CHECK(r.tx->drive_cap(5) <= txs::kAbsoluteMaxDrive);
 }
 TEST(tx_control_ramp_with_a_lagging_meter_settles_on_the_target_without_overshoot) {   // the 15 W test tone peaked at 18-20 W on the air
@@ -668,7 +669,7 @@ TEST(voice_usb_and_lsb_on_their_sideband_at_the_set_peak_and_ptt_unkeys) {
 TEST(voice_refusals_time_out_and_a_failing_mic_leave_the_radio_unkeyed) {
     if (backup_image().empty()) return;
     TxRig r; r.tx->arm(backup_image(), backup_image()); FakeMic mic; txc::VoiceOptions v;
-    v.peak_w = 25; CHECK(!r.tx->voice(14.2, mic, [] { return true; }, v).keyed); v.peak_w = 10;
+    v.peak_w = 101; CHECK(!r.tx->voice(14.2, mic, [] { return true; }, v).keyed); v.peak_w = 10;
     CHECK(!r.tx->voice(7.0, mic, [] { return true; }, v).keyed);                        // no measured drive level on 40 m in this rig
     CHECK(!r.tx->voice(14.2, mic, [] { return false; }, v).keyed);                      // PTT already released
     CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(0));

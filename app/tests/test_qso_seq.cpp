@@ -119,3 +119,14 @@ TEST(ft_transmit_signal_is_ready_well_inside_a_slot) {   // it is rendered when 
     const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     CHECK(!f.buf.empty()); CHECK(s < 0.5);
 }
+
+TEST(seq_a_limited_call_gives_up_after_two_tries_and_an_answer_restores_the_normal_limit) {
+    seq::Sequencer s("M0OML", "IO92");
+    CHECK(s.reply_to(H("M0OML OK1XYZ JO70", -12))); s.limit_tries(2);
+    CHECK_EQ(s.next_message(), std::string("OK1XYZ M0OML -12")); CHECK_EQ(s.next_message(), std::string("OK1XYZ M0OML -12"));
+    CHECK_EQ(s.next_message(), std::string()); CHECK(s.stage() == seq::Stage::GaveUp);                     // two tries, then move on
+    seq::Sequencer v("M0OML", "IO92");
+    CHECK(v.reply_to(H("M0OML OK1XYZ JO70", -12))); v.limit_tries(2); CHECK(!v.next_message().empty());
+    CHECK(v.heard(H("M0OML OK1XYZ R-10")));                                                                   // they answered: the next step
+    for (int i = 0; i < 4; ++i) { CHECK_EQ(v.next_message(), std::string("OK1XYZ M0OML RR73")); (void)v.heard(H("M0OML OK1XYZ R-10")); }   // more than 2: the limit was for the call only
+}

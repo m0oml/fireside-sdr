@@ -45,7 +45,7 @@ Heard parse(const std::string& text, int snr) {
 
 Sequencer::Sequencer(std::string my_call, std::string my_grid4, int max_tries) : me_(upper(std::move(my_call))), grid_(upper(std::move(my_grid4)).substr(0, 4)), max_tries_(max_tries) {}
 bool Sequencer::to_me(const Heard& h) const { return !h.cq && base(h.to) == base(me_); }
-void Sequencer::set(Stage s, std::string m) { st_ = s; msg_ = std::move(m); tries_ = 0; again_ = false; }
+void Sequencer::set(Stage s, std::string m) { st_ = s; msg_ = std::move(m); tries_ = 0; again_ = false; limit_ = 0; }
 void Sequencer::stop() { st_ = Stage::Idle; msg_.clear(); tries_ = 0; }
 void Sequencer::call_cq() { dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; rr73_done_ = false; reopened_ = 0; set(Stage::Cq, "CQ " + me_ + " " + grid_); }
 
@@ -104,7 +104,7 @@ std::string Sequencer::next_message() {
         if (!again_) { st_ = Stage::Done; rr73_done_ = true; msg_.clear(); return ""; }
         again_ = false; if (tries_ >= max_tries_) { st_ = Stage::Done; rr73_done_ = true; msg_.clear(); return ""; }
     }
-    if (tries_ >= (st_ == Stage::Cq ? std::max(12, max_tries_) : max_tries_)) { st_ = Stage::GaveUp; return ""; }   // CQ: up to 12 overs (6 min of FT8, like WSJT-X's watchdog)
+    if (tries_ >= (st_ == Stage::Cq ? std::max(12, max_tries_) : (limit_ > 0 ? limit_ : max_tries_))) { st_ = Stage::GaveUp; return ""; }   // CQ: up to 12 overs (6 min of FT8, like WSJT-X's watchdog)
     ++tries_;
     return msg_;
 }

@@ -156,6 +156,10 @@ int main(int argc, char** argv) {
                      r->qsoPaneText().contains("DK0ULR -10") && !r->qsoPaneText().contains("OK1XYZ") && r->callersText().contains("OK1XYZ"));
                 r->endQso("DK0ULR", true); step("QSO pane: 'done' at the end, and no partner any more", r->qsoPaneText().contains("QSO with DK0ULR done") && r->qsoPartner().isEmpty());
                 r->addDecodedText("093830  -9  0.1 1800 ~  M0OML OK1XYZ JO70\n"); step("QSO pane: after the QSO, a new call shows again", r->qsoPaneText().contains("OK1XYZ JO70"));
+                step("auto mode: the next waiting caller is OK1XYZ", r->nextCaller({}).first == "OK1XYZ" && r->nextCaller({"OK1XYZ"}).first.isEmpty() == !r->callersText().contains("CALL"));
+                clk += 3 * 15000; r->tickCallers(); step("QSO pane: the finished QSO is still there, fading", r->qsoPaneText().contains("DK0ULR -10"));
+                clk += 4 * 15000; r->tickCallers();
+                step("QSO pane: after 6 FT8 cycles the finished QSO is gone, the newer line stays", !r->qsoPaneText().contains("DK0ULR") && r->qsoPaneText().contains("OK1XYZ JO70"));
                 r->clearQso();
             }
             r->setCallersClockForTests({}); r->setDecoderIndex(4); r->clearDecoded(); lp->clearForm();   // (the Log tab entry was filled by those callers)
@@ -620,6 +624,7 @@ int main(int argc, char** argv) {
                              count(1249) == 2 && count(1248) == 2 && count(1250) == 2 && count(1296) == 2 && count(1292) == mox0 && !w.simRadio()->keyed
                              && tc->statusLabel()->text().contains("S-meter check"));
                     }
+                    tc->ftPowerBox()->setValue(5);                                                   // the sends below at 5 W (the default is 20 W)
                     {   // FT4: a queued send goes out in its slot; a queued one is cancelled by Stop without keying
                         const auto modes = tc->digitalPart()->findChildren<QComboBox*>(); for (auto* c : modes) if (c->count() == 2 && c->itemText(0) == "FT8") c->setCurrentIndex(1);
                         const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();

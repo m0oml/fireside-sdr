@@ -299,6 +299,11 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
             worker_running_ = false;
             const QString rxnote = resumeReceive(); { QSignalBlocker b(arm_); arm_->setChecked(tx_ && tx_->armed()); }   // a refused arm springs back
             const bool sent_ok = res.endsWith(" #sent");
+            if (!sent_ok && fireside::txc::TxControl::is_safety_stop(res.toStdString())) {     // a safety stop ends the sequence and any repeat: nothing is retried by itself
+                { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } ft_timer_->stop(); ft_pending_.reset();
+                follow_pending_ = false; auto_tried_.clear(); from_cq_ = false; if (seq_) seq_->stop();
+                res += "  Stopped: nothing is retried after a safety stop.";
+            }
             if (sent_ok) takeLog();                                                                  // the over that completed a QSO has gone out: log it
             noteSeqEnd();
             const bool resend = (sent_ok && ft_repeat_->isChecked() && !(seq_ && seq_->stage() != fireside::seq::Stage::Idle)) || (seq_ && seq_->active() && !res.startsWith("Not sent"));

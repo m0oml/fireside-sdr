@@ -549,11 +549,16 @@ TEST(ft_closed_loop_raises_a_low_drive_and_the_gate_stops_a_dangerous_one) {
         auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, true, tx::Parity::Odd, 5.0, o);
         CHECK(res.sent); CHECK_NEAR(res.mean_fwd_w, 5.0, 0.6); CHECK(r.tx->k_for(5) < 20000 && r.tx->k_for(5) > 11150 * 0.95);
     }
-    {   // the level reads 1.7 x too low: the first reading is ~8.6 W for a 5 W over (limit 7.5 W): the gate unkeys at once, nothing learned
+    {   // the level reads 1.7 x too low: full drive would be ~8.6 W for a 5 W over (limit 7.5 W); the soft start (3 dB low) begins at ~4.3 W and the loop trims to 5 W
         double slot = 0; FtRig r(utc_before_slot(7.5, tx::Parity::Odd, 8.0, &slot)); r.tx->set_k(5, 6500); txc::Options o;
         auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, true, tx::Parity::Odd, 5.0, o);
+        CHECK(res.sent); CHECK_NEAR(res.mean_fwd_w, 5.0, 0.6); CHECK(res.max_fwd_w < 7.5);
+    }
+    {   // the level reads 5.6 x too low: even 3 dB low the over starts at ~14 W (limit 7.5 W): sustained, so the gate unkeys after its 0.15 s grace, nothing learned
+        double slot = 0; FtRig r(utc_before_slot(7.5, tx::Parity::Odd, 8.0, &slot)); r.tx->set_k(5, 2000); txc::Options o;
+        auto res = r.tx->send_ft(14.080, "CQ M0OML IO91", 1500, true, tx::Parity::Odd, 5.0, o);
         CHECK(!res.sent); CHECK(!r.sim.keyed); CHECK_EQ(r.mox_writes(), size_t(2)); CHECK(res.stop.find("forward") != std::string::npos);
-        CHECK_NEAR(r.tx->k_for(5), 6500, 1e-9);
+        CHECK_NEAR(r.tx->k_for(5), 2000, 1e-9);
         // and it was short: keyed for well under a second of the over
         double keyed_s = 0; for (auto& m : r.marks) if (m.first > res.slot_utc && m.second < r.iq.size() && std::abs(r.iq[m.second]) > 0) keyed_s = m.first - res.slot_utc;
         if (!(keyed_s < 1.5)) std::printf("  keyed %.2f s, stop %s, max %.1f W\n", keyed_s, res.stop.c_str(), res.max_fwd_w); CHECK(keyed_s < 1.5);
@@ -788,4 +793,30 @@ TEST(signal_generator_check_is_receive_only_and_always_switches_the_relays_back)
     // full duplex is gated to 0 / 1 only
     Safety s; s.allow_write = true; s.permit("RDAL_OP_SET_FULL_DUPLEX"); const OpInfo* fd = find_opcode("RDAL_OP_SET_FULL_DUPLEX");
     s.check_write(*fd, 1, 0); s.check_write(*fd, 0, 0); CHECK_THROWS(s.check_write(*fd, 2, 0), SafetyError); CHECK_THROWS(s.check_write(*fd, 1, 1), SafetyError);
+}
+TEST(gate_rides_out_a_brief_overshoot_but_not_a_sustained_one_or_a_hard_excess) {
+    auto rd = [](double f, double rv = 0.1) { txm::Reading x; x.fwd_w = f; x.rev_w = rv; x.swr = 1.2; return x; };
+    GateConfig c; c.max_key_s = 15; c.max_fwd_w = 15; c.max_rev_w = 5; c.max_swr = 3; c.grace_s = 0.15; c.hard_fwd_w = 30;
+    {   // a key-down overshoot of two readings: ridden out
+        Rig r; TxGate g(r.fx, c, r.clk.clock()); g.arm(); CHECK(g.key("t", 15));
+        g.report(rd(15.9)); r.clk.t += 0.05; g.report(rd(16.5)); r.clk.t += 0.05; g.report(rd(10.0)); r.clk.t += 0.05; g.report(rd(10.0));
+        CHECK(g.keyed()); g.unkey("done");
+    }
+    {   // sustained: unkeys once it has lasted 0.15 s
+        Rig r; TxGate g(r.fx, c, r.clk.clock()); g.arm(); CHECK(g.key("t", 15));
+        g.report(rd(20)); CHECK(g.keyed()); r.clk.t += 0.1; g.report(rd(20)); CHECK(g.keyed()); r.clk.t += 0.06; g.report(rd(20));
+        CHECK(!g.keyed()); CHECK(g.last_unkey_reason().find("forward power 20.0 W above the 15.0 W limit") != std::string::npos);
+    }
+    {   // above the hard limit: at once, no grace
+        Rig r; TxGate g(r.fx, c, r.clk.clock()); g.arm(); CHECK(g.key("t", 15));
+        g.report(rd(31)); CHECK(!g.keyed()); CHECK(g.last_unkey_reason().find("30.0 W limit") != std::string::npos);
+    }
+    {   // reflected power and SWR get the same short grace
+        Rig r; TxGate g(r.fx, c, r.clk.clock()); g.arm(); CHECK(g.key("t", 15));
+        g.report(rd(10, 6)); CHECK(g.keyed()); r.clk.t += 0.2; g.report(rd(10, 6)); CHECK(!g.keyed());
+    }
+    {   // grace 0 (tunes, drive ramps): the first reading over unkeys, as before
+        GateConfig c0 = c; c0.grace_s = 0; Rig r; TxGate g(r.fx, c0, r.clk.clock()); g.arm(); CHECK(g.key("t", 15));
+        g.report(rd(15.5)); CHECK(!g.keyed());
+    }
 }

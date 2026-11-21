@@ -16,6 +16,7 @@
 #include "fireside/tx_render.h"
 
 namespace fireside::txc {
+constexpr double kOverGraceS = 0.15;           // FT8/FT4, voice and other programs: how long a reading may sit above a limit (two or three readings) before unkeying
 bool TxControl::is_safety_stop(const std::string& r) {
     for (const char* k : {" above ", "time limit", "FAILED", " failed", "under 5 mW", "refused the key"}) if (r.find(k) != std::string::npos) return true;
     return false;                                     // "ramp finished", "over finished", "tune finished", "PTT released", "aborted", ...: normal ends
@@ -280,6 +281,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     r.slot_utc = plan.slot.start_utc; r.late_s = plan.skip_s;
     if (o.tx_ant < 1 || o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
     prepare(mhz, 1, o.tx_ant);                                    // USB, TX DDS on the dial
+    drive /= std::sqrt(2.0);                                       // soft start: 3 dB low, the loop below brings it up to the set power within about 0.7 s
     txo::ToneSource src(o.rate, 8); src.set_cap(std::min(dcap, drive_max * 1.1)); src.set_target(drive); src.set_mirror(o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_buffer(std::move(buf));
     txo::Stream st(pcm_(o.rate), src);
@@ -289,6 +291,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     if (abort_) { r.stop = "aborted before keying"; return r; }
     if (st.failed()) return no("the I/Q stream failed to start");
     GateConfig gc; gc.max_key_s = slot_len; gc.max_fwd_w = std::max(2.0, 1.5 * power_w); gc.max_rev_w = std::max(2.0, 0.5 * power_w); gc.max_swr = 3.0;
+    gc.grace_s = kOverGraceS; gc.hard_fwd_w = std::max(6.0, 3.0 * power_w);           // a key-down overshoot is ridden out for 0.15 s; 3 x the set power never
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
     if (!gate.key(std::string(ft4 ? "FT4 " : "FT8 ") + text, gc.max_key_s, &why)) { note_stop(why); return no(why); }
@@ -370,6 +373,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     if (st.failed()) return no("the I/Q stream failed to start");
     if (!ptt()) { r.stop = "PTT released before keying"; return r; }
     GateConfig gc; gc.max_key_s = v.max_key_s; gc.max_fwd_w = 1.5 * peak_w; gc.max_rev_w = std::max(2.0, 0.5 * peak_w); gc.max_swr = 3.0;
+    gc.grace_s = kOverGraceS; gc.hard_fwd_w = std::max(6.0, 3.0 * peak_w);            // as FT8: a key-down overshoot (a data program's tone starts hard) is ridden out, 3 x never
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
     if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) { note_stop(why); return no(why); }

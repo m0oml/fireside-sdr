@@ -634,6 +634,18 @@ int main(int argc, char** argv) {
                         step("FT4 send queued", tc->sendQueued());
                         for (int i = 0; i < 900 && (tc->sendQueued() || tc->busy() || tc->statusLabel()->text().endsWith("...")); ++i) pump(1);
                         step("FT4 over sent on the simulated radio", tc->statusLabel()->text().contains("FT4 sent") && count(1292) == mox + 2 && !w.simRadio()->keyed);
+                        {   // a safety stop during a CQ: the sequence ends, nothing is queued again by itself
+                            auto* sim = w.simRadio(); const bool pl = sim->pa_from_level; const auto af = sim->adc_fwd, ar = sim->adc_rev;
+                            sim->pa_from_level = false; sim->adc_fwd = 966; sim->adc_rev = 238;                  // the meter reads far above 5 W
+                            const double now2 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+                            const long long i2 = (long long)std::floor(now2 / 7.5) + ((std::fmod(now2, 7.5) > 5.0) ? 2 : 1); tc->parityBox()->setCurrentIndex(int(i2 % 2));
+                            const size_t mox5 = count(1292); tc->cqButton()->click(); pump(2);
+                            for (int i = 0; i < 900 && (tc->sendQueued() || tc->busy() || tc->statusLabel()->text().endsWith("...")); ++i) pump(1);
+                            pump(20);
+                            step("a safety stop during CQ: keyed once, then nothing queued or keyed again", count(1292) == mox5 + 2 && !tc->sendQueued() && !tc->busy() && !sim->keyed
+                                 && tc->statusLabel()->text().contains("nothing is retried"));
+                            sim->pa_from_level = pl; sim->adc_fwd = af; sim->adc_rev = ar;
+                        }
                         const size_t mox2 = count(1292); tc->sendButton()->click(); pump(2);
                         QPushButton* stopb = nullptr; for (auto* b : tc->digitalPart()->findChildren<QPushButton*>()) if (b->text() == "Stop") stopb = b;
                         if (stopb) stopb->click();

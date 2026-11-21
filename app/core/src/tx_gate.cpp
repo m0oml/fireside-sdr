@@ -17,7 +17,7 @@ bool TxGate::key(const std::string& purpose, double max_s, std::string* why_not)
     if (!(max_s > 0)) return refuse("no key-down time given");
     Safety& s = fx_.safety();
     had_permit_ = s.permitted(kMox); s.permit(kMox); s.set_tx_grant(true);
-    keyed_ = true; deadline_ = clk_.now() + std::min(max_s, cfg_.max_key_s);   // marked keyed BEFORE sending: if the send half-works, unkey still runs
+    keyed_ = true; deadline_ = clk_.now() + std::min(max_s, cfg_.max_key_s); fwd_since_ = rev_since_ = swr_since_ = -1;   // marked keyed BEFORE sending: if the send half-works, unkey still runs
     try { fx_.set(kMox, 1, 0); fx_.sync(); }                      // wait until the firmware has taken it (a write is otherwise unacknowledged)
     catch (const std::exception& e) { unkey(std::string("key failed: ") + e.what()); return refuse(std::string("the radio refused the key: ") + e.what()); }
     note("KEY " + purpose); return true;
@@ -40,9 +40,12 @@ void TxGate::tick() { if (keyed_ && clk_.now() >= deadline_) unkey("key-down tim
 
 void TxGate::report(const txm::Reading& r) {
     if (!keyed_) return;
-    if (r.fwd_w > cfg_.max_fwd_w) { char b[96]; std::snprintf(b, sizeof b, "forward power %.1f W above the %.1f W limit", r.fwd_w, cfg_.max_fwd_w); unkey(b); return; }
-    if (r.rev_w > cfg_.max_rev_w) { char b[96]; std::snprintf(b, sizeof b, "reflected power %.1f W above the %.1f W limit", r.rev_w, cfg_.max_rev_w); unkey(b); return; }
-    if (r.swr && r.fwd_w >= cfg_.swr_min_fwd_w && *r.swr > cfg_.max_swr) { char b[96]; std::snprintf(b, sizeof b, "SWR %.1f above the %.1f limit", *r.swr, cfg_.max_swr); unkey(b); }
+    if (r.fwd_w > cfg_.hard_fwd_w) { char b[112]; std::snprintf(b, sizeof b, "forward power %.1f W above the %.1f W limit", r.fwd_w, cfg_.hard_fwd_w); unkey(b); return; }   // never ridden out
+    const double now = clk_.now();
+    auto over = [&](bool cond, double& since) { if (!cond) { since = -1; return false; } if (since < 0) since = now; return now - since >= cfg_.grace_s; };   // over the limit for grace_s (0: at once)
+    if (over(r.fwd_w > cfg_.max_fwd_w, fwd_since_)) { char b[96]; std::snprintf(b, sizeof b, "forward power %.1f W above the %.1f W limit", r.fwd_w, cfg_.max_fwd_w); unkey(b); return; }
+    if (over(r.rev_w > cfg_.max_rev_w, rev_since_)) { char b[96]; std::snprintf(b, sizeof b, "reflected power %.1f W above the %.1f W limit", r.rev_w, cfg_.max_rev_w); unkey(b); return; }
+    if (over(r.swr && r.fwd_w >= cfg_.swr_min_fwd_w && *r.swr > cfg_.max_swr, swr_since_)) { char b[96]; std::snprintf(b, sizeof b, "SWR %.1f above the %.1f limit", *r.swr, cfg_.max_swr); unkey(b); }
 }
 
 std::optional<atu::Atu::TuneOutcome> run_atu_tune(TxGate& gate, atu::Atu& atu, const txm::PaCal& cal, int band, double threshold, bool full,

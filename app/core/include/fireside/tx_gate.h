@@ -20,6 +20,9 @@ struct GateConfig {
     double max_fwd_w = 20.0;                                      // unkey above this forward power (PowerSDR tunes at 15 W)
     double max_swr = 5.0, swr_min_fwd_w = 2.0;                    // unkey above this SWR once forward power is at least swr_min_fwd_w
     double max_rev_w = 1e9;                                       // unkey above this reflected power (used during ATU tunes, where SWR is no guide)
+    // A limit above (forward, reflected, SWR) must last this long before the gate unkeys: a key-down overshoot of a reading or two is ridden out
+    // (0 = at the first reading over, as for tunes and drive ramps). hard_fwd_w is never ridden out: above it, unkey at the first reading.
+    double grace_s = 0.0, hard_fwd_w = 1e9;
 };
 
 class TxGate {
@@ -43,7 +46,7 @@ public:
     Flex& flex() { return fx_; }
 private:
     Flex& fx_; GateConfig cfg_; atu::Clock clk_;
-    bool armed_ = false, keyed_ = false, had_permit_ = false, unkey_failed_ = false; double deadline_ = 0; std::string last_reason_; std::vector<std::string> log_;
+    bool armed_ = false, keyed_ = false, had_permit_ = false, unkey_failed_ = false; double deadline_ = 0, fwd_since_ = -1, rev_since_ = -1, swr_since_ = -1; std::string last_reason_; std::vector<std::string> log_;
     void note(const std::string& s);
 };
 

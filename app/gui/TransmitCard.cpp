@@ -395,6 +395,8 @@ void TransmitCard::heardLine(const QString& line) {
         if (!seq_->current().empty()) ft_msg_->setText(QString::fromStdString(seq_->current()));
         report(QString::fromStdString(seq_->describe()) + (seq_->current().empty() ? QString() : QString(": next ") + QString::fromStdString(seq_->current())));
         if (!seq_->active()) { takeLog(); if (!ft_pending_ && !worker_running_) { ft_timer_->stop(); updateButtons(); } }
+        else if (seq_->stage() == fireside::seq::Stage::SentRR73 && seq_->tries() == 0 && !ft_pending_ && !worker_running_ && auto_seq_->isChecked())
+            queueSend();                                                                  // they repeated their R-report after we had stopped: RR73 once more
     }
 }
 void TransmitCard::takeLog() {

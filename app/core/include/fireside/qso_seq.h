@@ -44,7 +44,7 @@ public:
     std::string describe() const;         // one line for the status: "QSO DK0ULR: sent R-08, rcvd -12 (waiting for RR73)"
     int tries() const { return tries_; }
 private:
-    std::string me_, grid_, dx_, dx_grid_, sent_, rcvd_, msg_; Stage st_ = Stage::Idle; int max_tries_, tries_ = 0; bool log_due_ = false, logged_ = false, last_send_ = false;
+    std::string me_, grid_, dx_, dx_grid_, sent_, rcvd_, msg_; Stage st_ = Stage::Idle; int max_tries_, tries_ = 0; bool log_due_ = false, logged_ = false, last_send_ = false, again_ = false, rr73_done_ = false; int reopened_ = 0;
     void set(Stage s, std::string m);
     bool to_me(const Heard& h) const;
 };

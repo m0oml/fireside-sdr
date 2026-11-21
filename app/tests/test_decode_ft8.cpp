@@ -280,3 +280,23 @@ TEST(portable_callsigns_decode_in_cq_and_replies_in_ft4_and_ft8) {
         CHECK(ok4); CHECK(ok8);
     }
 }
+
+TEST(ft8_quick_pass_before_our_over_finds_a_weak_answer_at_the_callers_frequency) {
+    // A weak "R-report" to us at 2254 Hz: the quick pass before our next over (peek, one pass) misses many of these; told where the caller is,
+    // it runs the deep stage (with a-priori decoding of messages to us) there and should find more, in about the same time.
+    const std::string msg = "M0OML LY3CY R-16"; int plain = 0, focused = 0; double t_plain = 0, t_focus = 0; const int kTrials = 12;
+    for (int k = 0; k < kTrials; ++k) {
+        const double snr_db = -19.0 - 0.25 * (k % 4);
+        const double s = std::sqrt(0.045 / (std::pow(10.0, snr_db / 10.0) * 2500.0 / 24000.0));
+        auto slot = synth_ft8(msg, 2254, 48000, 0.3, 0.5); add_noise(slot, s, 100 + uint32_t(k)); slot.resize(size_t(48000 * 14.5));
+        for (int f = 0; f < 2; ++f) {
+            Ft8Options o; o.my_call = "M0OML"; Ft8Decoder d(o); std::string out;
+            if (f) d.set_focus({2254.0});
+            for (size_t i = 0; i < slot.size(); i += 4800) d.process(slot.data() + i, std::min<size_t>(4800, slot.size() - i), out);
+            const auto t0 = std::chrono::steady_clock::now(); d.peek(out); const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            (f ? t_focus : t_plain) += dt; if (has(out, msg)) ++(f ? focused : plain);
+        }
+    }
+    std::printf("  weak answer before our over: plain quick %d/%d (%.2f s each), focused %d/%d (%.2f s each)\n", plain, kTrials, t_plain / kTrials, focused, kTrials, t_focus / kTrials);
+    CHECK(focused >= plain); CHECK(focused > plain); CHECK(t_focus / kTrials < 1.5);
+}

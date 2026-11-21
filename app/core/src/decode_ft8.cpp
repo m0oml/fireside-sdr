@@ -300,6 +300,7 @@ bool location_plausible(const char* text) {
 // A decoded message gives the exact tones sent, so its waveform can be rebuilt, fitted to the audio and subtracted; signals underneath it
 // (overlapping in time and frequency on a busy band) then decode in the next pass.
 constexpr int kPasses = 3;
+constexpr double kFocusHz = 20.0;            // quick pass: the deep stage (with a-priori decoding of messages to us) within this of a station calling us
 // Weak (OSD / deep) decodes of message types other than standard and non-standard calls (contest forms, DXpedition, telemetry, free text) were ALL false in 12000 noise slots
 // (18 of 18, 18..31 hard errors) and none of 230 genuine weak decodes on the air was one: they need hard errors <= 17. A weak "/P" message (type 2: 3 false in noise with 24..26 hard
 // errors; the genuine one seen had 18; before this the whole type was refused, which also threw away genuine portable stations) needs <= 21.
@@ -376,7 +377,8 @@ void subtract(float* x, long n, const Waveform& w, const Fit& f) {
     }
 }
 
-std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable& tab, const std::string& label, bool ft4, const std::string& my_call, bool quick = false) {   // quick: one pass, no deep stage (the strong messages, fast)
+std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable& tab, const std::string& label, bool ft4, const std::string& my_call, bool quick = false,
+                                         const std::vector<double>& focus = {}) {   // focus: in a quick pass, the deep stage still runs within kFocusHz of these audio frequencies (stations calling us)   // quick: one pass, no deep stage (the strong messages, fast)
     const ApBits ap = make_ap(my_call); static const bool dbg_drop = std::getenv("FT8_DEBUG_DROP") != nullptr, no_deep4 = std::getenv("FT8_NO_DEEP4") != nullptr;   // FT8_NO_DEEP4=1: FT4 without the deep stage (to compare)      // FT8_DEBUG_DROP=1: say why a decoded message was thrown away
     std::vector<Ft8Message> out; const size_t kSlot = size_t((ft4 ? FT4_SLOT_TIME : FT8_SLOT_TIME) * kRate);
     std::vector<float> resid(audio, audio + n); if (resid.size() < kSlot) resid.resize(kSlot, 0.0f);     // decoded signals are subtracted from this copy
@@ -395,7 +397,8 @@ std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable
                 bool got = kOsdSums != 0 && decode_fallback(&mon.wf, c, ft4, &msg);
                 const double fc = (mon.min_bin + c->freq_offset + double(c->freq_sub) / mon.wf.freq_osr) / mon.symbol_period;
                 const bool tried = ft4 && std::any_of(deep_f.begin(), deep_f.end(), [&](double f) { return std::fabs(f - fc) < 2.0; });   // FT4 searches all times: once per frequency is enough
-                if (!got && kDeep && !quick && (!ft4 || !no_deep4) && !tried) {                             // WSJT-X's deep stage (FT8: ft8b.f90; FT4: ft4_decode.f90)
+                const bool near_focus = std::any_of(focus.begin(), focus.end(), [&](double f) { return std::fabs(f - fc) < kFocusHz; });
+                if (!got && kDeep && (!quick || near_focus) && (!ft4 || !no_deep4) && !tried) {                             // WSJT-X's deep stage (FT8: ft8b.f90; FT4: ft4_decode.f90)
                     if (ft4) deep_f.push_back(fc);
                     if (!spec) spec = std::make_unique<demod::SlotSpectrum>(resid.data(), resid.size(), ft4);
                     const double f0 = (mon.min_bin + c->freq_offset + double(c->freq_sub) / mon.wf.freq_osr) / mon.symbol_period;
@@ -472,7 +475,7 @@ constexpr double kLateJoinS = 0.4;           // a stream (re)starting this far i
 struct Ft8Decoder::Impl {
     Ft8Options o; std::unique_ptr<fireside::dsp::RationalResampler> rs;
     std::vector<float> slot; size_t fill = 0; long skip = -1; bool started = false; long slot_index = 0; double t0_utc = 0;   // skip: 12 kHz samples to discard until the first slot boundary
-    std::vector<std::string> peeked; long peeked_slot = -1; HashTable tab; std::thread job; std::atomic<bool> running{false}; std::atomic<double> last_decode_s{0}, last_quick_s{0}; std::mutex m; std::vector<Ft8Message> results; std::string last; size_t decoded_total = 0; std::vector<fireside::dsp::cf> tmp_in, tmp_out;
+    std::vector<std::string> peeked; long peeked_slot = -1; HashTable tab; std::thread job; std::atomic<bool> running{false}; std::atomic<double> last_decode_s{0}, last_quick_s{0}; std::vector<double> focus; std::mutex fm; std::vector<double> get_focus() { std::lock_guard<std::mutex> l(fm); return focus; } std::mutex m; std::vector<Ft8Message> results; std::string last; size_t decoded_total = 0; std::vector<fireside::dsp::cf> tmp_in, tmp_out;
     double slot_s() const { return o.ft4 ? double(FT4_SLOT_TIME) : double(FT8_SLOT_TIME); }
     size_t slot_len() const { return size_t(slot_s() * kRate); }
     explicit Impl(Ft8Options op) : o(op) { reset_state(); }
@@ -513,6 +516,7 @@ struct Ft8Decoder::Impl {
 Ft8Decoder::Ft8Decoder(Ft8Options o) : p_(std::make_unique<Impl>(o)) {}
 Ft8Decoder::~Ft8Decoder() { p_->join(); }
 void Ft8Decoder::process(const float* a, size_t n, std::string& out) { p_->audio(a, n, out); }
+void Ft8Decoder::set_focus(const std::vector<double>& hz) { std::lock_guard<std::mutex> l(p_->fm); p_->focus = hz; }
 void Ft8Decoder::reset() { p_->reset_state(); }
 void Ft8Decoder::peek(std::string& out) {
     auto& p = *p_; p.join();
@@ -521,7 +525,7 @@ void Ft8Decoder::peek(std::string& out) {
     if (!(p.started && p.skip <= 0 && double(p.fill) / kRate >= sig_end) || p.peeked_slot == p.slot_index) return;   // once per slot
     std::vector<float> copy = p.slot; std::fill(copy.begin() + long(p.fill), copy.end(), 0.0f);
     const auto t0 = std::chrono::steady_clock::now();
-    auto quick = decode_slot_with(copy.data(), copy.size(), p.tab, p.label_for(p.slot_index), p.o.ft4, p.o.my_call, true);
+    auto quick = decode_slot_with(copy.data(), copy.size(), p.tab, p.label_for(p.slot_index), p.o.ft4, p.o.my_call, true, p.get_focus());
     p.last_quick_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     p.peeked.clear(); p.peeked_slot = p.slot_index;
     for (auto& r : quick) { const std::string line = Ft8Decoder::format(r); out += line; p.last = line; ++p.decoded_total; p.peeked.push_back(r.text); }
@@ -535,7 +539,7 @@ void Ft8Decoder::finish(std::string& out) {
     std::vector<float> copy = p.slot; const std::string label = p.label_for(p.slot_index++);
     // quick first (one pass, no deep stage: ~0.3 s): an answer to us must be known before our slot starts; the full decode follows in the background
     const auto t0 = std::chrono::steady_clock::now();
-    auto quick = decode_slot_with(copy.data(), copy.size(), p.tab, label, p.o.ft4, p.o.my_call, true);
+    auto quick = decode_slot_with(copy.data(), copy.size(), p.tab, label, p.o.ft4, p.o.my_call, true, p.get_focus());
     p.last_quick_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::vector<std::string> seen; for (auto& r : quick) { const std::string line = Ft8Decoder::format(r); out += line; p.last = line; ++p.decoded_total; seen.push_back(r.text); }
     if (p.o.late_lines) {                                                               // the weak ones: later, through the callback (this decoder may be gone by then)

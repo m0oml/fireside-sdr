@@ -777,6 +777,23 @@ void ReceiverPanel::rebuildDecoder() {
                   decode::Ft8Options o; o.ft4 = true; o.wall_clock = engine_.status().live; engine_.set_decoder(std::make_unique<decode::Ft8Decoder>(o)); break; }
         default: engine_.set_decoder(nullptr);
     }
+    pushFocus();                                                                          // a new decoder: tell it where the stations calling us are
+}
+void ReceiverPanel::noteFocus(const QString& call, const QString& line) {     // a station calling us: its audio frequency (the decoder line's 4th field)
+    const QStringList f = line.split(' ', Qt::SkipEmptyParts); if (f.size() < 4 || call.isEmpty()) return;
+    bool ok = false; const double hz = f[3].toDouble(&ok); if (!ok || hz < 100 || hz > 4000) return;
+    focus_[call] = {hz, QDateTime::currentMSecsSinceEpoch()}; pushFocus();
+}
+std::vector<double> ReceiverPanel::decoderFocus() const {
+    std::vector<double> v; const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (!qso_partner_.isEmpty() && focus_.contains(qso_partner_)) v.push_back(focus_[qso_partner_].first);   // the partner first
+    for (auto it = focus_.begin(); it != focus_.end(); ++it) if (it.key() != qso_partner_ && now - it.value().second < 180000 && v.size() < 6) v.push_back(it.value().first);
+    return v;
+}
+void ReceiverPanel::pushFocus() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (auto it = focus_.begin(); it != focus_.end();) { if (it.key() != qso_partner_ && now - it.value().second >= 180000) it = focus_.erase(it); else ++it; }   // 3 minutes, the partner kept
+    engine_.set_decoder_focus(decoderFocus());
 }
 
 // ---------------------------------------------------------------- audio output: PC sound or the radio's jacks
@@ -886,6 +903,7 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
             const QString fb = QString::fromStdString(fireside::qrz::base_call(m.from));
             // the QSO pane: what is addressed to us and our own overs; during a QSO only the partner's (anyone else calling waits in the callers area)
             if (qso_partner_.isEmpty() || fb == qso_partner_) addQsoLine(shown, 1);
+            noteFocus(fb, shown);                                                 // the quick decode before our next over looks harder at its frequency
             if (!fb.isEmpty() && fb != qso_partner_) addCaller(fb, shown);         // someone new calling us: kept in the callers area until answered (the partner's replies are in the QSO pane)
         }
     }
@@ -951,7 +969,7 @@ void ReceiverPanel::clearQso() { if (qso_text_) qso_text_->clear(); qso_partner_
 void ReceiverPanel::setQsoPartner(const QString& call) {
     const QString b = QString::fromStdString(fireside::qrz::base_call(call.toStdString()));
     if (b == qso_partner_) return;
-    qso_partner_ = b; removeCaller(b);                                         // replying to a caller answers them
+    qso_partner_ = b; removeCaller(b); pushFocus();                            // replying to a caller answers them; the partner's frequency goes first
     if (!b.isEmpty() && qso_text_) { qso_text_->moveCursor(QTextCursor::End); QTextCursor c = qso_text_->textCursor(); if (!qso_text_->document()->isEmpty()) c.insertBlock();
         QTextCharFormat f; f.setForeground(QColor("#8b93a7")); c.setBlockFormat(QTextBlockFormat()); c.insertText(QString::fromUtf8("\u2500\u2500 QSO with %1 \u2500\u2500").arg(b), f); qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
 }

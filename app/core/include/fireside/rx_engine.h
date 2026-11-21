@@ -51,6 +51,7 @@ public:
     void set_decoder(std::unique_ptr<decode::TextDecoder> d);
     size_t take_text(std::string& out);
     void finish_decoder();
+    void set_decoder_focus(const std::vector<double>& audio_hz);   // FT8/FT4: where stations calling us are (see Ft8Decoder::set_focus)
     void peek_decoder();                                  // duplex: the decoder looks at the slot so far without stopping (FT8/FT4 quick pass); then take_text()                                // receive is about to stop: the decoder decodes what it can now (FT8/FT4: the slot so far); then take_text()                   // appends the decoded text since the last call; returns the character count
     void with_source(const std::function<void(IqSource*)>& fn);
     RxStatus status() const;

@@ -45,13 +45,13 @@ Heard parse(const std::string& text, int snr) {
 
 Sequencer::Sequencer(std::string my_call, std::string my_grid4, int max_tries) : me_(upper(std::move(my_call))), grid_(upper(std::move(my_grid4)).substr(0, 4)), max_tries_(max_tries) {}
 bool Sequencer::to_me(const Heard& h) const { return !h.cq && base(h.to) == base(me_); }
-void Sequencer::set(Stage s, std::string m) { st_ = s; msg_ = std::move(m); tries_ = 0; }
+void Sequencer::set(Stage s, std::string m) { st_ = s; msg_ = std::move(m); tries_ = 0; again_ = false; }
 void Sequencer::stop() { st_ = Stage::Idle; msg_.clear(); tries_ = 0; }
-void Sequencer::call_cq() { dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; set(Stage::Cq, "CQ " + me_ + " " + grid_); }
+void Sequencer::call_cq() { dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; rr73_done_ = false; reopened_ = 0; set(Stage::Cq, "CQ " + me_ + " " + grid_); }
 
 bool Sequencer::reply_to(const Heard& h) {
     if (!h.ok || h.from.empty() || base(h.from) == base(me_)) return false;
-    dx_ = h.from; dx_grid_ = h.grid; sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; last_send_ = false;
+    dx_ = h.from; dx_grid_ = h.grid; sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; last_send_ = false; rr73_done_ = false; reopened_ = 0;
     const std::string pre = dx_ + " " + me_ + " ";
     if (h.cq || !to_me(h)) { set(Stage::CalledDx, pre + grid_); return true; }                     // their CQ, or they are working someone else: call them
     if (h.rr73 || h.rrr) { set(Stage::Sent73, pre + "73"); last_send_ = true; log_due_ = true; return true; }   // late double-click: finish politely
@@ -64,6 +64,9 @@ bool Sequencer::reply_to(const Heard& h) {
 bool Sequencer::heard(const Heard& h) {
     if (!h.ok || !to_me(h)) return false;
     if (st_ == Stage::Cq) { return reply_to(h); }                                                    // someone answered our CQ: they become DX
+    // RR73 went out and nothing came back in time, so we stopped; their R-report again a little later (they missed it): RR73 once more (twice at most)
+    if (st_ == Stage::Done && rr73_done_ && reopened_ < 2 && base(h.from) == base(dx_) && (h.r_report || !h.report.empty())) {
+        ++reopened_; set(Stage::SentRR73, dx_ + " " + me_ + " RR73"); return true; }
     if (!active() && st_ != Stage::Sent73) return false;
     if (base(h.from) != base(dx_)) return false;                                                     // someone else calling: not now
     if (!h.grid.empty()) dx_grid_ = h.grid;
@@ -85,7 +88,8 @@ bool Sequencer::heard(const Heard& h) {
             return false;                                                                            // their report again: ours again
         case Stage::SentRR73:
             if (h.seventy3 || h.rr73) { st_ = Stage::Done; msg_.clear(); return true; }               // they confirmed: nothing more to send
-            return false;                                                                            // their R-report again: RR73 again
+            if (h.r_report || !h.report.empty()) { again_ = true; return true; }                     // their R-report again (they missed our RR73): RR73 again
+            return false;
         case Stage::Sent73:
             if (h.rr73 || h.rrr) return false;                                                       // they did not hear our 73 yet: send it again
             return false;
@@ -96,6 +100,10 @@ bool Sequencer::heard(const Heard& h) {
 std::string Sequencer::next_message() {
     if (!active()) return "";
     if (st_ == Stage::Sent73 && tries_ >= 1 && last_send_) { st_ = Stage::Done; msg_.clear(); return ""; }   // 73 goes out once (WSJT-X does the same)
+    if (st_ == Stage::SentRR73 && tries_ >= 1) {                                                   // RR73 goes out again only when they repeat their R-report (WSJT-X)
+        if (!again_) { st_ = Stage::Done; rr73_done_ = true; msg_.clear(); return ""; }
+        again_ = false; if (tries_ >= max_tries_) { st_ = Stage::Done; rr73_done_ = true; msg_.clear(); return ""; }
+    }
     if (tries_ >= (st_ == Stage::Cq ? std::max(12, max_tries_) : max_tries_)) { st_ = Stage::GaveUp; return ""; }   // CQ: up to 12 overs (6 min of FT8, like WSJT-X's watchdog)
     ++tries_;
     return msg_;

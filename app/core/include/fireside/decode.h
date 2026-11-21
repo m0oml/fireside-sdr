@@ -16,6 +16,7 @@ public:
     virtual std::string status() const = 0;                                      // one line for the UI, e.g. "18 WPM, 702 Hz"
     virtual void reset() = 0;
     virtual void finish(std::string& /*out*/) {}
+    virtual void set_focus(const std::vector<double>& /*audio_hz*/) {}            // FT8/FT4: where stations calling us are; their quick pass looks harder there
     virtual void peek(std::string& /*out*/) {}                                    // receive keeps running, we transmit next: decode what can be now, change nothing                                  // the audio stops now (receive paused for a transmission): decode what can be, wait, append it
 };
 
@@ -106,6 +107,9 @@ public:
     // Duplex (receive does not pause for our over): a quick pass over the slot so far (as finish), leaving the slot to fill on; its full decode
     // at the end then adds only the lines the quick pass did not already give.
     void peek(std::string& out) override;
+    // Audio frequencies (Hz) of stations calling us (the QSO partner first): the quick pass before our over also runs the deep stage, with
+    // a-priori decoding of messages to my_call, within 20 Hz of them, so a weak answer is known in time. Thread-safe.
+    void set_focus(const std::vector<double>& audio_hz) override;
     std::string status() const override;
     void reset() override;
     bool busy() const;                                        // a slot is being decoded on the background thread (its lines arrive in the next process() call after it finishes)

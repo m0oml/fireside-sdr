@@ -35,8 +35,13 @@ TEST(seq_calls_cq_and_works_the_first_caller) {
     CHECK(!s.heard(H("M0OML OH2XYZ KP20")));                                         // a second caller waits
     CHECK(s.heard(H("M0OML SP9ABC R-09"))); CHECK_EQ(s.next_message(), std::string("SP9ABC M0OML RR73"));
     auto l = s.take_log(); CHECK(l && l->rst_sent == "-14" && l->rst_rcvd == "-09" && l->grid == "KN09");   // logged when RR73 goes out
-    CHECK(!s.heard(H("M0OML SP9ABC R-09"))); CHECK_EQ(s.next_message(), std::string("SP9ABC M0OML RR73"));   // they missed it: again
-    CHECK(s.heard(H("M0OML SP9ABC 73"))); CHECK(s.stage() == seq::Stage::Done); CHECK_EQ(s.next_message(), std::string("")); CHECK(!s.take_log());
+    CHECK(s.heard(H("M0OML SP9ABC R-09"))); CHECK_EQ(s.next_message(), std::string("SP9ABC M0OML RR73"));    // they missed it: again
+    CHECK_EQ(s.next_message(), std::string()); CHECK(s.stage() == seq::Stage::Done);                                // nothing back: RR73 is not repeated blindly (WSJT-X)
+    CHECK(s.heard(H("M0OML SP9ABC R-09"))); CHECK_EQ(s.next_message(), std::string("SP9ABC M0OML RR73"));    // their repeat decoded late: once more
+    CHECK_EQ(s.next_message(), std::string()); CHECK(s.heard(H("M0OML SP9ABC R-09"))); CHECK_EQ(s.next_message(), std::string("SP9ABC M0OML RR73"));
+    CHECK_EQ(s.next_message(), std::string()); CHECK(!s.heard(H("M0OML SP9ABC R-09")));                       // twice at most after stopping
+    CHECK(!s.take_log());                                                                                      // logged once only
+    s.heard(H("M0OML SP9ABC 73")); CHECK(s.stage() == seq::Stage::Done); CHECK_EQ(s.next_message(), std::string("")); CHECK(!s.take_log());   // their 73 after the end: nothing more
 }
 TEST(seq_gives_up_and_handles_late_double_clicks) {
     seq::Sequencer s("M0OML", "IO92", 3);

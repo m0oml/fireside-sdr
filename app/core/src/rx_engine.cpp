@@ -109,6 +109,7 @@ void RxEngine::finish_decoder() {
     std::string t; { std::lock_guard<std::mutex> l(m_); if (dec_) dec_->finish(t); }
     if (!t.empty()) { std::lock_guard<std::mutex> dl(d_); text_ += t; }
 }
+void RxEngine::set_decoder_focus(const std::vector<double>& hz) { std::lock_guard<std::mutex> l(m_); if (dec_) dec_->set_focus(hz); }
 void RxEngine::peek_decoder() {
     std::string t; { std::lock_guard<std::mutex> l(m_); if (dec_) dec_->peek(t); }
     if (!t.empty()) { std::lock_guard<std::mutex> dl(d_); text_ += t; }

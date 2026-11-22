@@ -462,13 +462,18 @@ void TransmitCard::noteSeqEnd(bool may_continue) {      // the sequence has ende
 void TransmitCard::autoNext() {                         // auto mode, a QSO (or a 2-try call) has ended: answer the next station waiting in the callers area
     if (!follow_pending_ || !auto_seq_->isChecked() || !tx_ || !tx_->armed() || worker_running_ || ft_pending_ || (seq_ && seq_->active())) return;   // (an over still running: the run's end calls this again)
     follow_pending_ = false;
-    const auto c = rx_->nextCaller(auto_tried_);
-    if (!c.first.isEmpty()) {
-        auto_tried_.insert(c.first); auto_reply_ = true; replyTo(c.second); auto_reply_ = false;
+    for (;;) {                                                                               // the newest waiting caller that can be answered; a sign-off (73, RR73) is skipped
+        const auto c = rx_->nextCaller(auto_tried_);
+        if (c.first.isEmpty()) break;
+        auto_tried_.insert(c.first);
+        int snr = 0; const auto h = fireside::seq::parse(fireside::logbook::ftx_line_text(c.second.toStdString(), &snr), snr);
+        if (!h.ok || h.seventy3 || h.rr73 || h.rrr) continue;
+        auto_reply_ = true; replyTo(c.second); auto_reply_ = false;
         if (seq_ && seq_->active() && QString::fromStdString(seq_->dx()).contains(c.first)) {
             seq_->limit_tries(2); report(QString("Answering %1, who called earlier (2 tries, then the next one): %2").arg(c.first, ft_msg_->text()));
+            return;
         }
-        return;
+        if (seq_ && seq_->active()) return;                                                  // answering someone (the operator's or this one)
     }
     auto_tried_.clear();
     if (from_cq_) { from_cq_ = false; report("No one else is waiting: calling CQ again."); cq_->click(); }   // we were calling CQ: carry on

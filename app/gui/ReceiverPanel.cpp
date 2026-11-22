@@ -920,9 +920,14 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
         if (to_me) {
             const QString fb = QString::fromStdString(fireside::qrz::base_call(m.from));
             // the QSO pane: what is addressed to us and our own overs; during a QSO only the partner's (anyone else calling waits in the callers area)
-            if (qso_partner_.isEmpty() || fb == qso_partner_) addQsoLine(shown, 1);
+            const QStringList mw = QString::fromStdString(fireside::logbook::ftx_line_text(ln.toStdString())).split(' ', Qt::SkipEmptyParts);
+            const bool signoff = mw.size() >= 3 && (mw[2] == "73" || mw[2] == "RR73" || mw[2] == "RRR");
+            if (signoff && fb != qso_partner_ && addToDoneQso(fb, shown)) {}          // a finished QSO's late 73: inside that QSO's block, above its "done" line
+            else if (qso_partner_.isEmpty() || fb == qso_partner_) addQsoLine(shown, 1);
             noteFocus(fb, shown);                                                 // the quick decode before our next over looks harder at its frequency
-            if (!fb.isEmpty() && fb != qso_partner_) addCaller(fb, shown);         // someone new calling us: kept in the callers area until answered (the partner's replies are in the QSO pane)
+            const QStringList words = QString::fromStdString(fireside::logbook::ftx_line_text(ln.toStdString())).split(' ', Qt::SkipEmptyParts);
+            const bool closing = words.size() >= 3 && (words[2] == "73" || words[2] == "RR73" || words[2] == "RRR");   // a sign-off (e.g. a late 73 after our QSO ended) is not a call
+            if (!fb.isEmpty() && fb != qso_partner_ && !closing) addCaller(fb, shown);   // someone new calling us: kept in the callers area until answered (the partner's replies are in the QSO pane)
         }
     }
 }
@@ -999,13 +1004,29 @@ void ReceiverPanel::endQso(const QString& call, bool done) {               // th
         c.insertText(done ? QString::fromUtf8("\u2500\u2500 QSO with %1 done \u2500\u2500").arg(b) : QString::fromUtf8("\u2500\u2500 QSO with %1 not completed (no answer) \u2500\u2500").arg(b), f);
         qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
     if (qso_text_) {                                                                // the finished QSO fades out like a caller does, then goes
-        DoneQso d; d.last = qso_text_->document()->blockCount() - 1; d.first = qso_start_block_ >= 0 && qso_start_block_ <= d.last ? qso_start_block_ : d.last; d.ms = callersNow();
+        DoneQso d; d.call = b; d.last = qso_text_->document()->blockCount() - 1; d.first = qso_start_block_ >= 0 && qso_start_block_ <= d.last ? qso_start_block_ : d.last; d.ms = callersNow();
         for (int i = d.first; i <= d.last; ++i) { const QTextBlock bl = qso_text_->document()->findBlockByNumber(i);
             d.bg.push_back(bl.blockFormat().background().style() == Qt::NoBrush ? QColor("#12161d") : bl.blockFormat().background().color());
             d.fg.push_back(bl.begin().atEnd() ? QColor("#c9d1dc") : bl.begin().fragment().charFormat().foreground().color()); }
         done_qsos_.append(d); qso_start_block_ = -1;
     }
     if (b == qso_partner_) qso_partner_.clear();
+}
+bool ReceiverPanel::addToDoneQso(const QString& call, const QString& line) {   // the newest finished QSO with this station, still on screen
+    if (!qso_text_ || call.isEmpty()) return false;
+    int k = int(done_qsos_.size()) - 1; while (k >= 0 && done_qsos_[k].call != call) --k;
+    if (k < 0 || done_qsos_[k].last < 1 || done_qsos_[k].last <= done_qsos_[k].first) return false;
+    DoneQso& d = done_qsos_[k]; const int at = d.last;                                  // the new line takes the "done" line's place; that moves down one
+    QTextDocument* doc = qso_text_->document(); const QTextBlock before = doc->findBlockByNumber(at - 1); if (!before.isValid()) return false;
+    QTextCursor c(before); c.movePosition(QTextCursor::EndOfBlock);
+    QTextCharFormat f; f.setForeground(QColor("#ffffff")); f.setFontWeight(QFont::Bold); QTextBlockFormat bf; bf.setBackground(QColor("#7a1f2b"));
+    c.insertBlock(bf, f); c.insertText(line, f);
+    const size_t j = size_t(at - d.first); d.bg.insert(d.bg.begin() + long(j), QColor("#7a1f2b")); d.fg.insert(d.fg.begin() + long(j), QColor("#ffffff"));
+    ++d.last;
+    for (int o = 0; o < done_qsos_.size(); ++o) if (o != k) { if (done_qsos_[o].first >= at) ++done_qsos_[o].first; if (done_qsos_[o].last >= at) ++done_qsos_[o].last; }
+    if (qso_start_block_ >= at) ++qso_start_block_;
+    fadeQsos();                                                                         // at the block's current shade at once
+    return true;
 }
 void ReceiverPanel::fadeQsos() {                                                    // same time as the callers: 6 FT8 / 10 FT4 cycles
     if (!qso_text_ || done_qsos_.isEmpty()) return;

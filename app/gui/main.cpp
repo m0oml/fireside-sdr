@@ -719,6 +719,25 @@ int main(int argc, char** argv) {
                                  && (count(1292) - m2) % 2 == 0 && !w.simRadio()->keyed);
                             rx->setDialHz(d0); pump(5);
                         }
+                        {   // a QSO answered from CQ ends; the partner's late 73 must not stop auto mode: back to CQ, and the 73 is not a "caller"
+                            tc->autoSeqBox()->setChecked(true); const size_t c0 = count(1292);
+                            auto overs = [&](size_t n) { for (int i = 0; i < 1500 && !(count(1292) >= c0 + n && !tc->busy()); ++i) pump(1); pump(30); return count(1292) >= c0 + n; };
+                            tc->cqButton()->click(); pump(2);
+                            step("late 73: CQ sent", overs(2));
+                            rx->addDecodedText(label(wall()) + " -10  0.1 1200 ~  M0OML DL3BBB JO62\n"); pump(2);
+                            step("late 73: their answer gets our report", tc->messageText().startsWith("DL3BBB M0OML ") && overs(4));
+                            rx->addDecodedText(label(wall()) + " -11  0.1 1200 ~  M0OML DL3BBB R-12\n"); pump(2);
+                            step("late 73: RR73 sent", tc->messageText() == "DL3BBB M0OML RR73" && overs(6));
+                            for (int i = 0; i < 1500 && !tc->messageText().startsWith("CQ "); ++i) pump(1);
+                            step("late 73: back to CQ when nobody else waits", tc->messageText().startsWith("CQ ") && tc->qsoText().startsWith("Calling CQ"));
+                            rx->addDecodedText(label(wall()) + " -11  0.1 1200 ~  M0OML DL3BBB 73\n"); pump(5);
+                            step("late 73: their 73 is not a waiting caller, and CQ carries on", rx->nextCaller({}).first != "DL3BBB" && tc->qsoText().startsWith("Calling CQ"));
+                            {   const QString qp = rx->qsoPaneText(); const int i73 = qp.indexOf("M0OML DL3BBB 73"), idone = qp.indexOf(QString::fromUtf8("QSO with DL3BBB done"));
+                                const QString between = i73 >= 0 && idone > i73 ? qp.mid(i73, idone - i73) : QString();
+                                step("late 73: shown inside that QSO's block, just above its done line", i73 >= 0 && idone > i73 && between.count('\n') == 1 && qp.count("M0OML DL3BBB 73") == 1); }
+                            QPushButton* sb2 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb2 = bt;
+                            if (sb2) sb2->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
+                        }
                         {   // a safety stop during the RR73 repeat of an already-logged QSO, with another station waiting: nothing keys again by itself
                             auto* sim = w.simRadio(); tc->autoSeqBox()->setChecked(true);
                             QString logged2; QObject scope2; QObject::connect(tc, &TransmitCard::logQso, &scope2, [&](const QString& c, const QString&, const QString&, const QString&) { logged2 = c; });

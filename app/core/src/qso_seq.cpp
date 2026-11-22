@@ -1,5 +1,7 @@
 #include "fireside/qso_seq.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cctype>
 #include <cstdio>
 #include <sstream>
@@ -23,6 +25,35 @@ const char* stage_name(Stage s) {
     switch (s) { case Stage::Idle: return "idle"; case Stage::Cq: return "calling CQ"; case Stage::CalledDx: return "calling"; case Stage::SentReport: return "sent report";
                  case Stage::SentRReport: return "sent R-report"; case Stage::SentRR73: return "sent RR73"; case Stage::Sent73: return "sent 73"; case Stage::Done: return "done"; case Stage::GaveUp: return "gave up"; }
     return "?";
+}
+int line_parity(const std::string& line, bool ft4) {
+    const std::string t = line.substr(0, 6);
+    if (!t.empty() && t[0] == 'S') return std::atoi(t.c_str() + 1) % 2;
+    if (t.size() < 6) return 0;
+    const int secs = std::atoi(t.substr(0, 2).c_str()) * 3600 + std::atoi(t.substr(2, 2).c_str()) * 60 + std::atoi(t.substr(4, 2).c_str());
+    return ft4 ? int(std::floor((secs + 0.5) / 7.5)) % 2 : (secs / 15) % 2;
+}
+double clear_tx_hz(const std::vector<HeardSignal>& heard, int my_parity, double current_hz, bool ft4, double lo, double hi) {
+    const double w = ft4 ? 83.3 : 50.0, guard = 15.0;                       // signal width; space kept either side
+    const double s_lo = lo, s_hi = hi - w;                                     // where our lowest tone may go
+    auto pick = [&](bool own_slots_only, double& out) {
+        std::vector<std::pair<double, double>> busy;                           // ranges of our lowest tone that would overlap someone
+        for (const auto& h : heard) if (!own_slots_only || h.parity == my_parity) busy.push_back({h.hz - w - guard, h.hz + w + guard});
+        std::sort(busy.begin(), busy.end());
+        auto clear_at = [&](double s) { for (const auto& b : busy) if (s > b.first && s < b.second) return false; return s >= s_lo && s <= s_hi; };
+        if (clear_at(current_hz)) { out = current_hz; return true; }
+        double best_w = 0, best_mid = -1, at = s_lo;
+        for (const auto& b : busy) {
+            if (b.first > at) { const double g = std::min(b.first, s_hi) - at; if (g > best_w) { best_w = g; best_mid = at + g / 2; } }
+            at = std::max(at, b.second); if (at >= s_hi) break;
+        }
+        if (at < s_hi && s_hi - at > best_w) { best_w = s_hi - at; best_mid = at + best_w / 2; }
+        if (best_mid < 0) return false;
+        out = std::clamp(std::round(best_mid / 10.0) * 10.0, s_lo, s_hi); return true;
+    };
+    double f = current_hz;
+    if (pick(false, f) || pick(true, f)) return f;
+    return current_hz;
 }
 std::string report_text(int snr) { char b[8]; std::snprintf(b, sizeof b, "%+03d", std::clamp(snr, -30, 30)); return b; }
 

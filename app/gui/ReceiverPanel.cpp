@@ -316,7 +316,7 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
                 if (modeIndex() != want) setModeIndex(want);
             }
         }
-        noteBand(); emit dialChanged(hz); });
+        noteBand(); heard_ftx_.clear(); emit dialChanged(hz); });   // stations heard on another dial are not where they are now
     connect(bandplan_, &QCheckBox::toggled, this, [this](bool on) { spectrum_->setBandPlan(on); });
     connect(avg_, &QComboBox::currentIndexChanged, this, [this](int i) { static const float a[] = {1.f, 0.5f, 0.3f, 0.15f}; spectrum_->setAveraging(a[std::clamp(i, 0, 3)]); });
     spectrum_->setAveraging(0.5f);
@@ -760,7 +760,7 @@ void ReceiverPanel::setDecoderIndex(int i) {
     if (i == 4 || i == 5) filter_width_ = 3600, rebuildFilterButtons();                                              // FT8 spans 200-3000 Hz: the widest voice filter (applySettings below)
     dec_text_->setVisible(i != 0); if (callers_) callers_->setVisible(i >= 4); clearCallers(); if (qso_text_) qso_text_->setVisible(i >= 4); if (clear_qso_) clear_qso_->setVisible(i >= 4);
     if (tx_side_) { dec_text_->setMinimumHeight(i >= 4 ? 110 : 60); dec_text_->setMaximumHeight(QWIDGETSIZE_MAX); }   // beside the transmit card: fill its height
-    else dec_text_->setFixedHeight(i >= 4 ? 190 : 84); dec_tone_->setEnabled(i != 0 && i < 4);    // FT8 prints a dozen lines per slot dec_status_->setText(i == 0 ? "Decoder off" : "Waiting for a signal...");
+    else dec_text_->setFixedHeight(i >= 4 ? 190 : 84); dec_tone_->setVisible(i != 0 && i < 4);   // CW / PSK31 / RTTY only: FT8 and FT4 decode the whole passband    // FT8 prints a dozen lines per slot dec_status_->setText(i == 0 ? "Decoder off" : "Waiting for a signal...");
     rebuildDecoder(); applySettings(); syncGroup(); emit decoderSelected(i);
 }
 QString ReceiverPanel::myCall() const {                                    // the Decoder card's box, else the Log tab's station callsign (from Wavelog)
@@ -907,6 +907,8 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
     for (const QTextBlock& blk : blocks) {
         const QString ln = blk.text(); const auto m = fireside::logbook::parse_ftx_message(fireside::logbook::ftx_line_text(ln.toStdString()));
         if (!m.ok || m.from.empty()) continue;
+        { const QStringList fw = ln.split(' ', Qt::SkipEmptyParts); bool okf = false; const double hz = fw.size() > 3 ? fw[3].toDouble(&okf) : 0;
+          if (okf && hz > 0) heard_ftx_.append({QDateTime::currentMSecsSinceEpoch(), hz, ln.left(6)}); }   // where stations are (a clear frequency for our CQ)
         const bool mentions_me = !me.isEmpty() && (is_me(m.to, me) || is_me(m.from, me) || ln.left(ln.indexOf(kInfoSep) < 0 ? ln.size() : ln.indexOf(kInfoSep)).contains(" " + me + " "));
         if (m.cq || (mentions_me && !is_me(m.from, me))) emit decodedCall(QString::fromStdString(m.from));     // worked-before / callbook: CQ callers and stations mentioning me only (user 2026-11-20)
         if (m.cq) emit cqDecoded(QString::fromStdString(m.from));
@@ -1052,6 +1054,12 @@ void ReceiverPanel::fadeQsos() {                                                
             c.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor); QTextCharFormat cf; cf.setForeground(mix(d.fg[j], QColor("#4a5261"), t)); c.mergeCharFormat(cf);
         }
     }
+}
+QList<QPair<double, QString>> ReceiverPanel::recentFtx(qint64 window_ms) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    while (!heard_ftx_.isEmpty() && now - heard_ftx_.front().ms > 600000) heard_ftx_.removeFirst();   // at most 10 min kept
+    QList<QPair<double, QString>> out; for (const auto& h : heard_ftx_) if (now - h.ms <= window_ms) out.append({h.hz, h.label});
+    return out;
 }
 QPair<QString, QString> ReceiverPanel::nextCaller(const QSet<QString>& skip) const {   // the newest waiting caller not tried yet: {call, decoded line}
     for (int i = caller_list_.size() - 1; i >= 0; --i) if (!skip.contains(caller_list_[i].call) && caller_list_[i].call != qso_partner_) return {caller_list_[i].call, caller_list_[i].line};

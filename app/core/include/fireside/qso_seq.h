@@ -7,10 +7,19 @@
 #pragma once
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace fireside::seq {
 enum class Stage { Idle, Cq, CalledDx, SentReport, SentRReport, SentRR73, Sent73, Done, GaveUp };
 const char* stage_name(Stage s);
+
+// Where to call CQ: a transmit audio frequency (the lowest tone, as the spin box) clear of the stations heard recently.
+// `heard`: their audio frequencies (lowest tone, as decoded) and slot parities. Keeps `current_hz` if it is clear; otherwise the middle of the
+// widest clear gap in lo..hi (whole signal inside it). If nothing is clear, only the stations in our own slots count (the others listen
+// while we send); if still nothing, `current_hz`. Rounded to 10 Hz.
+struct HeardSignal { double hz; int parity; };
+double clear_tx_hz(const std::vector<HeardSignal>& heard, int my_parity, double current_hz, bool ft4, double lo_hz = 300, double hi_hz = 2700);
+int line_parity(const std::string& decoder_line, bool ft4);   // the slot parity of a decoder line, from its HHMMSS (or S000) label
 
 struct Heard {                       // one decoded FT8/FT4 message, parsed
     std::string to, from, grid, report;   // report as sent: "-12" / "+05" (no R)

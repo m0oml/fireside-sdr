@@ -709,6 +709,22 @@ int main(int argc, char** argv) {
                         if (sb) sb->click();
                         for (int i = 0; i < 200 && tc->busy(); ++i) pump(1); pump(10);
                         step("Stop ends the CQ: nothing queued, unkeyed", !tc->sendQueued() && !tc->busy() && !w.simRadio()->keyed && (count(1292) == m1 || count(1292) == m1 + 2) && !tc->qsoText().startsWith("Calling"));
+                        {   // CQ moves off a busy frequency (stations heard in both parities on top of us), keeps a clear one, and the tick turns it off
+                            step("Clear freq is on by default", tc->ftClearBox()->isChecked());
+                            tc->ftHzBox()->setValue(1200);
+                            rx->addDecodedText(label(wall()) + " -10  0.1 1190 ~  CQ G4AAA IO91\n" + label(wall() - 15) + " -12  0.1 1230 ~  CQ F4BBB JN18\n"); pump(2);
+                            tc->cqButton()->click(); pump(2);
+                            const int hz = tc->ftHzBox()->value();
+                            step("CQ moves off a busy frequency to a clear one", hz != 1200 && (hz + 65 <= 1190 || hz >= 1230 + 65) && hz >= 300 && hz + 50 <= 2700);
+                            QPushButton* sb3 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb3 = bt;
+                            if (sb3) sb3->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(5);
+                            tc->cqButton()->click(); pump(2); step("a clear frequency is kept", tc->ftHzBox()->value() == hz);
+                            if (sb3) sb3->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(5);
+                            tc->ftClearBox()->setChecked(false); tc->ftHzBox()->setValue(1200); tc->cqButton()->click(); pump(2);
+                            step("with Clear freq off, CQ stays where it is", tc->ftHzBox()->value() == 1200);
+                            if (sb3) sb3->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(5);
+                            tc->ftClearBox()->setChecked(true);
+                        }
                         {   // a band change during a CQ: the CQ stops, nothing is queued and nothing keys on the new band
                             const double d0 = rx->dialHz(); const size_t m2 = count(1292); tc->cqButton()->click(); pump(2);
                             const bool calling = tc->qsoText().startsWith("Calling CQ");

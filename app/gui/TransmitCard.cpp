@@ -99,6 +99,8 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     send_ = new QPushButton("Send"); send_->setToolTip("Transmit the message in the next slot of the chosen parity (no question: Stop cancels a queued send). Receive pauses only for the over itself.");
     auto_seq_ = new QCheckBox("Auto sequence + log"); auto_seq_->setChecked(true);
     auto_seq_->setToolTip("Double-click a decoded CQ or caller to reply. Each answer moves the QSO on (report, R-report, RR73, 73), repeated up to 6 times; the finished QSO is logged to Wavelog. Send with a CQ message calls CQ the same way.");
+    ft_clear_ = new QCheckBox("Clear freq"); ft_clear_->setChecked(true);
+    ft_clear_->setToolTip("CQ: if someone is on our transmit frequency (heard in the last 2 minutes), move to the middle of the widest clear gap (300-2700 Hz). A frequency that is already clear is kept.");
     ft_repeat_ = new QCheckBox("Repeat"); ft_repeat_->setToolTip("Send again in every slot of this parity until Stop (calling CQ)");
     voice_mode_ = new QComboBox; voice_mode_->addItems({"Auto (as the receiver)", "USB", "LSB"}); voice_mode_->setToolTip("Sideband for voice: Auto = the receiver's USB / LSB (its Auto LSB / USB picks it per band), else USB above 10 MHz");
     voice_w_ = new QDoubleSpinBox; voice_w_->setRange(1, 100); voice_w_->setDecimals(0); voice_w_->setValue(20); voice_w_->setSuffix(" W PEP"); voice_w_->setToolTip("Peak envelope power: speech peaks reach it (the processing drives them into the limiter)");
@@ -139,7 +141,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
         connect(tuner_btn_, &QPushButton::clicked, this, [this] { tuner_dialog_->show(); tuner_dialog_->raise(); tuner_dialog_->activateWindow(); });
         atu_part_ = part({row({tune_, tuner_btn_}, false)}); }
     ext_part_ = part({row({ext_allow_, ext_w_})});                                      // goes on the Audio tab
-    digi_part_ = part({row({ft_mode_, ft_hz_, ft_par_}), row({ft_msg_, ft_w_}, false), row({send_, cq_, ft_repeat_, auto_seq_, stop_}, false)});
+    digi_part_ = part({row({ft_mode_, ft_hz_, ft_clear_, ft_par_}), row({ft_msg_, ft_w_}, false), row({send_, cq_, ft_repeat_, auto_seq_, stop_}, false)});
     voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_})});
     { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
     hide();                                                                           // this object only owns the parts: the window places them (Antenna, Transmit, decoder row, voice strip)
@@ -167,7 +169,9 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     ptt_poll_->start();
     connect(cq_, &QPushButton::clicked, this, [this] {
         if (!haveStation()) return;
+        pickClearCqHz();
         ft_msg_->setText("CQ " + rx_->myCall() + " " + myGrid4()); saveState(); onSend(); });
+    connect(ft_clear_, &QCheckBox::toggled, this, [this] { saveState(); });
     auto parity_labels = [this] { const bool ft4 = ft_mode_->currentIndex() == 1;
         ft_par_->setItemText(0, ft4 ? "Even (:00 :15 :30 :45)" : "Even (:00 :30)"); ft_par_->setItemText(1, ft4 ? "Odd (:07.5 :22.5 ...)" : "Odd (:15 :45)"); };
     connect(ft_mode_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, parity_labels] { parity_labels(); saveState(); });
@@ -177,7 +181,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     connect(rx_, &ReceiverPanel::dialChanged, this, &TransmitCard::onDial);
     if (!no_settings()) { QSettings q("fireside", "transmit"); power_->setValue(q.value("tune_w", 3).toDouble()); thr_->setCurrentIndex(std::clamp(q.value("thr", 2).toInt(), 0, 6)); auto_restore_->setChecked(q.value("auto_restore", true).toBool()); mirror_->setChecked(q.value("mirror_q", true).toBool());
                            ft_msg_->setText(q.value("ft_msg", ft_msg_->text()).toString()); ft_hz_->setValue(q.value("ft_hz", 1500).toInt()); ft_w_->setValue(q.value("ft_w", 5).toDouble());
-                           ft_mode_->setCurrentIndex(q.value("ft_mode", 0).toInt()); ft_par_->setCurrentIndex(q.value("ft_par", 0).toInt()); auto_seq_->setChecked(q.value("auto_seq", true).toBool()); }
+                           ft_mode_->setCurrentIndex(q.value("ft_mode", 0).toInt()); ft_par_->setCurrentIndex(q.value("ft_par", 0).toInt()); auto_seq_->setChecked(q.value("auto_seq", true).toBool()); ft_clear_->setChecked(q.value("ft_clear", true).toBool()); }
     connect(auto_seq_, &QCheckBox::toggled, this, [this](bool on) { if (!on && seq_) seq_->stop(); saveState(); });
     connect(power_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this] { saveState(); }); connect(thr_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { saveState(); });
     connect(auto_restore_, &QCheckBox::toggled, this, [this] { saveState(); });
@@ -404,13 +408,16 @@ fireside::seq::Sequencer& TransmitCard::sequencer() {
 }
 namespace {
 // the slot parity a decoder line was heard in, from its HHMMSS label (S000-style labels of a file: index = number)
-int line_parity(const QString& line, bool ft4) {
-    const QString t = line.left(6);
-    if (t.startsWith('S')) return t.mid(1).toInt() % 2;
-    const int secs = t.left(2).toInt() * 3600 + t.mid(2, 2).toInt() * 60 + t.mid(4, 2).toInt();
-    return ft4 ? int(std::floor((secs + 0.5) / 7.5)) % 2 : (secs / 15) % 2;
-}
+int line_parity(const QString& line, bool ft4) { return fireside::seq::line_parity(line.toStdString(), ft4); }
 }  // namespace
+void TransmitCard::pickClearCqHz() {
+    if (!ft_clear_->isChecked()) return;
+    const bool ft4 = ft_mode_->currentIndex() == 1; const int mine = ft_par_->currentIndex();
+    std::vector<fireside::seq::HeardSignal> heard;
+    for (const auto& h : rx_->recentFtx(ft4 ? 60000 : 120000)) heard.push_back({h.first, line_parity(h.second, ft4)});   // the last 8 slots
+    const int was = ft_hz_->value(); const int now = int(std::lround(fireside::seq::clear_tx_hz(heard, mine, was, ft4)));
+    if (now != was) { ft_hz_->setValue(now); emit message(QString("Transmit: CQ moved from %1 Hz to %2 Hz, clear of the %3 station(s) heard").arg(was).arg(now).arg(heard.size())); }
+}
 QString TransmitCard::qsoText() const { return seq_ ? QString::fromStdString(seq_->describe()) : QString(); }
 QString TransmitCard::messageText() const { return ft_msg_->text(); }
 double TransmitCard::recentTxPowerW() const { return QDateTime::currentSecsSinceEpoch() - last_tx_t_.load() < 600 ? last_tx_w_.load() : 0.0; }
@@ -816,7 +823,7 @@ void TransmitCard::loadState() {                         // worker thread, right
 void TransmitCard::saveState() {
     if (no_settings()) return;
     QSettings q("fireside", "transmit"); q.setValue("tune_w", power_->value()); q.setValue("thr", thr_->currentIndex()); q.setValue("auto_restore", auto_restore_->isChecked()); q.setValue("mirror_q", mirror_->isChecked());
-    q.setValue("auto_seq", auto_seq_->isChecked()); q.setValue("ft_msg", ft_msg_->text()); q.setValue("ft_hz", ft_hz_->value()); q.setValue("ft_w", ft_w_->value()); q.setValue("ft_mode", ft_mode_->currentIndex()); q.setValue("ft_par", ft_par_->currentIndex());
+    q.setValue("auto_seq", auto_seq_->isChecked()); q.setValue("ft_msg", ft_msg_->text()); q.setValue("ft_hz", ft_hz_->value()); q.setValue("ft_clear", ft_clear_->isChecked()); q.setValue("ft_w", ft_w_->value()); q.setValue("ft_mode", ft_mode_->currentIndex()); q.setValue("ft_par", ft_par_->currentIndex());
     if (!tx_ || worker_running_) return;
     QDir().mkpath(cfg_dir());
     std::ofstream(mem_path().toStdString()) << tx_->memory().to_text();

@@ -144,3 +144,21 @@ TEST(seq_a_refused_reply_leaves_the_qso_alone) {   // double-clicking a late "ME
     CHECK_EQ(s.dx(), std::string("DL2AL")); auto l = s.take_log(); CHECK(l && l->call == "DL2AL" && l->rst_rcvd == "-11");
 }
 TEST(ft8_callsign_hash_table_never_hangs_or_loses_calls) { CHECK_EQ(decode::hash_table_self_check(), std::string()); }
+TEST(seq_cq_picks_a_clear_frequency) {
+    using seq::HeardSignal;
+    CHECK_NEAR(seq::clear_tx_hz({}, 0, 1200, false), 1200.0, 1e-9);                                  // nothing heard: stay
+    CHECK_NEAR(seq::clear_tx_hz({{600, 0}, {1800, 1}}, 0, 1200, false), 1200.0, 1e-9);                // already clear: stay (no hopping)
+    const double f = seq::clear_tx_hz({{1190, 0}, {1000, 1}, {1500, 0}}, 0, 1200, false);           // someone on top of us: move
+    CHECK(std::fabs(f - 1200) > 1);
+    for (double h : {1190.0, 1000.0, 1500.0}) CHECK(f + 50 + 15 <= h || f >= h + 50 + 15);           // clear of everyone, with the guard
+    CHECK(f >= 300 && f + 50 <= 2700); CHECK_NEAR(std::fmod(f, 10.0), 0.0, 1e-9);
+    CHECK(f > 1500 + 65);                                                                             // the widest gap (1565..2650), not a narrow one
+    std::vector<HeardSignal> full; for (double h = 300; h < 2700; h += 75) full.push_back({h, (int(h) / 75) % 2});   // a packed band: clear only in our own slots
+    const double g = seq::clear_tx_hz(full, 0, 1210, false);
+    for (const auto& h : full) if (h.parity == 0) CHECK(g + 65 <= h.hz || g >= h.hz + 65);           // our own slots clear at least
+    std::vector<HeardSignal> solid; for (double h = 250; h < 2750; h += 30) { solid.push_back({h, 0}); solid.push_back({h, 1}); }
+    CHECK_NEAR(seq::clear_tx_hz(solid, 0, 1200, false), 1200.0, 1e-9);                               // nowhere clear: stay
+    const double f4 = seq::clear_tx_hz({{1190, 0}}, 0, 1200, true); CHECK(f4 + 83.3 + 15 <= 1190 || f4 >= 1190 + 83.3 + 15);   // FT4 is wider
+    CHECK_EQ(seq::line_parity("093015 -10  0.1 1200 ~  CQ X", false), 1); CHECK_EQ(seq::line_parity("093000 -10", false), 0);
+    CHECK_EQ(seq::line_parity("093007 -10", true), 1); CHECK_EQ(seq::line_parity("S003 x", false), 1);
+}

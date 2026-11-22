@@ -57,6 +57,7 @@ public:
     void heardLine(const QString& decoderLine);          // every decoded line addressed to me (the sequencer moves on; nothing is sent here)
     void setMyGridSource(std::function<QString()> f) { my_grid_ = std::move(f); }
     QCheckBox* autoSeqBox() const { return auto_seq_; }
+    QSpinBox* ftHzBox() const { return ft_hz_; } QCheckBox* ftClearBox() const { return ft_clear_; }
     QPushButton* cqButton() const { return cq_; }
     double recentTxPowerW() const;                       // mean forward power of our last FT8/FT4 over if it was in the last 10 minutes, else 0 (the log's TX_PWR)
     PowerMeter* powerMeter() const { return pm_; }
@@ -96,7 +97,7 @@ private:
     RadioPanel* radio_; ReceiverPanel* rx_; bool simulated_; fireside::sim::RadioModel* sim_radio_ = nullptr;
     QPushButton *arm_, *tune_, *measure_, *restore_, *stop_, *test_; QCheckBox* mirror_; QDoubleSpinBox* power_; QDoubleSpinBox* test_w_ = nullptr; QComboBox* thr_; QCheckBox* auto_restore_;
     QProgressBar *fwd_, *rev_; QLabel *swr_, *lamp_, *status_, *mem_; QTimer* timer_;
-    QComboBox *ft_mode_, *ft_par_; QLineEdit* ft_msg_; QSpinBox* ft_hz_; QDoubleSpinBox* ft_w_; QPushButton* send_; QCheckBox* ft_repeat_; QTimer* ft_timer_;
+    QComboBox *ft_mode_, *ft_par_; QLineEdit* ft_msg_; QSpinBox* ft_hz_; QCheckBox* ft_clear_ = nullptr; void pickClearCqHz(); QDoubleSpinBox* ft_w_; QPushButton* send_; QCheckBox* ft_repeat_; QTimer* ft_timer_;
     std::shared_ptr<fireside::txc::TxControl::FtPrepared> ft_pending_; void startSend(); void queueSend();
     std::shared_ptr<fireside::txc::TxControl> tx_; std::thread worker_; std::atomic<bool> worker_running_{false}; int auto_confirm_ = -1; bool backup_offer_tests_ = false; std::atomic<bool> eeprom_verified_{false};
     std::mutex m_; fireside::txc::Progress last_; bool have_last_ = false; int last_band_ = -1; unsigned paused_rate_ = 0; bool paused_live_ = false; std::atomic<bool> unkey_failed_{false}; std::atomic<bool> job_tripped_{false};   // set by the core's trip hook (worker thread) during the running job

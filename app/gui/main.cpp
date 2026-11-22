@@ -45,6 +45,7 @@
 #include <csignal>
 #include <QSocketNotifier>
 #include "LogPanel.h"
+#include "fireside/award.h"
 #include "QrzClient.h"
 #include "AudioPanel.h"
 #include "PowerMeter.h"
@@ -102,7 +103,7 @@ int main(int argc, char** argv) {
                 else if (p.contains("/api/v2/token")) body = "{\"data\":{\"owner\":\"M0OML\",\"scopes\":[\"qso:write\",\"lookup:read\",\"radio:write\"]}}";
                 else if (p.contains("/api/v2/station")) body = "{\"data\":[{\"id\":3,\"callsign\":\"M0OML\",\"gridsquare\":\"IO92AR\"}]}";
                 else if (p.contains("/api/v2/lookup")) body = "{\"data\":{\"dxcc\":\"FEDERAL REPUBLIC OF GERMANY\",\"call_worked\":true,\"call_worked_band\":true,\"call_worked_band_mode\":false,\"dxcc_confirmed\":true,\"callbook\":{\"name\":\"Klaus Meyer\",\"gridsquare\":\"JO62\",\"city\":\"Hamburg\",\"email\":\"secret@example.com\"}}}";
-                else if (p.contains("/api/v2/qso") && rl[0] == "GET") body = "{\"data\":[{\"qso_date\":\"2026-11-10 12:30:00\",\"band\":\"20m\",\"mode\":\"FT8\",\"submode\":null,\"name\":\"Klaus\",\"call\":\"DL2AL\"}],\"meta\":{\"total\":2}}";
+                else if (p.contains("/api/v2/qso") && rl[0] == "GET") body = "{\"data\":[{\"qso_date\":\"2026-11-10 12:30:00\",\"band\":\"20m\",\"mode\":\"FT8\",\"submode\":null,\"name\":\"Klaus\",\"call\":\"DL2AL\",\"gridsquare\":\"JO43aa\",\"id\":7}],\"meta\":{\"total\":2,\"has_more\":false}}";
                 else if (p.contains("/api/v2/qso")) { code = 201; body = "{\"data\":{\"parsed\":1,\"imported\":1,\"skipped\":0,\"messages\":[]}}"; }
                 else if (p.contains("/api/v2/radio")) { code = 201; body = "{\"data\":{\"id\":1}}"; }
                 c->write(QString("HTTP/1.1 %1 X\r\nContent-Type: application/json\r\nContent-Length: %2\r\nConnection: close\r\n\r\n").arg(code).arg(body.size()).toLatin1() + body); c->disconnectFromHost();
@@ -116,10 +117,22 @@ int main(int argc, char** argv) {
         step("bearer token sent", !seen.empty() && seen[0].auth == "Bearer " + token); step("token never shown in status", !lp->status().contains(token));
         lp->refreshFromWavelog(); step("last contacts come from Wavelog", waitFor([&] { return lp->lastContactsText().contains("(Wavelog)") && lp->lastContactsText().contains("DL2AL"); }));
         { int ws = -1; QString wc; QObject scope; QObject::connect(lp, &LogPanel::workedKnown, &scope, [&](const QString& c, int s) { wc = c; ws = s; }); /* scoped: disconnects at the end of this block */ lp->checkWorked("DL2AL"); step("worked-before check answers: worked, but not on this band and mode", waitFor([&] { return ws == 1 && wc == "DL2AL"; }));
-          const size_t n = seen.size(); ws = -1; lp->checkWorked("DL2AL"); step("the answer is cached (no second request)", ws == 1 && seen.size() == n); }
+          const size_t n = seen.size(); ws = -1; lp->checkWorked("DL2AL"); step("the answer is cached (no second request)", ws == 1 && seen.size() == n);
+          lp->loadWorkedIndex(); step("the whole log is read for the DXCC / grid tags", waitFor([&] { return lp->workedIndexReady(); }) && lp->highlightStatus().contains("1 QSOs, 1 DXCC entities, 1 grids"));
+          step("the whole log is asked for in big pages", std::any_of(seen.begin(), seen.end(), [](const Seen& s) { return s.path.contains("per_page=5000&page=1"); }));
+          lp->loadWorkedIndex(); step("later reads ask only for QSOs newer than the last one seen", waitFor([&] { return std::any_of(seen.begin(), seen.end(), [](const Seen& s) { return s.path.contains("page=1&since_id=7"); }); }));
+          step("a QSO seen before is not counted twice", waitFor([&] { return lp->highlightStatus().contains("1 QSOs"); }) && lp->workedIndex().qsos() == 1);
+          ws = -1; lp->checkWorked("DL2AL"); step("a worked country and no grid: the worked-before state stands", ws == 1);
+          ws = -1; lp->checkWorked("JA1ABC"); step("a country not in the log is tagged NEW DXCC", waitFor([&] { return ws == fireside::award::kNewDxcc && wc == "JA1ABC"; }));
+          r->setDecoderIndex(4); r->myCallBox()->setText("M0OML"); r->clearDecoded();
+          r->addDecodedText("120000 -10  0.1 1500 ~  CQ DL9XX JO40\n");
+          step("a German station in a new square is tagged new grid on its line", waitFor([&] { return r->decodedText().contains("new grid"); }));
+          r->addDecodedText("120015 -10  0.1 1600 ~  CQ JA1ABC PM95\n");
+          step("NEW DXCC on the decoder line", waitFor([&] { return r->decodedText().contains("NEW DXCC"); }));
+          r->clearDecoded(); r->setDecoderIndex(0); }
         lp->setCallText("DL2AL"); lp->enterPressed(); step("first Enter looks up", waitFor([&] { return lp->workedText().contains("worked on this band"); })); step("lookup alone does not open the form", !lp->formOpen() && !r->logActive());
         lp->enterPressed(); step("second Enter opens the log form over Band and Mode", lp->formOpen() && r->logActive()); lp->closeForm(); step("Cancel closes it again", !lp->formOpen() && !r->logActive()); lp->enterPressed(); step("reopened", r->logActive()); step("callbook name and town shown", lp->workedText().contains("Klaus Meyer") && lp->workedText().contains("Hamburg")); step("callbook e-mail never shown", !lp->workedText().contains("secret@")); step("last worked time, band and mode shown", lp->workedText().contains("2026-11-10 12:30 UTC") && lp->workedText().contains("20m FT8") && lp->workedText().contains("2 QSOs in all")); step("lookup path", std::any_of(seen.begin(), seen.end(), [](const Seen& s) { return s.path.contains("callsign=DL2AL") && s.path.contains("band=20m"); }));
-        lp->logNow(); step("logged", waitFor([&] { return lp->status() == "Logged to Wavelog"; })); step("form closes after logging", !r->logActive() && !lp->formOpen());
+        { const size_t q0 = lp->workedIndex().qsos(); lp->logNow(); step("logged", waitFor([&] { return lp->status() == "Logged to Wavelog"; })); step("a logged QSO goes into the DXCC / grid index at once", lp->workedIndex().tag("DL2AL", "20m", "", fireside::award::Options()) == fireside::award::kNone && lp->workedIndex().qsos() == q0); } step("form closes after logging", !r->logActive() && !lp->formOpen());
         QString qsoBody; for (const auto& s : seen) if (s.method == "POST" && s.path.contains("/api/v2/qso")) qsoBody = s.body;
         step("qso body", qsoBody.contains("\"station_profile_id\":3") && qsoBody.contains("<CALL:5>DL2AL") && qsoBody.contains("<BAND:3>20m") && !qsoBody.contains("dryrun")); step("local copy written", QFile(tmp.path() + "/log.adi").exists() && lp->unsentCount() == 0);
         lp->logNow(); step("empty call refused", lp->status().startsWith("Not logged"));
@@ -218,7 +231,15 @@ int main(int argc, char** argv) {
         }
         lp->setRadioPush(true); step("radio pushed", waitFor([&] { return lp->radioPushes() >= 1; })); const uint64_t n = lp->radioPushes(); lp->pushRadioIfChanged(); QCoreApplication::processEvents(); step("no repeat push when unchanged", lp->radioPushes() == n);
         r->setDialHz(7.074e6); lp->pushRadioIfChanged(); step("push on change", waitFor([&] { return lp->radioPushes() > n; }));
-        QString radioBody; for (const auto& s : seen) if (s.path.contains("/api/v2/radio")) radioBody = s.body; step("radio body has no power", radioBody.contains("\"frequency\":7074000") && !radioBody.contains("power"));
+        QString radioBody; for (const auto& s : seen) if (s.path.contains("/api/v2/radio")) radioBody = s.body; step("radio body has no power before any over", radioBody.contains("\"frequency\":7074000") && !radioBody.contains("power"));
+        step("the tick shows what was sent", lp->radioPushStatus().contains("Sent") && lp->radioPushStatus().contains("7074.000 kHz"));
+        { lp->setTxPowerSource([] { return 48.6; }); const uint64_t n2 = lp->radioPushes(); lp->pushRadioIfChanged();
+          step("a new measured power is sent on its own, in whole watts", waitFor([&] { return lp->radioPushes() > n2; }) && [&] { for (const auto& s : seen) if (s.path.contains("/api/v2/radio")) radioBody = s.body; return radioBody.contains("\"power\":49"); }() && lp->radioPushStatus().contains("49 W"));
+          mode = 1; r->setDialHz(7.075e6); lp->pushRadioIfChanged(); step("a refused push is reported", waitFor([&] { return lp->radioPushStatus().contains("refused"); }));
+          const auto posts = [&] { return std::count_if(seen.begin(), seen.end(), [](const Seen& s) { return s.path.contains("/api/v2/radio"); }); }; const auto p0 = posts();
+          for (int i = 0; i < 3; ++i) lp->pushRadioIfChanged(); QCoreApplication::processEvents(); step("after a refusal it waits a minute, not every tick", posts() == p0);
+          mode = 0; lp->setRadioPush(true); step("ticking again retries at once", waitFor([&] { return lp->radioPushStatus().contains("Sent") && lp->radioPushStatus().contains("7075.000"); }));
+          lp->setTxPowerSource([] { return 0.0; }); r->setDialHz(7.074e6); }
         mode = 1; lp->setCall("pa4ps"); waitFor([&] { return lp->workedText().contains("refused"); }); step("401 reported in lookup", lp->workedText().contains("refused"));
         lp->setCall("pa4ps"); lp->logNow(); step("refused QSO kept locally", waitFor([&] { return lp->unsentCount() == 1; }) && lp->status().contains("saved locally"));
         mode = 0; lp->sendUnsent(); step("unsent resent", waitFor([&] { return lp->unsentCount() == 0; }));
@@ -721,6 +742,9 @@ int main(int argc, char** argv) {
                             QPushButton* sb3 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb3 = bt;
                             if (sb3) sb3->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(5);
                             tc->cqButton()->click(); pump(2); step("a clear frequency is kept", tc->ftHzBox()->value() == hz);
+                            if (sb3) sb3->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(5);
+                            rx->addDecodedText(label(wall()) + " +20  0.1 " + QString::number(hz) + " ~  CQ M0OML IO92\n"); pump(2);   // our own over, decoded off the leakage while keyed
+                            tc->cqButton()->click(); pump(2); step("our own decoded CQ does not move us", tc->ftHzBox()->value() == hz);
                             if (sb3) sb3->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(5);
                             tc->ftClearBox()->setChecked(false); tc->ftHzBox()->setValue(1200); tc->cqButton()->click(); pump(2);
                             step("with Clear freq off, CQ stays where it is", tc->ftHzBox()->value() == 1200);

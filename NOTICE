@@ -74,8 +74,9 @@ What this project borrowed, and from whom
    OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 3a. Amateur Radio Country Files (cty.dat) by Jim Reisert AD1C, https://www.country-files.com/
-   Callsign prefixes and country centres, reduced to app/core/src/dxcc_table.inc by tools/gen_dxcc.py (cty.dat itself is not included). Used only to reject a weak
-   decode whose locator is impossible for its callsign's country. The site states no licence terms; the files are published for use in logging and decoding software
+   Callsign prefixes, exact callsigns, country centres, continents and CQ / ITU zones, reduced to app/core/src/dxcc_table.inc and dxcc_exact.inc by tools/gen_dxcc.py
+   (cty.dat itself is not included; generated from the copy of 2026-11-22). Used to reject a weak decode whose locator is impossible for its callsign's country, for the
+   PSK Reporter tab's country column, and for the decoder's "new DXCC / continent / zone" tags. The site states no licence terms; the files are published for use in logging and decoding software
    (WSJT-X is among the programs it lists). If you redistribute this project, check the current terms there.
 
 4. Linux kernel snd-dice driver (sound/firewire/dice/), GNU GPL version 2

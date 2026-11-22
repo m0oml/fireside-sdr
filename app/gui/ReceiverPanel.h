@@ -225,7 +225,7 @@ private:
     QPointer<QPushButton> mirror_; QPointer<QCheckBox> loop_; QPointer<QComboBox> if_;   // these live on the Device tab (takeAdvancedWidget), which may be deleted first at exit
     QComboBox *out_target_, *out_pair_, *settle_; QComboBox* out_dest_ = nullptr; void syncOutDest(); void setRadioOutputsAvailable(bool on); std::unique_ptr<fireside::RadioAudioOut> radio_out_; QString live_device_; double live_rate_ = 48000;
     bool source_live_ = false, mirror_live_ = true, mirror_file_ = false;   // Mirror I/Q is remembered per kind of source
-    struct Caller { QString call, line, info; int tag = -1; qint64 ms = 0; };          // info: the callbook text, tag: 0 NEW / 1 new band-mode / 2 worked (as on the decoder lines)
+    struct Caller { QString call, line, info; int tag = -1; qint64 ms = 0; };          // info: the callbook text, tag: 0 NEW / 1 new band-mode / 2 worked, 3..9 fireside::award tags (as on the decoder lines)
     QHash<QString, QString> info_by_call_; QHash<QString, int> tag_by_call_;
     QPlainTextEdit* callers_ = nullptr; QWidget* dec_left_ = nullptr; QList<Caller> caller_list_; std::function<qint64()> callers_now_;
     void addCaller(const QString& call, const QString& line); void removeCaller(const QString& call); void renderCallers(); qint64 callersNow() const;

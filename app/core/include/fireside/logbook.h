@@ -36,7 +36,8 @@ inline const char* kWavelogStationPath = "/index.php/api/v2/station";
 std::string json_escape(const std::string& s);
 std::string url_encode(const std::string& s);
 std::string wavelog_adif_import_body(int station_profile_id, const std::string& adif_records, bool dryrun);       // POST kWavelogQsoPath; dryrun = parse only, store nothing
-std::string wavelog_radio_body(const std::string& radio_name, double freq_hz, const std::string& mode);          // POST kWavelogRadioPath; no power field: this app never reports transmit power
+std::string wavelog_radio_body(const std::string& radio_name, double freq_hz, const std::string& mode, double power_w = 0);   // POST kWavelogRadioPath (token scope radio:write); power in whole watts, left out when below 0.5 W (unknown)
+std::string wavelog_all_qsos_path(int page, long long since_id = 0);   // the log, 5000 QSOs a page (GET, read-only; page from 1), only QSOs with id > since_id when > 0: for the new DXCC / grid tags
 std::string wavelog_recent_path(int limit);   // the newest QSOs of the account (GET, read-only), 1..50
 std::string wavelog_lookup_path(const std::string& callsign, const std::string& band, const std::string& mode, bool callbook = false);   // callbook=true also asks Wavelog's configured callbook (name, QTH): one extra upstream request
 std::string wavelog_history_path(const std::string& callsign);                                                    // GET: the newest QSO with that callsign (limit=1); meta.total is how many there are   // GET, full path with query string (callsign upper-cased and escaped)

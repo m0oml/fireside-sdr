@@ -1,5 +1,6 @@
 #include "fireside/logbook.h"
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -111,11 +112,15 @@ std::string url_encode(const std::string& s) {
 std::string wavelog_adif_import_body(int id, const std::string& adif, bool dryrun) {
     return "{\"import_type\":\"adif\",\"station_profile_id\":" + std::to_string(id) + ",\"adif\":\"" + json_escape(adif) + "\"" + (dryrun ? ",\"dryrun\":true" : "") + "}";
 }
-std::string wavelog_radio_body(const std::string& radio, double freq_hz, const std::string& mode) {
+std::string wavelog_radio_body(const std::string& radio, double freq_hz, const std::string& mode, double power_w) {
     char f[32]; std::snprintf(f, sizeof f, "%.0f", freq_hz);
-    return "{\"radio\":\"" + json_escape(radio) + "\",\"frequency\":" + f + ",\"mode\":\"" + json_escape(adif_mode(mode).mode) + "\"}";
+    const AdifMode am = adif_mode(mode); const std::string m = am.submode.empty() ? am.mode : am.submode;   // FT4 / PSK31 rather than MFSK / PSK: what Wavelog's mode list should select
+    std::string b = "{\"radio\":\"" + json_escape(radio) + "\",\"frequency\":" + f + ",\"mode\":\"" + json_escape(m) + "\"";
+    if (power_w >= 0.5) b += ",\"power\":" + std::to_string(int(std::lround(power_w)));                    // whole watts (Wavelog refuses decimals); left out when unknown
+    return b + "}";
 }
 std::string wavelog_history_path(const std::string& call) { return "/index.php/api/v2/qso?callsign=" + url_encode(upper(call)) + "&limit=1"; }
+std::string wavelog_all_qsos_path(int page, long long since) { return "/index.php/api/v2/qso?per_page=5000&page=" + std::to_string(page < 1 ? 1 : page) + (since > 0 ? "&since_id=" + std::to_string(since) : ""); }
 std::string wavelog_recent_path(int limit) { return "/index.php/api/v2/qso?limit=" + std::to_string(limit < 1 ? 1 : limit > 50 ? 50 : limit); }
 std::string wavelog_lookup_path(const std::string& call, const std::string& band, const std::string& mode, bool callbook) {
     std::string p = "/index.php/api/v2/lookup?callsign=" + url_encode(upper(call)) + "&detail=full";

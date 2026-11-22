@@ -1,4 +1,5 @@
 #include "ReceiverPanel.h"
+#include "fireside/award.h"
 #include "fireside/tx_meter.h"
 #include "fireside/bandplan.h"
 #include "AppLog.h"
@@ -908,7 +909,7 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
         const QString ln = blk.text(); const auto m = fireside::logbook::parse_ftx_message(fireside::logbook::ftx_line_text(ln.toStdString()));
         if (!m.ok || m.from.empty()) continue;
         { const QStringList fw = ln.split(' ', Qt::SkipEmptyParts); bool okf = false; const double hz = fw.size() > 3 ? fw[3].toDouble(&okf) : 0;
-          if (okf && hz > 0) heard_ftx_.append({QDateTime::currentMSecsSinceEpoch(), hz, ln.left(6)}); }   // where stations are (a clear frequency for our CQ)
+          if (okf && hz > 0 && !is_me(m.from, me)) heard_ftx_.append({QDateTime::currentMSecsSinceEpoch(), hz, ln.left(6)}); }   // where stations are (a clear frequency for our CQ); our own over, decoded off the radio's leakage while keyed, is not one
         const bool mentions_me = !me.isEmpty() && (is_me(m.to, me) || is_me(m.from, me) || ln.left(ln.indexOf(kInfoSep) < 0 ? ln.size() : ln.indexOf(kInfoSep)).contains(" " + me + " "));
         if (m.cq || (mentions_me && !is_me(m.from, me))) emit decodedCall(QString::fromStdString(m.from));     // worked-before / callbook: CQ callers and stations mentioning me only (user 2026-11-20)
         if (m.cq) emit cqDecoded(QString::fromStdString(m.from));
@@ -947,6 +948,14 @@ void ReceiverPanel::removeCaller(const QString& call) {
 void ReceiverPanel::clearCallers() { caller_list_.clear(); moved_on_.clear(); if (callers_) callers_->clear(); }
 void ReceiverPanel::tickCallers() { fadeQsos(); }                                  // the callers stay until worked or tried (no time limit, no fade)
 QString ReceiverPanel::callersText() const { return callers_ ? callers_->toPlainText() : QString(); }
+static QColor tagColour(int tag) {
+    switch (tag) {
+        case 0: return QColor("#3ddc84"); case 1: return QColor("#ffb454"); case 2: return QColor("#8b93a7");
+        case fireside::award::kNewDxcc: return QColor("#ff4fd8"); case fireside::award::kNewDxccBand: return QColor("#ff9be6");
+        case fireside::award::kNewCont: return QColor("#c792ea"); case fireside::award::kNewCq: case fireside::award::kNewItu: return QColor("#4fd6f7");
+        default: return QColor("#82aaff");                                                    // new grid, new grid on this band
+    }
+}
 void ReceiverPanel::renderCallers() {
     if (!callers_) return;
     while (caller_list_.size() > kMaxCallers) caller_list_.removeFirst();                     // a very busy pile-up: the oldest go
@@ -958,10 +967,10 @@ void ReceiverPanel::renderCallers() {
         if (i > from) c.insertBlock(); c.setBlockFormat(bf); c.insertText(caller_list_[i].line, f);
         const Caller& cl = caller_list_[i];
         if (cl.tag >= 0 || !cl.info.isEmpty()) {                                                      // the same "| NEW  Name, City, Country, km" tail as the decoder lines
-            static const char* const tagtext[] = {"NEW", "new band/mode", "worked"}; static const QColor tagcol[] = {QColor("#3ddc84"), QColor("#ffb454"), QColor("#8b93a7")};
             QTextCharFormat fd; fd.setForeground(QColor("#aab3c5")); fd.setFontWeight(QFont::Normal);
             c.insertText(kInfoSep, fd);
-            QTextCharFormat ft = fd; if (cl.tag >= 0) ft.setForeground(tagcol[cl.tag]); c.insertText((cl.tag >= 0 ? QString(tagtext[cl.tag]) : QString()).leftJustified(kTagCols), ft);
+            QTextCharFormat ft = fd; if (cl.tag >= 0) { ft.setForeground(tagColour(cl.tag)); if (cl.tag >= fireside::award::kNewDxcc) ft.setFontWeight(QFont::Bold); }
+            c.insertText((cl.tag >= 0 ? QString(fireside::award::tag_text(cl.tag)) : QString()).leftJustified(kTagCols), ft);
             c.insertText(cl.info, fd);
         }
     }
@@ -1122,20 +1131,20 @@ QWidget* ReceiverPanel::takeOutputWidget() { if (out_dest_) out_dest_->setParent
 int ReceiverPanel::highlightedLines() const {
     int n = 0; for (QTextBlock b = dec_text_->document()->begin(); b.isValid(); b = b.next()) if (b.blockFormat().background().color() == QColor("#7a1f2b")) ++n; return n;
 }
-// tag the recent decoder lines from this station: green NEW, amber worked-before-but-not-here, grey already worked (the tag is appended once per line)
+// tag the recent decoder lines from this station: green NEW, amber worked-before-but-not-here, grey already worked; above those, from the user's whole log, magenta
+// new DXCC (pink on a new band), violet new continent, cyan new zone, blue new grid (fireside::award). The tag is appended once per line.
 void ReceiverPanel::markWorked(const QString& call, int state) {
-    static const char* const text[] = {"  NEW", "  new band/mode", "  worked"}; static const QColor col[] = {QColor("#3ddc84"), QColor("#ffb454"), QColor("#8b93a7")};
-    if (state < 0 || state > 2) return;
+    if (state < 0 || !*fireside::award::tag_text(state)) return;
     { const QString bc = QString::fromStdString(fireside::qrz::base_call(call.toStdString())); if (tag_by_call_.size() > 500) tag_by_call_.clear(); tag_by_call_[bc] = state;
       for (auto& c : caller_list_) if (c.call == bc) c.tag = state;
       renderCallers(); }
-    QTextBlock b = dec_text_->document()->lastBlock(); QTextCharFormat fmt; fmt.setForeground(col[state]); int n = 0;
+    QTextBlock b = dec_text_->document()->lastBlock(); QTextCharFormat fmt; fmt.setForeground(tagColour(state)); if (state >= fireside::award::kNewDxcc) fmt.setFontWeight(QFont::Bold); int n = 0;
     for (; b.isValid() && n < 80; b = b.previous(), ++n) {
         const QString full = b.text(); const int sep = full.indexOf(kInfoSep); if (sep < 0) continue;             // the tag field follows the separator
         const int at = sep + int(kInfoSep.size()); if (!full.mid(at, kTagCols).trimmed().isEmpty()) continue;     // already tagged
         const auto m = fireside::logbook::parse_ftx_message(fireside::logbook::ftx_line_text(full.left(sep).toStdString())); if (!m.ok || QString::fromStdString(m.from) != call) continue;
         QTextCursor c(b); c.setPosition(b.position() + at); c.setPosition(std::min(b.position() + at + kTagCols, b.position() + int(full.size())), QTextCursor::KeepAnchor);
-        c.insertText(QString(text[state]).trimmed().leftJustified(kTagCols), fmt);
+        c.insertText(QString(fireside::award::tag_text(state)).leftJustified(kTagCols), fmt);
     }
 }
 QString ReceiverPanel::heardGrid(const QString& call) const {

@@ -1,13 +1,23 @@
 #include "fireside/dxcc.h"
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 namespace fireside::decode {
 namespace {
 const DxccEntry kTable[] = {
 #include "dxcc_table.inc"
 };
+struct ExactEntry { const char* call; const char* cont; int cq, itu; const char* dxcc; };
+const ExactEntry kExact[] = {
+#include "dxcc_exact.inc"
+};
+const std::unordered_map<std::string, const ExactEntry*>& exact_index() {
+    static const auto m = [] { std::unordered_map<std::string, const ExactEntry*> r; for (const auto& e : kExact) r.emplace(e.call, &e); return r; }();
+    return m;
+}
 const std::unordered_map<std::string, const DxccEntry*>& index() {
     static const auto m = [] { std::unordered_map<std::string, const DxccEntry*> r; for (const auto& e : kTable) r.emplace(e.prefix, &e); return r; }();
     return m;
@@ -17,6 +27,26 @@ const std::unordered_map<std::string, const DxccEntry*>& index() {
 const DxccEntry* dxcc_lookup(const std::string& call) {
     for (size_t n = std::min<size_t>(call.size(), 7); n >= 1; --n) { const auto it = index().find(call.substr(0, n)); if (it != index().end()) return it->second; }
     return nullptr;
+}
+Entity dxcc_entity(const std::string& in) {
+    std::string call; for (char ch : in) call += char(std::toupper(static_cast<unsigned char>(ch)));
+    Entity out; if (call.empty() || call[0] == '<') return out;                                       // a hashed call: unknown
+    auto from_exact = [&](const std::string& c) { const auto it = exact_index().find(c); if (it == exact_index().end()) return false;
+        out = {true, it->second->dxcc, it->second->cont, it->second->cq, it->second->itu}; return true; };
+    if (from_exact(call)) return out;
+    std::vector<std::string> parts; { size_t a = 0; for (;;) { const size_t b = call.find('/', a); parts.push_back(call.substr(a, b - a)); if (b == std::string::npos) break; a = b + 1; } }
+    std::vector<std::string> keep;
+    for (const auto& p : parts) {
+        if (p == "MM" || p == "AM") return out;                                                        // maritime / aeronautical mobile: no entity
+        if (p.empty() || p == "P" || p == "M" || p == "QRP" || p == "A" || p == "B" || p == "LH" || (p.size() == 1 && std::isdigit(static_cast<unsigned char>(p[0])))) continue;
+        keep.push_back(p);
+    }
+    if (keep.empty() || keep.size() > 2) return out;
+    std::string pre = keep[0];
+    if (keep.size() == 2) pre = keep[1].size() < keep[0].size() ? keep[1] : keep[0];               // two parts: the shorter is the prefix (EA8/G4ABC, G4ABC/EA8)
+    else if (from_exact(pre)) return out;                                                              // "G4ABC/P": the base call may be an exact entry
+    const DxccEntry* e = dxcc_lookup(pre); if (!e) return out;
+    out = {true, e->dxcc, e->cont, e->cq, e->itu}; return out;
 }
 bool grid4_center(const std::string& g, double& lat, double& lon) {
     if (g.size() != 4 || g[0] < 'A' || g[0] > 'R' || g[1] < 'A' || g[1] > 'R' || g[2] < '0' || g[2] > '9' || g[3] < '0' || g[3] > '9') return false;

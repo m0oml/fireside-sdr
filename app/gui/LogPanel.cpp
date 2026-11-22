@@ -1,5 +1,6 @@
 #include "LogPanel.h"
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <QCheckBox>
 #include <QComboBox>
@@ -54,8 +55,11 @@ LogPanel::LogPanel(ReceiverPanel* rx, QWidget* parent) : QWidget(parent), rx_(rx
     addRow("Server", url_); addRow("Token", token_); { auto* w = new QWidget; srow->setContentsMargins(0, 0, 0, 0); w->setLayout(srow); addRow("Station profile", w); }
     auto* trow = new QHBoxLayout; trow->addWidget(test); trow->addWidget(state_, 1); cf->addLayout(trow, crow++, 1); cf->setColumnStretch(1, 1);
     // ---- radio push
-    radio_name_ = new QLineEdit("FLEX-5000A"); push_ = new QCheckBox("Send frequency and mode to Wavelog when they change"); push_->setToolTip("Lets Wavelog's logbook form follow the dial. Never sends power. Off by default.");
-    auto* rf = new QGridLayout; rf->setHorizontalSpacing(10); rf->setVerticalSpacing(8); rf->addWidget(new QLabel("Radio name"), 0, 0); rf->addWidget(radio_name_, 0, 1); rf->addWidget(push_, 1, 0, 1, 2); rf->setColumnStretch(1, 1);
+    radio_name_ = new QLineEdit("FLEX-5000A"); push_ = new QCheckBox("Send frequency, mode and power to Wavelog");
+    push_->setToolTip("Wavelog's live QSO page fills in band, frequency, mode and power by itself: pick this radio name there. Sent on every change and every 5 minutes.\n"
+                      "Power is the forward power measured on your last over (left out until you have transmitted). The token needs the radio:write scope.");
+    push_state_ = new QLabel("Not sending"); push_state_->setObjectName("muted"); push_state_->setWordWrap(true);
+    auto* rf = new QGridLayout; rf->setHorizontalSpacing(10); rf->setVerticalSpacing(8); rf->addWidget(new QLabel("Radio name"), 0, 0); rf->addWidget(radio_name_, 0, 1); rf->addWidget(push_, 1, 0, 1, 2); rf->addWidget(push_state_, 2, 0, 1, 2); rf->setColumnStretch(1, 1);
     // ---- QRZ.com callbook (straight from QRZ, not through Wavelog): name, town, country, grid and distance for callers and decoded stations
     qrz_ = new QrzClient(this);
     qrz_user_ = new QLineEdit(qrz_->user()); qrz_user_->setPlaceholderText("QRZ.com username (your call)");
@@ -73,7 +77,27 @@ LogPanel::LogPanel(ReceiverPanel* rx, QWidget* parent) : QWidget(parent), rx_(rx
     connect(qrz_, &QrzClient::infoReady, this, [this](const QString& call, const fireside::qrz::Info&) {
         if (rerender_ && QString::fromStdString(fireside::qrz::base_call(call_->text().trimmed().toStdString())) == call) rerender_();   // the entry's station: draw the lookup again with it
     });
-    { auto* top = new QHBoxLayout; top->setSpacing(12); top->addWidget(theme::makeCard("Wavelog connection", cf), 3); top->addWidget(theme::makeCard("QRZ.com callbook", qf), 3); top->addWidget(theme::makeCard("Follow the dial", rf), 2); outer->addLayout(top); }
+    // ---- highlight on decodes: what a station would add to the log (from the whole Wavelog log, read at start-up and every 30 minutes)
+    auto* hf = new QGridLayout; hf->setHorizontalSpacing(10); hf->setVerticalSpacing(4);
+    {   struct H { const char* key; const char* text; const char* tip; bool fireside::award::Options::* field; };
+        static const H hs[] = {{"hl_dxcc", "New DXCC entity", "A country you have never worked", &fireside::award::Options::dxcc},
+                               {"hl_dxcc_band", "New DXCC on this band", "Worked, but never on this band (any mode)", &fireside::award::Options::dxcc_band},
+                               {"hl_cont", "New continent", "", &fireside::award::Options::cont},
+                               {"hl_cq", "New CQ zone", "Approximate: cty.dat gives one zone for all of the US, Canada, Russia, Australia and a few other big countries", &fireside::award::Options::cq},
+                               {"hl_itu", "New ITU zone", "Approximate, as for CQ zones", &fireside::award::Options::itu},
+                               {"hl_grid", "New grid square", "From the locator in their message (CQs and first replies carry one)", &fireside::award::Options::grid},
+                               {"hl_grid_band", "New grid on this band", "", &fireside::award::Options::grid_band}};
+        int i = 0;
+        for (const H& h : hs) {
+            auto* b = new QCheckBox(h.text); if (*h.tip) b->setToolTip(h.tip);
+            const bool on = qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS") ? hl_.*h.field : QSettings("fireside", "log").value(h.key, hl_.*h.field).toBool();
+            hl_.*h.field = on; b->setChecked(on);
+            connect(b, &QCheckBox::toggled, this, [this, h](bool v) { hl_.*h.field = v; if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) QSettings("fireside", "log").setValue(h.key, v); });
+            hf->addWidget(b, i / 2, i % 2); ++i;
+        }
+        hl_state_ = new QLabel("Log not read yet"); hl_state_->setObjectName("muted"); hl_state_->setWordWrap(true); hf->addWidget(hl_state_, (i + 1) / 2, 0, 1, 2);
+        hf->setColumnStretch(1, 1); }
+    { auto* top = new QHBoxLayout; top->setSpacing(12); top->addWidget(theme::makeCard("Wavelog connection", cf), 3); top->addWidget(theme::makeCard("QRZ.com callbook", qf), 3); top->addWidget(theme::makeCard("Follow the dial", rf), 2); top->addWidget(theme::makeCard("Highlight on decodes", hf), 3); outer->addLayout(top); }
     // ---- two widgets for the Receiver tab (take*Widget): a small LOOKUP box (callsign + Enter -> who is it, have I worked them), and the large LOG form that replaces the Band and Mode cards
     call_ = new QLineEdit; call_->setPlaceholderText("callsign, then Enter"); call_->setMaxLength(14); call_->setMinimumWidth(150); rst_sent_ = new QLineEdit; rst_rcvd_ = new QLineEdit; name_ = new QLineEdit; grid_ = new QLineEdit; comment_ = new QLineEdit;
     for (auto* e : {rst_sent_, rst_rcvd_}) { e->setMaximumWidth(80); e->setPlaceholderText("59"); } name_->setPlaceholderText("name"); grid_->setMinimumWidth(80); grid_->setPlaceholderText("grid"); comment_->setPlaceholderText("comment");
@@ -112,13 +136,16 @@ LogPanel::LogPanel(ReceiverPanel* rx, QWidget* parent) : QWidget(parent), rx_(rx
     connect(call_, &QLineEdit::textChanged, this, [this](const QString& t) { const QString u = t.toUpper(); if (u != t) { QSignalBlocker b(call_); const int c = call_->cursorPosition(); call_->setText(u); call_->setCursorPosition(c); } ++lookup_serial_; looked_up_.clear(); worked_->setText(" "); look_btn_->setText("Look up"); });
     connect(call_, &QLineEdit::returnPressed, this, [this] { enterPressed(); });
     connect(push_timer_, &QTimer::timeout, this, [this] { freq_mode_->setText(QString("%1 kHz  %2").arg(rx_->dialHz() / 1e3, 0, 'f', 3).arg(currentMode())); pushRadioIfChanged(); });
-    connect(push_, &QCheckBox::toggled, this, [this](bool on) { if (!loading_) setRadioPush(on); });
+    connect(push_, &QCheckBox::toggled, this, [this](bool on) { if (loading_) return; setRadioPush(on); if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) QSettings("fireside", "log").setValue("push_radio", on); });
+    connect(radio_name_, &QLineEdit::editingFinished, this, [this] { last_push_hz_ = -1; pushRadioIfChanged(); });   // a new name is a new radio in Wavelog: send it at once
     connect(station_box_, &QComboBox::activated, this, [this](int i) { if (i >= 0) station_->setValue(station_box_->itemData(i).toInt()); });
     loadFromFiles(); refreshLastContacts(); push_timer_->start();
     { auto* st = new QTimer(this); st->setSingleShot(true); st->setInterval(800); connect(st, &QTimer::timeout, this, [this] { fetchStation(); });
       connect(station_, &QSpinBox::valueChanged, this, [this, st] { if (!loading_) st->start(); });
       if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) QTimer::singleShot(1000, this, [this] { fetchStation(); }); }   // the profile's call / grid at start-up
     recent_timer_ = new QTimer(this); recent_timer_->setInterval(5 * 60 * 1000); connect(recent_timer_, &QTimer::timeout, this, [this] { refreshFromWavelog(); }); recent_timer_->start(); QTimer::singleShot(800, this, [this] { refreshFromWavelog(); });
+    { auto* it = new QTimer(this); it->setInterval(10 * 60 * 1000); connect(it, &QTimer::timeout, this, [this] { loadWorkedIndex(); }); it->start();
+      if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) QTimer::singleShot(1500, this, [this] { loadWorkedIndex(); }); }
     freq_mode_->setText(QString("%1 kHz  %2").arg(rx_->dialHz() / 1e3, 0, 'f', 3).arg(currentMode()));
 }
 
@@ -135,9 +162,11 @@ void LogPanel::loadFromFiles() {
     if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) {
         QSettings q("fireside", "log"); station_->setValue(q.value("station", 1).toInt()); radio_name_->setText(q.value("radio", "FLEX-5000A").toString());
         my_call_->setText(q.value("my_call").toString()); my_grid_->setText(q.value("my_grid").toString());
+        push_->setChecked(q.value("push_radio", false).toBool());           // not a transmit permission: remembered
     }
     { const bool every = qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS") ? true : QSettings("fireside", "log").value("qrz_every", true).toBool(); qrz_every_->setChecked(every); qrz_->setEveryDecode(every); }
     loading_ = false; state_->setText(configured() ? "Configured: press Test connection" : "Not configured");
+    if (push_->isChecked()) push_state_->setText(configured() ? "Sending shortly" : "Set up the Wavelog connection first");
 }
 void LogPanel::writeTokenFile() {
     QDir().mkpath(QFileInfo(envPath()).absolutePath()); QFile f(envPath());
@@ -382,6 +411,7 @@ void LogPanel::logNow() {
     try { rec = adif_record(q); } catch (const std::exception& e) { setStatus(QString("Not logged: ") + e.what()); return; }
     QDir().mkpath(dir_);
     try { append_adif_file((dir_ + "/log.adi").toStdString(), q, "fireside", "1"); } catch (const std::exception& e) { setStatus(QString("Not logged: cannot write the local copy: ") + e.what()); return; }   // the safety copy comes first
+    if (index_ready_) index_.add(q.call, band_for_hz(q.freq_hz), q.grid, false);                            // worked now, whether or not Wavelog takes it (counted when Wavelog reports it)
     refreshLastContacts(); for (const QString& k : worked_cache_.keys()) if (k.startsWith(QString::fromStdString(q.call).toUpper() + "|")) worked_cache_.remove(k);
     const QString line = QString("%1  %2  %3 kHz  %4").arg(QDateTime::currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss"), QString::fromStdString(q.call)).arg(q.freq_hz / 1e3, 0, 'f', 3).arg(QString::fromStdString(q.mode));
     if (!configured()) { try { append_adif_file((dir_ + "/unsent.adi").toStdString(), q, "fireside", "1"); } catch (...) {} recent_->appendPlainText(line + "   [saved locally only]"); setStatus("Saved locally (Wavelog not configured)"); last_logged_ = QString::fromStdString(q.call).toUpper(); last_logged_at_ = QDateTime::currentDateTimeUtc(); auto_call_.clear(); clearForm(); unsent_btn_->setVisible(unsentCount() > 0); return; }
@@ -411,14 +441,27 @@ void LogPanel::sendUnsent() {
     });
 }
 
-void LogPanel::setRadioPush(bool on) { QSignalBlocker b(push_); push_->setChecked(on); last_push_hz_ = -1; if (on) pushRadioIfChanged(); }
+void LogPanel::setRadioPush(bool on) {
+    QSignalBlocker b(push_); push_->setChecked(on); last_push_hz_ = -1; push_retry_ms_ = 0;
+    if (!on) push_state_->setText("Not sending"); else if (!configured()) push_state_->setText("Set up the Wavelog connection first"); else pushRadioIfChanged();
+}
+QString LogPanel::radioPushStatus() const { return push_state_->text(); }
 void LogPanel::pushRadioIfChanged() {
-    if (!push_->isChecked() || !configured()) return;
+    if (!push_->isChecked() || !configured() || radio_name_->text().trimmed().isEmpty()) return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch(); if (now < push_retry_ms_) return;                 // after an error: wait a minute, not 3 s
     const double hz = std::round(rx_->dialHz()); const QString mode = currentMode();
-    if (hz == last_push_hz_ && mode == last_push_mode_) return;
-    last_push_hz_ = hz; last_push_mode_ = mode;
-    auto* r = post(kWavelogRadioPath, QByteArray::fromStdString(wavelog_radio_body(radio_name_->text().toStdString(), hz, mode.toStdString())));
-    connect(r, &QNetworkReply::finished, this, [this, r] { r->deleteLater(); if (r->error() == QNetworkReply::NoError) ++radio_pushes_; else last_push_hz_ = -1; });   // retry on the next tick after a failure
+    const double pw = tx_pwr_ ? tx_pwr_() : 0.0; const int w = pw >= 0.5 ? int(std::lround(pw)) : -1;          // -1: not known (no over in the last 10 minutes); keep what Wavelog has
+    const bool changed = hz != last_push_hz_ || mode != last_push_mode_ || (w > 0 && w != last_push_w_);
+    if (!changed && now - last_push_ms_ < 5 * 60 * 1000) return;                                               // heartbeat: Wavelog counts a radio as current for 15 minutes
+    last_push_hz_ = hz; last_push_mode_ = mode; if (w > 0) last_push_w_ = w; last_push_ms_ = now;
+    auto* r = post(kWavelogRadioPath, QByteArray::fromStdString(wavelog_radio_body(radio_name_->text().trimmed().toStdString(), hz, mode.toStdString(), w > 0 ? w : 0)));
+    const QString what = QString("%1 kHz %2%3").arg(hz / 1e3, 0, 'f', 3).arg(mode).arg(w > 0 ? QString(" %1 W").arg(w) : QString());
+    connect(r, &QNetworkReply::finished, this, [this, r, what] {
+        r->deleteLater();
+        if (r->error() == QNetworkReply::NoError) { ++radio_pushes_; push_retry_ms_ = 0; push_state_->setText(QString("Sent %1 UTC: %2").arg(QDateTime::currentDateTimeUtc().toString("HH:mm:ss"), what)); return; }
+        const QString why = failure(r); last_push_hz_ = -1; push_retry_ms_ = QDateTime::currentMSecsSinceEpoch() + 60 * 1000;   // send again in a minute
+        push_state_->setText(why + (why.contains("403") ? " (the token needs the radio:write scope)" : "") + ". Trying again in a minute.");
+    });
 }
 
 // ---------------------------------------------------------------- worked-before tags for decoded FT8/FT4 stations: one cached, read-only lookup per callsign (no callbook), one request at a time
@@ -426,7 +469,7 @@ void LogPanel::checkWorked(const QString& callIn) {
     const QString call = callIn.trimmed().toUpper();
     if (!configured() || !valid_call(call.toStdString()) || call == my_call_->text().toUpper()) return;
     const QString key = call + "|" + QString::fromStdString(band_for_hz(rx_->dialHz())) + "|" + currentMode();
-    const auto it = worked_cache_.constFind(key); if (it != worked_cache_.constEnd()) { emit workedKnown(call, it.value()); return; }
+    const auto it = worked_cache_.constFind(key); if (it != worked_cache_.constEnd()) { emitWorked(call, it.value()); return; }
     if (!worked_queue_.contains(key) && worked_queue_.size() < 40) worked_queue_ << key;
     pumpWorked();
 }
@@ -439,11 +482,41 @@ void LogPanel::pumpWorked() {
         if (r->error() == QNetworkReply::NoError) {
             const QJsonObject d = QJsonDocument::fromJson(r->readAll()).object().value("data").toObject();
             const int st = !d.value("call_worked").toBool() ? 0 : !d.value("call_worked_band_mode").toBool() ? 1 : 2;
-            worked_cache_.insert(key, st); emit workedKnown(p[0], st);
+            worked_cache_.insert(key, st); emitWorked(p[0], st);
         }
         QTimer::singleShot(250, this, [this] { worked_busy_ = false; pumpWorked(); });                              // gentle on the server: at most four lookups a second
     });
 }
+void LogPanel::emitWorked(const QString& call, int st) {
+    const int a = index_ready_ ? index_.tag(call.toStdString(), band_for_hz(rx_->dialHz()), rx_->heardGrid(call).toStdString(), hl_) : fireside::award::kNone;
+    emit workedKnown(call, a != fireside::award::kNone ? a : st);
+}
+// ---------------------------------------------------------------- the whole log, for the new DXCC / grid tags: built aside and swapped in only when every page has arrived
+void LogPanel::loadWorkedIndex() {
+    if (!configured() || index_busy_) return;
+    index_busy_ = true; if (!index_ready_) hl_state_->setText("Reading the log from Wavelog...");
+    auto load = std::make_shared<IndexLoad>();
+    if (index_ready_) { load->idx = index_; load->since = load->max_id = index_max_id_; }                  // after the first read: only what is new (usually nothing)
+    fetchIndexPage(1, load);
+}
+void LogPanel::fetchIndexPage(int page, std::shared_ptr<IndexLoad> load) {
+    auto* r = get(QString::fromStdString(wavelog_all_qsos_path(page, load->since)));
+    connect(r, &QNetworkReply::finished, this, [this, r, page, load] {
+        r->deleteLater();
+        if (r->error() != QNetworkReply::NoError) { index_busy_ = false; hl_state_->setText(failure(r) + (index_ready_ ? ": showing the log read earlier" : ": no DXCC or grid tags until it can be read")); return; }
+        const QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
+        for (const auto& x : o.value("data").toArray()) {
+            const QJsonObject q = x.toObject(); const long long id = q.value("id").toVariant().toLongLong();
+            if (load->since > 0 && id <= load->since) continue;                                                   // a server that ignores since_id: no double count
+            load->idx.add(q.value("call").toString().toStdString(), q.value("band").toString().toStdString(), q.value("gridsquare").toString().toStdString());
+            load->max_id = std::max(load->max_id, id);
+        }
+        if (o.value("meta").toObject().value("has_more").toBool() && page < 200) { fetchIndexPage(page + 1, load); return; }
+        index_ = load->idx; index_max_id_ = load->max_id; index_ready_ = true; index_busy_ = false;         // swapped in only when every page has arrived
+        hl_state_->setText(QString("Log read %1 UTC: %2 QSOs, %3 DXCC entities, %4 grids").arg(QDateTime::currentDateTimeUtc().toString("HH:mm")).arg(index_.qsos()).arg(index_.dxcc_count()).arg(index_.grid_count()));
+    });
+}
+QString LogPanel::highlightStatus() const { return hl_state_->text(); }
 bool LogPanel::fillFromDecode(const QString& line) {
     int snr = 0; const std::string text = ftx_line_text(line.toStdString(), &snr); const FtxMessage m = parse_ftx_message(text);
     if (!m.ok) { setStatus("That line has no usable callsign"); return false; }

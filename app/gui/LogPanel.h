@@ -6,6 +6,8 @@
 #include <QDateTime>
 #include <QWidget>
 #include <functional>
+#include <memory>
+#include "fireside/award.h"
 #include "fireside/logbook.h"
 #include "fireside/qrz.h"
 class QCheckBox; class QComboBox; class QLabel; class QLineEdit; class QNetworkAccessManager; class QNetworkReply; class QPlainTextEdit; class QPushButton; class QSpinBox; class QTimer;
@@ -36,7 +38,7 @@ public:
     void lookupNow();
     void logNow();                                                            // log the form's QSO now (UTC time of the click)
     void sendUnsent();
-    void pushRadioIfChanged();
+    void pushRadioIfChanged();                                                // sends dial, mode and power when one changed, or every 5 minutes so Wavelog never shows the radio as stale
     int unsentCount() const;
     QString status() const { return status_; }
     QString workedText() const;
@@ -44,6 +46,7 @@ public:
     void showLookupResult(const QString& html);         // the lookup result line(s) in the small box (tests use it to check the box never changes size)
     QString lastContactsText() const;
     uint64_t radioPushes() const { return radio_pushes_; }
+    QString radioPushStatus() const;                                          // the line under the tick (tests)
     void setRadioPush(bool on);
     // A decoded FT8/FT4 line addressed to us (someone answering): fills the entry from it and looks the caller up, like a double-click, unless the entry already
     // holds another callsign (typed, or an earlier caller: the first one stays until logged or cleared) or a form is open, or the caller was logged in the last
@@ -51,6 +54,10 @@ public:
     void callerDecoded(const QString& line);
     void logAuto(const QString& call, const QString& grid, const QString& rstSent, const QString& rstRcvd);   // a QSO the FT8 sequencer completed: logged now (Wavelog + the local copy)
     QString autoCall() const { return auto_call_; }
+    void loadWorkedIndex();                                                   // the log from Wavelog (read-only) for the new DXCC / continent / zone / grid tags: all of it once, then only QSOs newer than the last one seen (every 10 minutes)
+    QString highlightStatus() const;                                          // "Log read: 108 QSOs, 31 DXCC, 52 grids" (tests)
+    const fireside::award::WorkedIndex& workedIndex() const { return index_; }
+    bool workedIndexReady() const { return index_ready_; }
     void checkWorked(const QString& call);                                    // FT8/FT4 decode: is this station new / new on this band or mode / already worked? (answered through workedKnown; read-only, cached, one request at a time)
     QrzClient* qrz() const { return qrz_; }                                    // QRZ.com callbook (its settings card is on this tab)
     void setQrzCredentials(const QString& user, const QString& password);   // what the QRZ fields show (tests)
@@ -62,12 +69,16 @@ public:
     void saveSettings();                                                      // station id, radio name; the token goes to a 0600 file, never to QSettings
 signals:
     void statusChanged(const QString&);
-    void workedKnown(const QString& call, int state);                         // 0 = new callsign, 1 = worked, but not on this band and mode, 2 = already worked on this band and mode
+    void workedKnown(const QString& call, int state);                         // 0 = new callsign, 1 = worked, but not on this band and mode, 2 = already worked on this band and mode; 3..9: fireside::award::Tag (new DXCC, grid...), which outranks 0..2
     void activeChanged(bool open);                                            // the large log form opened / closed
 private:
     void showLastRows(const QList<QStringList>& rows, const QString& source);
     QTimer* recent_timer_ = nullptr; bool wavelog_recent_ok_ = false;
     void pumpWorked();
+    void emitWorked(const QString& call, int state);    // the worked-before state, or the award tag when the log index has one
+    struct IndexLoad { fireside::award::WorkedIndex idx; long long since = 0, max_id = 0; };
+    void fetchIndexPage(int page, std::shared_ptr<IndexLoad> load);
+    fireside::award::WorkedIndex index_; long long index_max_id_ = 0; bool index_ready_ = false, index_busy_ = false; fireside::award::Options hl_; QLabel* hl_state_ = nullptr;
     QHash<QString, int> worked_cache_; QStringList worked_queue_; bool worked_busy_ = false;
     QNetworkReply* post(const QString& path, const QByteArray& body);
     QNetworkReply* get(const QString& path);
@@ -82,5 +93,5 @@ private:
     QrzClient* qrz_ = nullptr; QLineEdit *qrz_user_ = nullptr, *qrz_pass_ = nullptr; QCheckBox* qrz_every_ = nullptr; QLabel* qrz_state_ = nullptr;
     std::function<void()> rerender_; std::function<double()> tx_pwr_;                     // the current lookup's renderer (QRZ answers after Wavelog: draw again)
     QString auto_call_, last_logged_; QDateTime last_logged_at_;
-    QString status_, dir_, last_looked_up_; double last_push_hz_ = -1; QString last_push_mode_; uint64_t radio_pushes_ = 0; int lookup_serial_ = 0; bool loading_ = false;
+    QString status_, dir_, last_looked_up_; double last_push_hz_ = -1; QString last_push_mode_; int last_push_w_ = -1; qint64 last_push_ms_ = 0, push_retry_ms_ = 0; QLabel* push_state_ = nullptr; uint64_t radio_pushes_ = 0; int lookup_serial_ = 0; bool loading_ = false;
 };

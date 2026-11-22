@@ -45,6 +45,10 @@ TEST(wavelog_v2_bodies_and_paths) {
     CHECK(!has(wavelog_adif_import_body(1, "x", false), "dryrun"));
     const std::string r = wavelog_radio_body("FLEX-5000A", 14074000, "USB");
     CHECK_EQ(r, std::string("{\"radio\":\"FLEX-5000A\",\"frequency\":14074000,\"mode\":\"SSB\"}")); CHECK(!has(r, "power")); CHECK(!has(r, "key"));
+    CHECK_EQ(wavelog_radio_body("FLEX-5000A", 14074000, "USB", 48.6), std::string("{\"radio\":\"FLEX-5000A\",\"frequency\":14074000,\"mode\":\"SSB\",\"power\":49}"));
+    CHECK(!has(wavelog_radio_body("F", 7074000, "FT8", 0.4), "power"));
+    CHECK(has(wavelog_radio_body("F", 7047500, "FT4"), "\"mode\":\"FT4\"")); CHECK(has(wavelog_radio_body("F", 7040000, "PSK31"), "\"mode\":\"PSK31\"")); CHECK(has(wavelog_radio_body("F", 7030000, "CW"), "\"mode\":\"CW\""));
+    CHECK_EQ(wavelog_all_qsos_path(2), std::string("/index.php/api/v2/qso?per_page=5000&page=2")); CHECK_EQ(wavelog_all_qsos_path(0), std::string("/index.php/api/v2/qso?per_page=5000&page=1")); CHECK_EQ(wavelog_all_qsos_path(1, 812), std::string("/index.php/api/v2/qso?per_page=5000&page=1&since_id=812"));
     CHECK_EQ(wavelog_lookup_path("dl2al", "20m", "FT8"), std::string("/index.php/api/v2/lookup?callsign=DL2AL&detail=full&band=20m&mode=FT8"));
     CHECK_EQ(wavelog_lookup_path("dl2al", "20m", "FT8", true), std::string("/index.php/api/v2/lookup?callsign=DL2AL&detail=full&band=20m&mode=FT8&callbook=true")); CHECK_EQ(wavelog_history_path("k1abc/p"), std::string("/index.php/api/v2/qso?callsign=K1ABC%2FP&limit=1"));
     CHECK_EQ(wavelog_lookup_path("k1abc/p", "", ""), std::string("/index.php/api/v2/lookup?callsign=K1ABC%2FP&detail=full"));

@@ -123,6 +123,8 @@ private:
 // Unpacks the 77-bit message types ft8_lib cannot (ARRL RTTY Roundup, Field Day, DXpedition, EU VHF); false for any other type or invalid contents. A hashed callsign prints as
 // "<...>" unless one of `heard_messages` (encoded first, which hashes their callsigns) contained it. For tests and reuse.
 bool unpack_extra_message(const uint8_t payload[10], std::string& text, const std::vector<std::string>& heard_messages = {});
+// Tests: exercises the decoder's callsign hash table (full table, colliding hashes aged out, a dropped message's saves). "" when all is well.
+std::string hash_table_self_check();
 std::vector<std::complex<float>> synth_ft_iq(const std::string& message, double f0, double fs, bool ft4, double dt_s);   // analytic (USB) FT8/FT4 at fs, a slot long, envelope 1; empty if not encodable
 std::vector<float> synth_ft8(const std::string& message, double freq_hz, double fs = 48000, double amplitude = 0.3, double dt_s = 0.5);
 // The same for FT4: a 7.5 s slot.

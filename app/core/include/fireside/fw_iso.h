@@ -163,6 +163,7 @@ public:
     virtual void start(int cycle15) = 0;                   // after the first packets are queued: 2 bits of seconds << 13 | the 13-bit cycle
     virtual void reap() = 0;                               // frees the room of packets sent (non-blocking). Throws IoError (bus reset, device gone)
     virtual size_t queued() const = 0;                     // packets waiting to go out
+    virtual bool has_room() const { return true; }        // queue() would accept one more packet (checked before a packet is encoded)
     virtual void stop() noexcept = 0;
     virtual std::string describe() const = 0;
 };
@@ -194,6 +195,8 @@ public:
     // Input tap: one input channel (7 = the radio's mic) copied as float at the stream rate into a ring for a reader (voice TX). -1 = off.
     void set_input_tap(int channel, size_t ring_frames = 0);
     size_t read_tap(float* x, size_t n, double timeout_s);   // up to n samples (stream rate); 0 if none within the timeout; throws IoError once failed
+    void tap_hold();                                          // a reader announces itself (under the published-stream lock) before read_tap, which releases it;
+                                                              // close() waits until no reader is left, so a reader never touches a destroyed stream
     bool duplex() const { return tx_ != nullptr; }
     FwIsoTxStats tx_stats() const;
 private:
@@ -210,7 +213,7 @@ private:
     std::unique_ptr<IIsoTransmitter> tx_; std::unique_ptr<AmdtpEncoder> enc_; std::unique_ptr<ReplayScheduler> sched_; std::vector<OutPacket> outq_; std::vector<uint8_t> payload_; std::vector<int32_t> frames_;
     struct OutRing { std::vector<int32_t> buf; size_t head = 0, count = 0; uint64_t written = 0; };
     OutRing out_[2]; FwIsoTxStats txs_;
-    int tap_ch_ = -1; std::vector<float> tap_; size_t tap_head_ = 0, tap_count_ = 0; std::condition_variable tap_cv_;   // guarded by m_                    // [0] transmit I/Q (ch0/1), [1] audio (ch2..7): guarded by m_
+    int tap_ch_ = -1; std::vector<float> tap_; size_t tap_head_ = 0, tap_count_ = 0; std::condition_variable tap_cv_; int tap_readers_ = 0;   // guarded by m_                    // [0] transmit I/Q (ch0/1), [1] audio (ch2..7): guarded by m_
 };
 // duplex: the transmit side of the running direct stream as an IPcmOut (8 channels at the stream's rate), for TxControl. Throws IoError if
 // no duplex stream runs; its write() throws IoError once that stream is closed. Writes nothing to the radio itself: the stream's worker

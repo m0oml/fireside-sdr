@@ -42,6 +42,11 @@ TEST(decode_edge_cases) {
 }
 TEST(csv_matches_python_byte_for_byte) {
     auto img = read_bin("trx.bin"); CHECK_EQ(csv_text(img), read_text("trx.csv")); CHECK(parse_csv(csv_text(img)) == img);
+    std::string crlf; for (char c : csv_text(img)) { if (c == '\n') crlf += '\r'; crlf += c; }
+    CHECK(parse_csv(crlf) == img);                                                     // a backup.csv saved on Windows
+    CHECK_THROWS(parse_csv("addr,0,1\n0,1FF,2\n"), std::invalid_argument);           // not a byte: refused, never truncated
+    CHECK_THROWS(parse_csv("addr,0,1\n0,zz,2\n"), std::invalid_argument);
+    for (size_t len : {size_t(0x21C), size_t(0x220), size_t(0x400)}) { std::vector<uint8_t> cut(img.begin(), img.begin() + long(std::min(len, img.size()))); decode_eeprom(cut); }   // a short image never reads past its end
 }
 TEST(read_image_and_verification_over_pty) {
     FakeRadio radio; auto img = read_bin("trx.bin"); std::copy(img.begin(), img.end(), radio.eeprom_trx.begin());

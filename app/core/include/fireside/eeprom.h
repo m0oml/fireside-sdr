@@ -37,7 +37,7 @@ Decoded decode_eeprom(const std::vector<uint8_t>& data, const std::string& which
 struct RxLevelCal { bool valid = false; std::string problem; std::array<double, 11> display{}, preamp{}, meter{}; };
 RxLevelCal rx_level_cal(const Decoded& d);
 std::string csv_text(const std::vector<uint8_t>& data);          // PowerSDR Dump() format: hex bytes with NO leading zeros
-std::vector<uint8_t> parse_csv(const std::string& text);
+std::vector<uint8_t> parse_csv(const std::string& text);          // LF or CRLF; throws std::invalid_argument on a cell that is not a byte
 
 std::vector<uint8_t> read_image(Flex& fx, const std::string& which = "TRX", size_t length = 0, int retries = 3, double timeout_s = 1.0);
 std::vector<uint8_t> read_verified(Flex& fx, const std::string& which = "TRX", size_t length = 0, int passes = 2);

@@ -15,6 +15,7 @@ void RxEngine::set_source(std::unique_ptr<IqSource> src) {
     if (src_) { st_.sample_rate = src_->sample_rate(); st_.live = src_->live(); st_.source = src_->describe(); }
 }
 void RxEngine::configure(RxOptions opt) {
+    opt.max_frames = std::max<size_t>(opt.max_frames, 1); opt.max_audio = std::max<size_t>(opt.max_audio, 1);   // 0 would pop an empty queue
     std::lock_guard<std::mutex> l(m_);
     if (src_) opt.rc.sample_rate = src_->sample_rate();
     opt.dc.input_rate = opt.rc.sample_rate;
@@ -25,12 +26,16 @@ void RxEngine::configure(RxOptions opt) {
 }
 void RxEngine::set_taps(IqTap iq, AudioTap audio) { std::lock_guard<std::mutex> l(m_); iq_tap_ = std::move(iq); audio_tap_ = std::move(audio); }
 void RxEngine::start() {
-    { std::lock_guard<std::mutex> l(m_); if (!src_ || !chain_) return; }
-    { std::lock_guard<std::mutex> dl(d_); if (st_.ended) return; }
-    origin_ = Clock::now(); consumed_ = 0;
-    if (!have_opt_ || !opt_.threaded) { running_ = true; std::lock_guard<std::mutex> dl(d_); st_.running = true; return; }
-    if (th_.joinable() && running_) return;
-    if (th_.joinable()) { quit_ = true; th_.join(); }
+    if (th_.joinable() && running_) return;                                            // already running: leave its clock and position alone
+    bool threaded;
+    {
+        std::lock_guard<std::mutex> l(m_); if (!src_ || !chain_) return;
+        { std::lock_guard<std::mutex> dl(d_); if (st_.ended) return; }
+        threaded = have_opt_ && opt_.threaded;
+        if (!threaded) { origin_ = Clock::now(); consumed_ = 0; running_ = true; std::lock_guard<std::mutex> dl(d_); st_.running = true; return; }
+    }
+    if (th_.joinable()) { quit_ = true; th_.join(); }                                  // a worker that ended by itself
+    { std::lock_guard<std::mutex> l(m_); origin_ = Clock::now(); consumed_ = 0; }      // no worker now: the new one starts its pacing from here
     quit_ = false; running_ = true; { std::lock_guard<std::mutex> dl(d_); st_.running = true; }
     th_ = std::thread([this] { loop(); });
 }
@@ -41,6 +46,7 @@ void RxEngine::stop() {
 }
 
 void RxEngine::on_frame(const std::vector<float>& db) {                                // called from inside chain->process, i.e. with m_ held
+    if (db.empty()) return;
     const size_t pk = size_t(std::max_element(db.begin(), db.end()) - db.begin());
     std::lock_guard<std::mutex> dl(d_);
     st_.peak_db = double(db[pk]); st_.peak_hz = chain_->spectrum().bin_hz(pk); ++st_.frames;

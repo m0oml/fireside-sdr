@@ -130,3 +130,17 @@ TEST(seq_a_limited_call_gives_up_after_two_tries_and_an_answer_restores_the_norm
     CHECK(v.heard(H("M0OML OK1XYZ R-10")));                                                                   // they answered: the next step
     for (int i = 0; i < 4; ++i) { CHECK_EQ(v.next_message(), std::string("OK1XYZ M0OML RR73")); (void)v.heard(H("M0OML OK1XYZ R-10")); }   // more than 2: the limit was for the call only
 }
+TEST(seq_a_late_rr73_while_calling_cq_is_not_a_new_qso) {   // we sent 73 and went back to CQ; they repeat RR73 (missed our 73): nothing is sent or logged
+    seq::Sequencer s("M0OML", "IO92");
+    s.call_cq(); CHECK_EQ(s.next_message(), std::string("CQ M0OML IO92"));
+    CHECK(!s.heard(H("M0OML DK0ULR RR73"))); CHECK(!s.heard(H("M0OML DK0ULR RRR"))); CHECK(!s.heard(H("M0OML DK0ULR 73")));
+    CHECK(s.stage() == seq::Stage::Cq); CHECK(s.dx().empty()); CHECK(!s.take_log()); CHECK_EQ(s.next_message(), std::string("CQ M0OML IO92"));
+    CHECK(s.heard(H("M0OML DK0ULR JN58", -11))); CHECK_EQ(s.next_message(), std::string("DK0ULR M0OML -11"));   // a real answer still works
+}
+TEST(seq_a_refused_reply_leaves_the_qso_alone) {   // double-clicking a late "ME OTHER 73" must not wipe a finished QSO's pending log
+    seq::Sequencer s("M0OML", "IO92");
+    CHECK(s.reply_to(H("M0OML DL2AL R-11", -6))); CHECK_EQ(s.next_message(), std::string("DL2AL M0OML RR73"));
+    CHECK(!s.reply_to(H("M0OML G4ABC 73")));
+    CHECK_EQ(s.dx(), std::string("DL2AL")); auto l = s.take_log(); CHECK(l && l->call == "DL2AL" && l->rst_rcvd == "-11");
+}
+TEST(ft8_callsign_hash_table_never_hangs_or_loses_calls) { CHECK_EQ(decode::hash_table_self_check(), std::string()); }

@@ -39,24 +39,47 @@ constexpr int kRate = 12000, kMaxMsgs = 120, kMaxCand = 140, kMinScore = 10, kLd
 constexpr bool kDeep = true;                // WSJT-X's per-candidate deep stage (fine sync, 5 soft-bit sets, a-priori passes) after the fallbacks above
 constexpr int kOsdSums = 2, kOsdDepth = 2;   // on: +6.9 % of jt9's decodes on two live captures, 0 false in 1000 noise slots (analysis/ft8-vs-wsjtx-2026-11-18.md)
 
-// ft8_lib wants callsign hashing through plain function pointers: a thread-local table pointer carries the context
+// ft8_lib wants callsign hashing through plain function pointers: a thread-local table pointer carries the context.
+// 256 entries, scanned whole (no probe chains: aging an entry out can never hide another). Full: the oldest entry makes room. A lookup returns the
+// youngest match. While a message is being unpacked its saves go to `pending` and are committed only if the message is kept (a false decode leaves nothing).
 struct HashTable {
-    struct Entry { char call[12] = {0}; uint32_t hash = 0; };
-    Entry e[256]; int size = 0;
+    struct Entry { char call[12] = {0}; uint32_t hash = 0; uint8_t age = 0; };
+    static constexpr int kN = 256;
+    Entry e[kN]; int size = 0; std::vector<std::pair<std::string, uint32_t>>* pending = nullptr;
+    HashTable() = default;
+    HashTable(const HashTable& o) { std::copy(std::begin(o.e), std::end(o.e), e); size = o.size; }            // a copy never shares the pending list
+    HashTable& operator=(const HashTable& o) { if (this != &o) { std::copy(std::begin(o.e), std::end(o.e), e); size = o.size; pending = nullptr; } return *this; }
     void add(const char* c, uint32_t hash) {
-        int i = int(((hash >> 12) & 0x3FFu) * 23u) % 256;
-        while (e[i].call[0]) { if ((e[i].hash & 0x3FFFFFu) == hash && !std::strcmp(e[i].call, c)) { e[i].hash &= 0x3FFFFFu; return; } i = (i + 1) % 256; }
-        ++size; std::strncpy(e[i].call, c, 11); e[i].call[11] = 0; e[i].hash = hash;
+        hash &= 0x3FFFFFu;
+        if (pending) { pending->emplace_back(c, hash); return; }
+        int free = -1, oldest = -1;
+        for (int i = 0; i < kN; ++i) {
+            if (!e[i].call[0]) { if (free < 0) free = i; continue; }
+            if (e[i].hash == hash && !std::strcmp(e[i].call, c)) { e[i].age = 0; return; }     // heard again: young again
+            if (oldest < 0 || e[i].age > e[oldest].age) oldest = i;
+        }
+        const int i = free >= 0 ? free : oldest; if (i < 0) return;
+        if (free >= 0) ++size;
+        std::strncpy(e[i].call, c, 11); e[i].call[11] = 0; e[i].hash = hash; e[i].age = 0;
     }
     bool lookup(ftx_callsign_hash_type_t t, uint32_t hash, char* out) const {
         const unsigned shift = t == FTX_CALLSIGN_HASH_10_BITS ? 12u : (t == FTX_CALLSIGN_HASH_12_BITS ? 10u : 0u);
-        int i = int(((hash >> (12 - shift)) & 0x3FFu) * 23u) % 256;
-        while (e[i].call[0]) { if (((e[i].hash & 0x3FFFFFu) >> shift) == hash) { std::strcpy(out, e[i].call); return true; } i = (i + 1) % 256; }
-        out[0] = 0; return false;
+        if (pending) for (auto it = pending->rbegin(); it != pending->rend(); ++it) if ((it->second >> shift) == hash) { std::snprintf(out, 12, "%s", it->first.c_str()); return true; }
+        int best = -1;
+        for (int i = 0; i < kN; ++i) if (e[i].call[0] && (e[i].hash >> shift) == hash && (best < 0 || e[i].age < e[best].age)) best = i;
+        if (best < 0) { out[0] = 0; return false; }
+        std::strcpy(out, e[best].call); return true;
     }
     void age(uint8_t max_age) {
-        for (auto& x : e) if (x.call[0]) { const uint8_t a = uint8_t(x.hash >> 24); if (a > max_age) { x.call[0] = 0; x.hash = 0; --size; } else x.hash = ((uint32_t(a) + 1u) << 24) | (x.hash & 0x3FFFFFu); }
+        for (auto& x : e) if (x.call[0]) { if (x.age > max_age) { x = Entry{}; --size; } else ++x.age; }
     }
+};
+// Holds one message's callsign saves until the message has passed every check (commit), else drops them.
+struct PendingSaves {
+    HashTable& t; std::vector<std::pair<std::string, uint32_t>> v;
+    explicit PendingSaves(HashTable& tab) : t(tab) { t.pending = &v; }
+    ~PendingSaves() { t.pending = nullptr; }
+    void commit() { t.pending = nullptr; for (auto& x : v) t.add(x.first.c_str(), x.second); v.clear(); }
 };
 thread_local HashTable* g_tab = nullptr;
 bool hash_lookup(ftx_callsign_hash_type_t t, uint32_t h, char* out) { return g_tab ? g_tab->lookup(t, h, out) : (out[0] = 0, false); }
@@ -410,6 +433,7 @@ std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable
             if (!payload_plausible(msg.payload)) { if (dbg_drop) std::fprintf(stderr, "DROP %s payload_implausible f=%.0f\n", label.c_str(), (mon.min_bin + c->freq_offset + double(c->freq_sub) / mon.wf.freq_osr) / mon.symbol_period); continue; }   // WSJT-X would not unpack it
             if (std::any_of(decoded.begin(), decoded.end(), [&](const ftx_message_t& d) { return d.hash == msg.hash && !std::memcmp(d.payload, msg.payload, sizeof msg.payload); })) continue;
             decoded.push_back(msg);
+            PendingSaves saves(tab);                                                                 // a message dropped below saves no callsigns
             char text[FTX_MAX_MESSAGE_LENGTH]; ftx_message_offsets_t offs;
             if (ftx_message_decode(&msg, &hif, text, &offs) != FTX_MESSAGE_RC_OK) {
                 std::string extra;                                                              // a type ft8_lib cannot unpack: contest / DXpedition / EU VHF (decode_extra_type)
@@ -430,6 +454,7 @@ std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable
                     decoded.pop_back(); continue;
                 }
             }
+            saves.commit();
             New nw{}; if (ft4) ft4_encode(msg.payload, nw.tones); else ft8_encode(msg.payload, nw.tones);
             if (fallback && std::getenv("FT8_DEBUG_OSD")) std::fprintf(stderr, "OSDDBG %s stage=%d osd=%d hard=%d dmin=%.1f nsync=%d score=%d pass=%d ap=%d snr=%d i3=%u n3=%u | %s\n", label.c_str(), g_fb_stage, int(g_fb_osd), g_fb_hard, g_fb_dmin, g_fb_stage >= 10 ? g_fb_nsync : -1, c->score, pass, ap_type, estimate_snr(&mon.wf, c, nw.tones, ft4), get_bits(msg.payload, 74, 3), get_bits(msg.payload, 71, 3), text);
             nw.f0 = (mon.min_bin + c->freq_offset + double(c->freq_sub) / mon.wf.freq_osr) / mon.symbol_period;
@@ -440,7 +465,7 @@ std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable
                 const double tb = nw.t_s / mon.symbol_period + kWaterfallLagSymbols, fb = nw.f0 * mon.symbol_period - mon.min_bin;
                 int to = int(std::floor(tb)), ts_ = int(std::lround((tb - to) * mon.wf.time_osr)), fo = int(std::floor(fb)), fs_ = int(std::lround((fb - fo) * mon.wf.freq_osr));
                 if (ts_ >= mon.wf.time_osr) { ++to; ts_ = 0; } if (fs_ >= mon.wf.freq_osr) { ++fo; fs_ = 0; }
-                at.time_offset = int16_t(to); at.time_sub = uint8_t(ts_); at.freq_offset = int16_t(fo); at.freq_sub = uint8_t(fs_);
+                if (fo >= 0 && fo + 8 <= mon.wf.num_bins) { at.time_offset = int16_t(to); at.time_sub = uint8_t(ts_); at.freq_offset = int16_t(fo); at.freq_sub = uint8_t(fs_); }   // off the waterfall's edge: the candidate's place
             }
             Ft8Message m; m.time = label; m.snr = estimate_snr(&mon.wf, &at, nw.tones, ft4); m.freq = nw.f0; m.text = text; m.dt = nw.t_s; m.ap = ap_type;
             out.push_back(std::move(m)); fresh.push_back(nw);
@@ -457,12 +482,30 @@ std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable
         }
         if (fresh.empty()) break;
     }
-    g_tab = prev; tab.age(10);
+    g_tab = prev; if (!quick) tab.age(10);                                                     // once per slot: the full decode (a quick pass precedes it on the same slot)
     std::sort(out.begin(), out.end(), [](const Ft8Message& a, const Ft8Message& b) { return a.freq < b.freq; });
     return out;
 }
 }  // namespace
 
+std::string hash_table_self_check() {
+    auto t = std::make_unique<HashTable>(); char out[16];
+    for (int i = 0; i < 400; ++i) { char c[12]; std::snprintf(c, sizeof c, "K%dAB", i); t->add(c, uint32_t(i) * 7919u); }   // more calls than slots: no hang
+    if (t->size != HashTable::kN) return "full table size " + std::to_string(t->size);
+    if (t->lookup(FTX_CALLSIGN_HASH_22_BITS, 0x3FFFFEu, out)) return "found a hash that is not stored";
+    if (!t->lookup(FTX_CALLSIGN_HASH_22_BITS, 399u * 7919u, out) || std::strcmp(out, "K399AB")) return "the newest call was not kept";
+    HashTable u; const uint32_t ha = 5u << 12, hb = (5u << 12) | 1u;                                 // same 10-bit hash: the old table probed them into one chain
+    u.add("AA1A", ha); for (int k = 0; k < 6; ++k) u.age(10); u.add("BB1B", hb);
+    for (int k = 0; k < 6; ++k) u.age(10);                                                          // AA1A ages out, BB1B stays
+    if (u.lookup(FTX_CALLSIGN_HASH_22_BITS, ha, out)) return "an aged-out call was still found";
+    if (!u.lookup(FTX_CALLSIGN_HASH_22_BITS, hb, out) || std::strcmp(out, "BB1B")) return "a call stored after an aged-out one was lost";
+    if (!u.lookup(FTX_CALLSIGN_HASH_10_BITS, 5u, out) || std::strcmp(out, "BB1B")) return "10-bit lookup";
+    { PendingSaves ps(u); u.add("CC1C", 77u); if (!u.lookup(FTX_CALLSIGN_HASH_22_BITS, 77u, out)) return "a pending save is not visible to its own message"; }
+    if (u.lookup(FTX_CALLSIGN_HASH_22_BITS, 77u, out)) return "a dropped message's call was kept";
+    { PendingSaves ps(u); u.add("DD1D", 78u); ps.commit(); }
+    if (!u.lookup(FTX_CALLSIGN_HASH_22_BITS, 78u, out)) return "a kept message's call was not saved";
+    return "";
+}
 bool unpack_extra_message(const uint8_t payload[10], std::string& text, const std::vector<std::string>& heard_messages) {
     ftx_callsign_hash_interface_t hif; hif.lookup_hash = hash_lookup; hif.save_hash = hash_save; HashTable tab; HashTable* prev = g_tab; g_tab = &tab;
     for (const auto& h : heard_messages) { ftx_message_t m; ftx_message_encode(&m, &hif, h.c_str()); }          // encoding a message hashes its callsigns, as having decoded it does
@@ -479,7 +522,8 @@ struct Ft8Decoder::Impl {
     double slot_s() const { return o.ft4 ? double(FT4_SLOT_TIME) : double(FT8_SLOT_TIME); }
     size_t slot_len() const { return size_t(slot_s() * kRate); }
     explicit Impl(Ft8Options op) : o(op) { reset_state(); }
-    void reset_state() { join(); rs = std::make_unique<fireside::dsp::RationalResampler>(o.sample_rate, double(kRate)); slot.assign(slot_len(), 0.0f); fill = 0; skip = -1; started = false; slot_index = 0; { std::lock_guard<std::mutex> l(m); results.clear(); } last.clear(); decoded_total = 0; }
+    void reset_state() { join(); rs = std::make_unique<fireside::dsp::RationalResampler>(o.sample_rate, double(kRate)); slot.assign(slot_len(), 0.0f); fill = 0; skip = -1; started = false; slot_index = 0; { std::lock_guard<std::mutex> l(m); results.clear(); } last.clear(); decoded_total = 0;
+                        peeked.clear(); peeked_slot = -1; tab = HashTable{}; }
     void join() { if (job.joinable()) job.join(); }
     std::string label_for(long idx) const {
         char b[24];
@@ -536,12 +580,15 @@ void Ft8Decoder::finish(std::string& out) {
     const double sig_end = 0.5 + (p.o.ft4 ? 5.04 : 12.64) + 0.9;                       // nominal start + signal + margin (decoder DT spread)
     if (!(p.started && p.skip <= 0 && double(p.fill) / kRate >= sig_end)) return;
     std::fill(p.slot.begin() + long(p.fill), p.slot.end(), 0.0f); p.fill = 0;
+    std::vector<std::string> shown; if (p.peeked_slot == p.slot_index) shown.swap(p.peeked); p.peeked.clear(); p.peeked_slot = -1;   // lines a peek already gave
     std::vector<float> copy = p.slot; const std::string label = p.label_for(p.slot_index++);
     // quick first (one pass, no deep stage: ~0.3 s): an answer to us must be known before our slot starts; the full decode follows in the background
     const auto t0 = std::chrono::steady_clock::now();
     auto quick = decode_slot_with(copy.data(), copy.size(), p.tab, label, p.o.ft4, p.o.my_call, true, p.get_focus());
     p.last_quick_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::vector<std::string> seen; for (auto& r : quick) { const std::string line = Ft8Decoder::format(r); out += line; p.last = line; ++p.decoded_total; seen.push_back(r.text); }
+    p.tab.age(10);                                                                      // the full decode below works on a copy: this slot ages the table here
+    std::vector<std::string> seen = shown;
+    for (auto& r : quick) { if (std::find(seen.begin(), seen.end(), r.text) != seen.end()) continue; const std::string line = Ft8Decoder::format(r); out += line; p.last = line; ++p.decoded_total; seen.push_back(r.text); }
     if (p.o.late_lines) {                                                               // the weak ones: later, through the callback (this decoder may be gone by then)
         HashTable tab = p.tab; auto sink = p.o.late_lines; const bool ft4 = p.o.ft4; const std::string me = p.o.my_call;
         std::thread([copy = std::move(copy), tab, sink, ft4, me, label, seen]() mutable {

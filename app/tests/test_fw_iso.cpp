@@ -372,3 +372,13 @@ TEST(fw_iso_dice_duplex_clears_its_own_leftover_and_restores_to_idle) {
         DiceStreamControl d(b, nosleep); CHECK_THROWS(d.start(48000, 1, 2), IoError); CHECK_EQ(b.r[kEnable], 1u); CHECK_EQ(b.r[kRxIso], 6u);
     }
 }
+TEST(fw_iso_duplex_close_wakes_a_waiting_tap_reader_and_waits_for_it) {   // the mic/TX thread reading while receive is stopped: no long wait, no freed stream
+    std::vector<std::string> log; DuplexBus b(&log); TxLog txl; FwIsoOptions o; o.duplex = true;
+    auto pcm = std::make_unique<FwIsoPcm>(b, std::make_unique<FakeRx>(&log, false), 48000, o, nosleep, std::make_unique<FakeTx>(&txl));
+    auto tap = open_fw_iso_input(0); std::atomic<int> reads{0}; std::atomic<bool> threw{false};
+    std::thread rd([&] { std::vector<float> x(64); try { for (;;) { tap->read(x.data(), x.size(), 5.0); ++reads; } } catch (const IoError&) { threw = true; } });
+    for (int i = 0; i < 2000 && reads < 20; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(reads >= 20);
+    const auto t0 = std::chrono::steady_clock::now(); pcm.reset(); rd.join();
+    CHECK(threw); CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));         // woken by the close, not the 5 s timeout
+}

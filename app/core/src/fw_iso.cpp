@@ -304,6 +304,7 @@ public:
     int channel() const override { return channel_; }
     std::string describe() const override { return node_ + " iso transmit channel " + std::to_string(channel_); }
     size_t queued() const override { return in_flight_; }
+    bool has_room() const override { return in_flight_ + 1 <= kPackets - 1; }
     bool queue(const uint8_t h[8], const uint8_t* payload, size_t len) override {
         if (len > max_ || in_flight_ + 1 > kPackets - 1) return false;
         const size_t slot = next_ % kPackets;
@@ -400,12 +401,14 @@ void FwIsoPcm::begin(DiceStreamControl::Sleep sleep) {
         uint8_t sid = 0; if (auto* fw = dynamic_cast<FwDevice*>(&bus_)) sid = uint8_t(fw->local_node_id() & 0x3F);
         enc_ = std::make_unique<AmdtpEncoder>(channels_, dice_dual_wire(rate_), uint8_t(dice_dual_wire(rate_) ? 0x04 : rate_ == 96000 ? 0x04 : 0x02), sid);
         sched_ = std::make_unique<ReplayScheduler>(opt_.tx_lead_cycles);
-        for (auto& r : out_) r.buf.assign(size_t(std::max(256.0, opt_.out_ring_seconds * rate_)) * size_t(channels_), 0);
-        std::lock_guard<std::mutex> g(g_duplex_m); g_duplex = this; ++g_duplex_gen;
     }
-    dec_ = std::make_unique<AmdtpDecoder>(channels_, dice_dual_wire(rate_));
-    ring_.assign(size_t(std::max(0.05, opt_.ring_seconds) * rate_) * size_t(channels_), 0);
-    th_ = std::thread([this] { worker(); });
+    try {
+        if (tx_) for (auto& r : out_) r.buf.assign(size_t(std::max(256.0, opt_.out_ring_seconds * rate_)) * size_t(channels_), 0);
+        dec_ = std::make_unique<AmdtpDecoder>(channels_, dice_dual_wire(rate_));
+        ring_.assign(size_t(std::max(0.05, opt_.ring_seconds) * rate_) * size_t(channels_), 0);
+        th_ = std::thread([this] { worker(); });
+    } catch (...) { dice_->stop(); rx_->stop(); throw; }                       // the radio's stream registers are restored; nothing was published
+    if (tx_) { std::lock_guard<std::mutex> g(g_duplex_m); g_duplex = this; ++g_duplex_gen; }   // last: open_fw_iso_out()/input() only ever see a running stream
 }
 
 void FwIsoPcm::worker() {
@@ -417,12 +420,12 @@ void FwIsoPcm::worker() {
         try {
             rx_->poll(0.05, [&](const uint8_t* p, size_t n, uint32_t ts) { dec_->packet(p, n, int(ts & 0x1FFF), tmp); if (tx_) send_for(p, n, ts); });
             if (tx_) { tx_->reap(); if (sched_->broken()) throw IoError("duplex: the receive stream had a gap of more than 100 ms (transmit timing lost)"); }
-        } catch (const std::exception& e) { std::lock_guard<std::mutex> l(m_); error_ = e.what(); stats_ = dec_->stats(); cv_.notify_all(); return; }
+        } catch (const std::exception& e) { std::lock_guard<std::mutex> l(m_); error_ = e.what(); stats_ = dec_->stats(); cv_.notify_all(); tap_cv_.notify_all(); return; }
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> l(m_);
         stats_ = dec_->stats();
         if (tmp.empty()) {
-            if (std::chrono::duration<double>(now - last_data).count() > opt_.stall_seconds) { error_ = "no data from the radio for " + std::to_string(int(opt_.stall_seconds)) + " s (stream stopped, or another program took it over)"; cv_.notify_all(); return; }
+            if (std::chrono::duration<double>(now - last_data).count() > opt_.stall_seconds) { error_ = "no data from the radio for " + std::to_string(int(opt_.stall_seconds)) + " s (stream stopped, or another program took it over)"; cv_.notify_all(); tap_cv_.notify_all(); return; }
             continue;
         }
         last_data = now;
@@ -460,12 +463,13 @@ std::string FwIsoPcm::describe() const {
 void FwIsoPcm::close() {
     { std::lock_guard<std::mutex> l(m_); if (closed_) return; closed_ = true; }
     { std::lock_guard<std::mutex> g(g_duplex_m); if (g_duplex == this) { g_duplex = nullptr; ++g_duplex_gen; } }   // open_fw_iso_out() writers fail from now on
+    { std::unique_lock<std::mutex> l(m_); cv_.notify_all(); tap_cv_.notify_all(); tap_cv_.wait(l, [&] { return tap_readers_ == 0; }); }   // tap readers wake, leave
     quit_ = true; if (th_.joinable()) th_.join();
     if (tx_) tx_->stop();                                    // our packets stop; the radio's RX input is pointed away from us by dice_->stop()
     if (rx_) rx_->stop();                                    // stop listening first, then tell the radio to stop sending and restore it
     if (dice_) dice_->stop();
     { std::lock_guard<std::mutex> g(g_duplex_m); g_close_note = dice_ ? dice_->last_stop_note() : std::string(); }
-    cv_.notify_all();
+    cv_.notify_all(); tap_cv_.notify_all();
 }
 
 // ---------------------------------------------------------------- duplex: the transmit side
@@ -476,6 +480,7 @@ void FwIsoPcm::send_for(const uint8_t* p, size_t len, uint32_t ts) {
     const int blocks = empty ? 0 : int((len - 8) / (4 * dbs)); const uint16_t syt = uint16_t(q1 & 0xFFFF);
     outq_.clear(); sched_->received(int(ts & 0x1FFF), blocks, syt, outq_);
     for (const OutPacket& o : outq_) {
+        if (!tx_->has_room()) { std::lock_guard<std::mutex> l(m_); ++txs_.refused; continue; }   // before anything is consumed: the DBC and the rings stay continuous
         const size_t nf = size_t(o.blocks) * size_t(enc_->frames_per_block());
         frames_.assign(nf * size_t(channels_), 0);
         if (nf) {
@@ -516,8 +521,10 @@ double FwIsoPcm::out_latency_s() const {
 void FwIsoPcm::set_input_tap(int ch, size_t ring) {
     std::lock_guard<std::mutex> l(m_); tap_ch_ = ch; tap_.assign(ch >= 0 ? std::max<size_t>(ring ? ring : size_t(rate_ * 0.5), 1024) : 0, 0.0f); tap_head_ = tap_count_ = 0;
 }
+void FwIsoPcm::tap_hold() { std::lock_guard<std::mutex> l(m_); ++tap_readers_; }
 size_t FwIsoPcm::read_tap(float* x, size_t n, double timeout_s) {
     std::unique_lock<std::mutex> l(m_);
+    struct Leave { FwIsoPcm* s; ~Leave() { if (s->tap_readers_ > 0) --s->tap_readers_; s->tap_cv_.notify_all(); } } leave{this};   // runs before l unlocks
     tap_cv_.wait_for(l, std::chrono::duration<double>(std::max(0.0, timeout_s)), [&] { return tap_count_ > 0 || !error_.empty() || closed_; });
     if (!error_.empty()) throw IoError("direct FireWire stream: " + error_);
     if (closed_) throw IoError("the direct FireWire stream was closed");
@@ -559,8 +566,8 @@ public:
         while (pend_.size() < n) {
             const size_t want = rs_ ? std::max<size_t>(64, size_t(double(n - pend_.size()) * s_rate() / 48000.0) + 8) : n - pend_.size();
             raw_.resize(want); size_t got;
-            { std::lock_guard<std::mutex> g(g_duplex_m); if (g_duplex != s_ || g_duplex_gen != gen_) throw IoError("the direct FireWire stream was closed"); }
-            got = s_->read_tap(raw_.data(), want, timeout_s);
+            { std::lock_guard<std::mutex> g(g_duplex_m); if (g_duplex != s_ || g_duplex_gen != gen_) throw IoError("the direct FireWire stream was closed"); s_->tap_hold(); }
+            got = s_->read_tap(raw_.data(), want, timeout_s);                                    // releases the hold; close() waits for it
             if (got == 0) break;
             if (!rs_) { pend_.insert(pend_.end(), raw_.begin(), raw_.begin() + long(got)); continue; }
             in_.resize(got); for (size_t i = 0; i < got; ++i) in_[i] = dsp::cf(raw_[i], 0.0f);

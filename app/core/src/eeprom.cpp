@@ -132,7 +132,16 @@ std::vector<uint8_t> parse_csv(const std::string& text) {
     std::getline(in, line);                                        // header row
     while (std::getline(in, line)) {
         std::istringstream ls(line); std::string cell; bool first = true;
-        while (std::getline(ls, cell, ',')) { if (first) { first = false; continue; } if (!cell.empty()) out.push_back(uint8_t(std::stoul(cell, nullptr, 16))); }
+        while (std::getline(ls, cell, ',')) {
+            if (first) { first = false; continue; }                  // the row's address
+            const size_t a = cell.find_first_not_of(" \t\r\n"), z = cell.find_last_not_of(" \t\r\n");
+            if (a == std::string::npos) continue;                     // blank (the comma at the end of a row, a Windows \r)
+            cell = cell.substr(a, z - a + 1);
+            size_t used = 0; unsigned long v = 0;
+            try { v = std::stoul(cell, &used, 16); } catch (const std::exception&) { used = 0; }
+            if (used != cell.size() || v > 0xFF) throw std::invalid_argument("EEPROM CSV: \"" + cell + "\" is not a byte (00..FF)");
+            out.push_back(uint8_t(v));
+        }
     }
     return out;
 }

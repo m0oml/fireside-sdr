@@ -51,11 +51,11 @@ void Sequencer::call_cq() { dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.
 
 bool Sequencer::reply_to(const Heard& h) {
     if (!h.ok || h.from.empty() || base(h.from) == base(me_)) return false;
+    if (to_me(h) && h.seventy3) return false;                                                         // their 73: nothing to answer (checked before any state changes)
     dx_ = h.from; dx_grid_ = h.grid; sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; last_send_ = false; rr73_done_ = false; reopened_ = 0;
     const std::string pre = dx_ + " " + me_ + " ";
     if (h.cq || !to_me(h)) { set(Stage::CalledDx, pre + grid_); return true; }                     // their CQ, or they are working someone else: call them
     if (h.rr73 || h.rrr) { set(Stage::Sent73, pre + "73"); last_send_ = true; log_due_ = true; return true; }   // late double-click: finish politely
-    if (h.seventy3) return false;
     if (!h.report.empty() && h.r_report) { rcvd_ = h.report; sent_ = report_text(h.snr); set(Stage::SentRR73, pre + "RR73"); log_due_ = true; return true; }
     if (!h.report.empty()) { rcvd_ = h.report; sent_ = report_text(h.snr); set(Stage::SentRReport, pre + "R" + sent_); return true; }
     sent_ = report_text(h.snr); set(Stage::SentReport, pre + sent_); return true;                    // they called me with their grid
@@ -63,11 +63,14 @@ bool Sequencer::reply_to(const Heard& h) {
 
 bool Sequencer::heard(const Heard& h) {
     if (!h.ok || !to_me(h)) return false;
-    if (st_ == Stage::Cq) { return reply_to(h); }                                                    // someone answered our CQ: they become DX
+    if (st_ == Stage::Cq) {                                                                          // someone answered our CQ (a grid or a report): they become DX
+        if (h.rr73 || h.rrr || h.seventy3) return false;                                             // a late RR73/73 from an earlier QSO is not an answer to the CQ
+        return reply_to(h);
+    }
     // RR73 went out and nothing came back in time, so we stopped; their R-report again a little later (they missed it): RR73 once more (twice at most)
     if (st_ == Stage::Done && rr73_done_ && reopened_ < 2 && base(h.from) == base(dx_) && (h.r_report || !h.report.empty())) {
         ++reopened_; set(Stage::SentRR73, dx_ + " " + me_ + " RR73"); return true; }
-    if (!active() && st_ != Stage::Sent73) return false;
+    if (!active()) return false;
     if (base(h.from) != base(dx_)) return false;                                                     // someone else calling: not now
     if (!h.grid.empty()) dx_grid_ = h.grid;
     const std::string pre = dx_ + " " + me_ + " ";
@@ -90,9 +93,7 @@ bool Sequencer::heard(const Heard& h) {
             if (h.seventy3 || h.rr73) { st_ = Stage::Done; msg_.clear(); return true; }               // they confirmed: nothing more to send
             if (h.r_report || !h.report.empty()) { again_ = true; return true; }                     // their R-report again (they missed our RR73): RR73 again
             return false;
-        case Stage::Sent73:
-            if (h.rr73 || h.rrr) return false;                                                       // they did not hear our 73 yet: send it again
-            return false;
+        // Sent73: 73 goes out once (next_message) and nothing they send changes that, as in WSJT-X
         default: return false;
     }
 }

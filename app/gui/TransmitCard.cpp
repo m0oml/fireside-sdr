@@ -189,7 +189,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
 void TransmitCard::connectTrip() {
     if (!tx_) return;
     QPointer<TransmitCard> me(this);                                                         // the hook runs on the worker thread: hand the reason to the GUI thread
-    tx_->set_trip_hook([me](const std::string& why) { if (me) { const QString q = QString::fromStdString(why); QMetaObject::invokeMethod(me.data(), [me, q] { if (me) emit me->safetyTrip(q); }, Qt::QueuedConnection); } });
+    tx_->set_trip_hook([me](const std::string& why) { if (me) { me->job_tripped_ = true; const QString q = QString::fromStdString(why); QMetaObject::invokeMethod(me.data(), [me, q] { if (me) emit me->safetyTrip(q); }, Qt::QueuedConnection); } });
 }
 TransmitCard::~TransmitCard() { ext_ptt_ = false; ext_allowed_ = false; if (tx_) tx_->abort(); if (worker_.joinable()) worker_.join(); }
 
@@ -287,35 +287,39 @@ void TransmitCard::report(const QString& m) { status_->setText(m); emit message(
 void TransmitCard::run(const QString& what, bool pauses_receive, std::function<QString(txc::TxControl&)> job) {
     if (worker_running_ || !tx_) return;
     if (worker_.joinable()) worker_.join();
-    worker_running_ = true; { std::lock_guard<std::mutex> l(m_); have_last_ = false; }
+    worker_running_ = true; job_tripped_ = false; { std::lock_guard<std::mutex> l(m_); have_last_ = false; }
     if (pauses_receive) pauseReceive();                                                      // the ALSA playback and our receive stream cannot share the radio
     report(what + " ..."); updateButtons();
     auto tx = tx_;
     worker_ = std::thread([this, tx, job] {
-        QString res; try { res = job(*tx); } catch (const std::exception& e) { res = QString("failed: ") + e.what(); }
+        QString res; bool threw = false; try { res = job(*tx); } catch (const std::exception& e) { res = QString("failed: ") + e.what(); threw = true; }
+        const bool tripped = job_tripped_.exchange(false) || threw;                             // the core's trip hook fired for this job (or it threw)
         job_end_utc_ = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();   // the playback is closed by now
-        QMetaObject::invokeMethod(this, [this, res]() mutable {
+        QMetaObject::invokeMethod(this, [this, res, tripped]() mutable {
             if (worker_.joinable()) worker_.join();
             worker_running_ = false;
             const QString rxnote = resumeReceive(); { QSignalBlocker b(arm_); arm_->setChecked(tx_ && tx_->armed()); }   // a refused arm springs back
             const bool sent_ok = res.endsWith(" #sent");
-            if (!sent_ok && fireside::txc::TxControl::is_safety_stop(res.toStdString())) {     // a safety stop ends the sequence and any repeat: nothing is retried by itself
+            // A safety stop ends the sequence and any repeat: nothing is retried by itself. Decided by the core's own trip signal (TxControl::set_trip_hook,
+            // from the gate's stop reason) or an exception, never by reading the status text (an S-meter check or ATU restore message may say "failed").
+            const bool safety = !sent_ok && tripped;
+            if (safety) {
                 { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } ft_timer_->stop(); ft_pending_.reset();
                 follow_pending_ = false; auto_tried_.clear(); from_cq_ = false; if (seq_) seq_->stop();
                 res += "  Stopped: nothing is retried after a safety stop.";
             }
             if (sent_ok) takeLog();                                                                  // the over that completed a QSO has gone out: log it
-            noteSeqEnd();
-            const bool resend = (sent_ok && ft_repeat_->isChecked() && !(seq_ && seq_->stage() != fireside::seq::Stage::Idle)) || (seq_ && seq_->active() && !res.startsWith("Not sent"));
+            noteSeqEnd(!safety);                                                                     // after a safety stop: announce the end, but never go on to the next caller
+            const bool resend = !safety && (sent_ok && ft_repeat_->isChecked() && !(seq_ && seq_->stage() != fireside::seq::Stage::Idle)) || (seq_ && seq_->active() && !res.startsWith("Not sent"));
             if (seq_ && !seq_->describe().empty()) res += "  " + QString::fromStdString(seq_->describe()) + ".";
             if (res.endsWith(" #sent")) res.chop(6);
             report(res + rxnote); saveState(); updateButtons(); updateMemoryLabel();
             if (resend) QTimer::singleShot(200, this, [this, g = stop_gen_] { if (g == stop_gen_) queueSend(); });   // Stop in between cancels it             // calling: the next slot of the same parity
-            if (!resend) QTimer::singleShot(300, this, [this] { autoNext(); });               // an ended QSO waiting for this over to finish
+            if (!resend && !safety) QTimer::singleShot(300, this, [this] { autoNext(); });               // an ended QSO waiting for this over to finish
             voice_in_.reset();                                                                  // a voice over's input (a PC capture lives on this thread)
             if (after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }               // start-up: receiving starts once the check is done
             if (unkey_failed_) { unkey_failed_ = false; if (auto_confirm_ < 0) QMessageBox::critical(this, "The radio may still be transmitting",
-                "The unkey command did not get through after three tries.\n\nPower the radio off now (front panel), then check the FireWire connection.\n\n" + res); }
+                "The unkey command did not get through (three tries, then 2 s of retries).\n\nPower the radio off now (front panel), then check the FireWire connection.\n\n" + res); }
         }, Qt::QueuedConnection);
     });
 }
@@ -551,7 +555,8 @@ void TransmitCard::onTune() {
         const auto& s = r.outcome->status;
         QString res = r.outcome->result == atu::Atu::TuneResult::Pass ? "PASS" : r.outcome->result == atu::Atu::TuneResult::Fail ? QString("FAIL (%1)").arg(atu::fail_text(r.outcome->fail_reason)) : "stopped";
         if (r.outcome->result != atu::Atu::TuneResult::Pass)   // the tuner's own report belongs to a pass only (its last status may be from an earlier tune)
-            return QString("Tune %1 after %2 s (%3). Max %4.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop)).arg(fmt_w(r.max_fwd_w));
+            return QString("Tune %1 after %2 s (%3). Max %4.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop)).arg(fmt_w(r.max_fwd_w))
+                   + (r.pass_rejected.empty() ? QString() : " " + QString::fromStdString(r.pass_rejected) + ".");
         res = QString("Tune %1 after %2 s (%3). Tuner: ind %4 cap %5 %6, %7, SWR %8. Max %9.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop))
               .arg(s.ind ? *s.ind : -1).arg(s.cap ? *s.cap : -1).arg(s.hiz && *s.hiz ? "Hi-Z" : "Lo-Z").arg(s.fwd_w ? fmt_w(*s.fwd_w) : "?").arg(s.swr ? QString::number(*s.swr, 'f', 2) : "?").arg(fmt_w(r.max_fwd_w));
         if (r.saved) res += " Saved for this band.";

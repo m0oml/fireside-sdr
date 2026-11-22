@@ -709,6 +709,28 @@ int main(int argc, char** argv) {
                         if (sb) sb->click();
                         for (int i = 0; i < 200 && tc->busy(); ++i) pump(1); pump(10);
                         step("Stop ends the CQ: nothing queued, unkeyed", !tc->sendQueued() && !tc->busy() && !w.simRadio()->keyed && (count(1292) == m1 || count(1292) == m1 + 2) && !tc->qsoText().startsWith("Calling"));
+                        {   // a safety stop during the RR73 repeat of an already-logged QSO, with another station waiting: nothing keys again by itself
+                            auto* sim = w.simRadio(); tc->autoSeqBox()->setChecked(true);
+                            QString logged2; QObject scope2; QObject::connect(tc, &TransmitCard::logQso, &scope2, [&](const QString& c, const QString&, const QString&, const QString&) { logged2 = c; });
+                            const size_t b0 = count(1292);
+                            auto overs = [&](size_t n) { for (int i = 0; i < 1500 && !(count(1292) >= b0 + n && !tc->busy()); ++i) pump(1); pump(30); return count(1292) >= b0 + n; };
+                            tc->cqButton()->click(); pump(2);
+                            step("RR73 trip: CQ sent", overs(2));
+                            rx->addDecodedText(label(wall()) + " -10  0.1 1200 ~  M0OML DL2AAA JO62\n"); pump(2);
+                            step("RR73 trip: their answer gets our report", tc->messageText().startsWith("DL2AAA M0OML ") && overs(4));
+                            rx->addDecodedText(label(wall()) + " -11  0.1 1200 ~  M0OML DL2AAA R-12\n"); pump(2);
+                            step("RR73 trip: their R-report gets our RR73, sent and logged", tc->messageText() == "DL2AAA M0OML RR73" && overs(6) && logged2 == "DL2AAA");
+                            rx->addDecodedText(label(wall()) + "  -9  0.1 1500 ~  M0OML EA3XYZ IN80\n"); pump(2);   // another station calling us: waiting
+                            const bool pl = sim->pa_from_level; const auto af = sim->adc_fwd, ar = sim->adc_rev;
+                            sim->pa_from_level = false; sim->adc_fwd = 966; sim->adc_rev = 238;                      // the next over trips the power limit
+                            rx->addDecodedText(label(wall()) + " -11  0.1 1200 ~  M0OML DL2AAA R-12\n"); pump(2);   // they did not hear our RR73: it goes again
+                            step("RR73 trip: their repeat queues RR73 again", tc->sendQueued() || tc->busy());
+                            for (int i = 0; i < 1500 && (tc->sendQueued() || tc->busy() || count(1292) < b0 + 8); ++i) pump(1);
+                            pump(90);                                                                                  // well past the 300 ms where the next caller would be answered
+                            step("a safety stop during the RR73 repeat: nothing keys again and the waiting caller is not answered",
+                                 count(1292) == b0 + 8 && !tc->sendQueued() && !tc->busy() && !sim->keyed && tc->statusLabel()->text().contains("nothing is retried"));
+                            sim->pa_from_level = pl; sim->adc_fwd = af; sim->adc_rev = ar;
+                        }
                     }
                     {   // voice: PTT keys an SSB over with the Audio tab's input + processing; release unkeys (a generated voice: no mic here)
                         struct GenVoice : fireside::txc::IAudioIn {

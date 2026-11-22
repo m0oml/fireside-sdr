@@ -36,11 +36,14 @@ public:
     bool keyed() const { return keyed_; }
     // Keys for at most min(max_s, cfg.max_key_s). false (with the reason in *why_not) if disarmed, already keyed, or the radio refused.
     bool key(const std::string& purpose, double max_s, std::string* why_not = nullptr);
-    void unkey(const std::string& why);                           // safe to call any time; sends SET_MOX 0 if keyed
-    void tick();                                                  // unkeys when the deadline has passed
+    void unkey(const std::string& why);                           // safe to call any time; sends SET_MOX 0 if keyed (and retries one that failed)
+    void tick();                                                  // unkeys when the deadline has passed; retries a failed unkey
+    // After a failed unkey: keep sending SET_MOX 0 (every 0.1 s, for up to max_s) until one gets through. true = the radio is unkeyed (or never was keyed).
+    // The destructor does this too (2 s), so a link that recovers shortly after a glitch still unkeys the radio.
+    bool ensure_unkeyed(double max_s = 2.0);
     void report(const txm::Reading& r);                           // meter limits
     const std::string& last_unkey_reason() const { return last_reason_; }
-    bool unkey_failed() const { return unkey_failed_; }            // SET_MOX 0 never got through: the radio may still be keyed
+    bool unkey_failed() const { return unkey_failed_; }            // SET_MOX 0 has not got through (yet): the radio may still be keyed
     const std::vector<std::string>& log() const { return log_; }
     const GateConfig& config() const { return cfg_; }
     Flex& flex() { return fx_; }
@@ -48,6 +51,9 @@ private:
     Flex& fx_; GateConfig cfg_; atu::Clock clk_;
     bool armed_ = false, keyed_ = false, had_permit_ = false, unkey_failed_ = false; double deadline_ = 0, fwd_since_ = -1, rev_since_ = -1, swr_since_ = -1; std::string last_reason_; std::vector<std::string> log_;
     void note(const std::string& s);
+    bool send_unkey(int tries, std::string& err);                 // SET_MOX 0 + sync, up to `tries` times 50 ms apart
+    bool retry_unkey();                                           // one more SET_MOX 0 after a failed unkey; clears unkey_failed_ when it gets through
+    void drop_permit();
 };
 
 // One complete ATU tune the way PowerSDR does it on the FLEX-5000 (as seen on the radio): TX DSP mode CWU, key, threshold + tune request,

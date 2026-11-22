@@ -116,6 +116,37 @@ TEST(tx_gate_unkeys_even_when_the_link_fails) {
     CHECK(g.log().back().find("SET_MOX 0 FAILED") != std::string::npos);                              // and says so
 }
 
+TEST(tx_gate_keeps_retrying_a_failed_unkey_until_it_gets_through) {
+    Rig r; TxGate g(r.fx, {}, r.clk.clock()); g.arm(); CHECK(g.key("t", 5.0)); CHECK(r.sim.keyed);
+    r.bus.stuck = true; r.bus.mem[kPalCmd] = be({kPalBusy});                                          // a link glitch eats the three tries
+    g.unkey("glitch"); CHECK(g.unkey_failed()); CHECK(!g.keyed()); CHECK(r.sim.keyed);               // the radio is still keyed
+    CHECK(r.fx.safety().permitted("RDAL_OP_SET_MOX"));                                                // the permit is kept for the retries
+    std::string why; CHECK(!g.key("again", 1.0, &why)); CHECK(why.find("may still be keyed") != std::string::npos);   // never keys on top of it
+    g.tick(); CHECK(g.unkey_failed());                                                                // still stuck: still failed
+    r.bus.stuck = false; r.bus.mem[kPalCmd] = be({0});                                                // the link recovers
+    g.tick(); CHECK(!g.unkey_failed()); CHECK(!r.sim.keyed);                                          // the next tick gets SET_MOX 0 through
+    CHECK(g.last_unkey_reason().find("got through on a later try") != std::string::npos);
+    CHECK(!r.fx.safety().permitted("RDAL_OP_SET_MOX")); CHECK(!r.fx.safety().tx_grant());
+    CHECK(g.key("after", 1.0)); g.unkey("done"); CHECK(!r.sim.keyed);                                 // and it can key normally again
+}
+TEST(tx_gate_destructor_and_ensure_unkeyed_retry_a_failed_unkey) {
+    Rig r;
+    {   TxGate g(r.fx, {}, r.clk.clock()); g.arm(); CHECK(g.key("t", 5.0));
+        r.bus.stuck = true; r.bus.mem[kPalCmd] = be({kPalBusy}); g.unkey("glitch"); CHECK(g.unkey_failed());
+        CHECK(!g.ensure_unkeyed(0.3)); CHECK(g.unkey_failed());                                       // still stuck after 0.3 s: reported, not hidden
+        r.bus.stuck = false; r.bus.mem[kPalCmd] = be({0}); CHECK(g.ensure_unkeyed(0.3)); CHECK(!r.sim.keyed); }
+    {   TxGate g(r.fx, {}, r.clk.clock()); g.arm(); CHECK(g.key("t", 5.0));
+        r.bus.stuck = true; r.bus.mem[kPalCmd] = be({kPalBusy}); g.unkey("glitch"); r.bus.stuck = false; r.bus.mem[kPalCmd] = be({0}); }
+    CHECK(!r.sim.keyed); CHECK(!r.fx.safety().permitted("RDAL_OP_SET_MOX"));                         // the destructor's retries unkeyed it
+}
+TEST(tx_gate_refused_key_reports_a_failed_unkey_after_it) {
+    Rig r; TxGate g(r.fx, {}, r.clk.clock()); g.arm();
+    r.bus.stuck = true; r.bus.mem[kPalCmd] = be({kPalBusy});                                          // nothing gets through: the key and every unkey fail
+    std::string why; CHECK(!g.key("t", 1.0, &why)); CHECK(g.unkey_failed());
+    CHECK(why.find("refused the key") != std::string::npos); CHECK(why.find("may still be keyed") != std::string::npos);
+    r.bus.stuck = false; r.bus.mem[kPalCmd] = be({0});
+}
+
 // ---------------------------------------------------------------- a whole tune
 TEST(atu_tune_passes_like_the_third_tune_of_the_capture) {
     Rig r; atu::Atu a(r.fx, r.clk.clock()); TxGate g(r.fx, {}, r.clk.clock()); g.arm(); TuneMeter m;
@@ -819,4 +850,42 @@ TEST(gate_rides_out_a_brief_overshoot_but_not_a_sustained_one_or_a_hard_excess) 
         GateConfig c0 = c; c0.grace_s = 0; Rig r; TxGate g(r.fx, c0, r.clk.clock()); g.arm(); CHECK(g.key("t", 15));
         g.report(rd(15.5)); CHECK(!g.keyed());
     }
+}
+
+// A tuner "pass" that is not a match is not saved: here the tuner reports PASS with an SWR byte of 255 (SWR ~1022), as seen on 12 m on 2026-11-21.
+TEST(tx_control_tune_rejects_a_pass_without_a_match) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); r.sim.tune_time_polls = 30; r.sim.best_swr = 9; r.sim.pass_regardless = true; r.sim.pass_swr_b3 = 255;
+    auto t = r.tx->tune(14.336, 3.0, 1.5, {});
+    CHECK(t.outcome); CHECK(t.outcome->result != atu::Atu::TuneResult::Pass); CHECK(!t.saved); CHECK(!r.tx->memory().recall(5));
+    CHECK(t.pass_rejected.find("SWR") != std::string::npos); CHECK(!r.sim.keyed);
+    r.sim.best_swr = 1.0; r.sim.pass_regardless = false; r.sim.pass_swr_b3 = 0;                      // a real match still passes and is saved
+    auto ok = r.tx->tune(14.336, 3.0, 1.5, {});
+    CHECK(ok.outcome && ok.outcome->result == atu::Atu::TuneResult::Pass); CHECK(ok.saved); CHECK(ok.pass_rejected.empty());
+}
+
+// disarm() while an over runs and another is queued behind it: the queued one must not key (its start clears abort_, but it finds itself disarmed).
+TEST(disarm_is_not_lost_when_another_over_is_queued) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image());
+    txc::VoiceOptions v; v.chain = tx::data_chain_defaults(); v.peak_w = 5; v.max_key_s = 30;
+    FakeTone a_in, b_in; txc::VoiceResult a, b;
+    std::thread ta([&] { a = r.tx->voice(14.2, a_in, [] { return true; }, v); });
+    for (int i = 0; i < 300 && !r.tx->keyed(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(r.tx->keyed());
+    std::thread tb([&] { b = r.tx->voice(14.2, b_in, [] { return true; }, v); });                 // queued on the transmit lock
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto t0 = std::chrono::steady_clock::now();
+    r.tx->disarm(); ta.join(); tb.join();
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));                         // not the queued over's 30 s time-out
+    CHECK(a.keyed); CHECK(a.stop.find("abort") != std::string::npos);
+    CHECK(!b.keyed); CHECK(b.why_not.find("not armed") != std::string::npos); CHECK(!r.sim.keyed); CHECK(!r.tx->armed());
+}
+
+TEST(tx_over_limits_have_absolute_ceilings) {
+    CHECK_NEAR(txc::fwd_limit_w(10), 15.0, 1e-9); CHECK_NEAR(txc::hard_fwd_limit_w(10), 30.0, 1e-9);   // low power: 1.5 x / 3 x as before
+    CHECK_NEAR(txc::fwd_limit_w(1), 2.0, 1e-9); CHECK_NEAR(txc::hard_fwd_limit_w(1), 6.0, 1e-9);
+    CHECK_NEAR(txc::fwd_limit_w(100), 110.0, 1e-9); CHECK_NEAR(txc::hard_fwd_limit_w(100), 130.0, 1e-9);   // 100 W: not 150 / 300
+    CHECK_NEAR(txc::fwd_limit_w(50), 75.0, 1e-9); CHECK_NEAR(txc::hard_fwd_limit_w(50), 130.0, 1e-9);
+    for (double w = 1; w <= 100; w += 1) CHECK(txc::hard_fwd_limit_w(w) > txc::fwd_limit_w(w));
 }

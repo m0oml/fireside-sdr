@@ -20,6 +20,11 @@
 
 namespace fireside::txc {
 using PcmFactory = std::function<std::unique_ptr<IPcmOut>(double rate)>;
+// Gate limits for FT8/FT4, voice and other programs: forward > fwd_limit_w for 0.15 s, or > hard_fwd_limit_w at once, unkeys.
+// 1.5 x / 3 x the set power, capped at 1.1 x / 1.3 x the PA rating (txs::kMaxWatts).
+inline constexpr double kFwdCeilingW = 1.1 * txs::kMaxWatts, kHardFwdCeilingW = 1.3 * txs::kMaxWatts;
+double fwd_limit_w(double power_w);
+double hard_fwd_limit_w(double power_w);
 struct Progress { double t = 0, drive = 0; txm::Reading rd; };
 using ProgressFn = std::function<void(const Progress&)>;
 // mirror_q: the radio needs the TX I/Q mirrored, as for receive (verified on the air 2026-11-19: with it the test tone was at dial + 1 kHz on a WebSDR,
@@ -39,6 +44,7 @@ struct TuneResult {
     std::optional<atu::Setting> saved;                            // what a pass stored for the band
     bool unkey_failed = false;                                    // SET_MOX 0 never got through: the radio may still be keyed
     bool estimated_drive = false;                                 // no measured level on this band: the EEPROM table's drive was used
+    std::string pass_rejected;                                    // the tuner said "pass" but it is not trusted (why): the outcome is shown as stopped, nothing saved
 };
 
 // Voice: 48 kHz mono audio in (the PC's capture, or the radio's mic input ch7 from the duplex stream).
@@ -50,7 +56,7 @@ public:
 };
 struct VoiceOptions {
     Options o; bool lsb = false;                  // USB (the default above 10 MHz) or LSB
-    double peak_w = 10;                           // peak envelope power (the processed audio's ceiling gives this), 1..20 W
+    double peak_w = 10;                           // peak envelope power (the processed audio's ceiling gives this), 1..100 W (txs::kMaxWatts)
     double max_key_s = 180;                       // the time-out timer
     tx::TxChainConfig chain = tx::voice_chain_defaults();   // the whole audio processing (EQ, expander, leveler, compressor, clipper, limiters, SSB filter)
 };
@@ -93,15 +99,15 @@ public:
     atu::Memory& memory() { return mem_; }
 
     // 2 W (<= 15) single-tone ramp: from 1/10 of the table's 1 W drive, +2 dB / 200 ms, settles, holds 0.5 s at the target; stops on: no power at the 1 W
-    // drive point (< 5 mW), > 1.5 x target, SWR > 3, meter error, abort(), 6 s. Clamped at the table's 100 W drive. A good ramp stores the band's k.
-    // hold_s: how long to hold the target (0.5 for a measurement; up to 10 s as a steady test tone, e.g. to find it on another receiver).
+    // drive point (< 5 mW), > 1.5 x target, SWR > 3, meter error, abort(), the key-down limit. Clamped at the table's 100 W drive. A good ramp stores the band's k.
+    // Key-down limit: 6 s (10 s above 5 W) plus hold_s. hold_s: how long to hold the target (0.5 for a measurement; up to 10 s as a steady test tone, e.g. to find it on another receiver).
     RampResult ramp(double freq_mhz, double target_w, const Options& o, const ProgressFn& p = {}, const LogFn& log = {}, double hold_s = 0.5);
     // ATU full tune at `power_w` (1..15) from the band's k (or, not measured yet, the EEPROM table's drive, which errs low): tuner init, settle, relays read back (refuses without), CWU, key, carrier, threshold + full tune.
     // During the search: forward reading <= 30 W, reflected <= 20 W, 15 s (no SWR stop, as PowerSDR). A pass stores the relays in memory().
     TuneResult tune(double freq_mhz, double power_w, double threshold, const Options& o, const ProgressFn& p = {}, const LogFn& log = {});
     // One FT8 / FT4 transmission of `text` at audio_hz (200..3000) above the dial, USB, in the next slot of `parity` (or the current one if at most 2 s
-    // late), at power_w (1..25). Closed-loop power: the first 3 s of the signal trim the drive from the forward meter (FT8 / FT4 are constant envelope),
-    // and the band's drive level is updated afterwards. Gate: one slot long, forward <= 1.5 x power, SWR <= 3, abort() unkeys. Blocks until the over ends.
+    // late), at power_w (1..kMaxWatts = 100; above the band's drive ceiling it is sent at the ceiling). It starts 3 dB low (soft start). Closed-loop power: the first 3 s of the signal trim the drive from the forward meter (FT8 / FT4 are constant envelope),
+    // and the band's drive level is updated afterwards. Gate: one slot long, forward <= fwd_limit_w (0.15 s grace) and <= hard_fwd_limit_w (at once), SWR <= 3, abort() unkeys. Blocks until the over ends.
     SendResult send_ft(double dial_mhz, const std::string& text, double audio_hz, bool ft4, tx::Parity parity, double power_w, const Options& o,
                        const ProgressFn& p = {}, const LogFn& log = {});
     // The same in two parts, so the signal can be rendered while still receiving and the radio part started just before the slot (the GUI).
@@ -121,7 +127,7 @@ public:
     // Voice over: keyed while ptt() is true (and abort() not called), at most max_key_s. Audio from `in` -> TxChain -> SSB I/Q -> the live
     // ToneSource (mirror, image correction, HARD clamp) at the stream rate. Drive: the chain's I/Q ceiling gives peak_w by the band's
     // measured level (refused without one); it is only ever trimmed DOWN, when the forward meter reads peaks above 1.1 x peak_w.
-    // Gate: forward <= 1.5 x peak_w, SWR <= 3, reflected <= 0.5 x peak_w (min 2 W), the time-out. The DDS key hook as for every over.
+    // Gate: forward <= fwd_limit_w(peak_w) (0.15 s grace), <= hard_fwd_limit_w at once, SWR <= 3, reflected <= 0.5 x peak_w (min 2 W), the time-out. The DDS key hook as for every over.
     VoiceResult voice(double dial_mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p = {}, const LogFn& log = {});
     // No RF: put a band's stored relays back. false if nothing is stored or the tuner does not report them.
     bool restore_relays(int band, const LogFn& log = {});

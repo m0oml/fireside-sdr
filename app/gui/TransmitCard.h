@@ -99,7 +99,7 @@ private:
     QComboBox *ft_mode_, *ft_par_; QLineEdit* ft_msg_; QSpinBox* ft_hz_; QDoubleSpinBox* ft_w_; QPushButton* send_; QCheckBox* ft_repeat_; QTimer* ft_timer_;
     std::shared_ptr<fireside::txc::TxControl::FtPrepared> ft_pending_; void startSend(); void queueSend();
     std::shared_ptr<fireside::txc::TxControl> tx_; std::thread worker_; std::atomic<bool> worker_running_{false}; int auto_confirm_ = -1; bool backup_offer_tests_ = false; std::atomic<bool> eeprom_verified_{false};
-    std::mutex m_; fireside::txc::Progress last_; bool have_last_ = false; int last_band_ = -1; unsigned paused_rate_ = 0; bool paused_live_ = false; std::atomic<bool> unkey_failed_{false};
+    std::mutex m_; fireside::txc::Progress last_; bool have_last_ = false; int last_band_ = -1; unsigned paused_rate_ = 0; bool paused_live_ = false; std::atomic<bool> unkey_failed_{false}; std::atomic<bool> job_tripped_{false};   // set by the core's trip hook (worker thread) during the running job
     bool ask(const QString& title, const QString& text);
     std::atomic<double> last_tx_w_{0}, unkeyed_utc_{0}, job_end_utc_{0}; std::atomic<qint64> last_tx_t_{0};
     std::function<int(double)> tx_ant_; int txAnt() const;

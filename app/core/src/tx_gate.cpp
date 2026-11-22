@@ -5,38 +5,69 @@
 namespace fireside {
 namespace { const char* kMox = "RDAL_OP_SET_MOX"; }
 
-TxGate::~TxGate() { try { unkey("gate destroyed"); } catch (...) {} }
+TxGate::~TxGate() {
+    try { unkey("gate destroyed"); ensure_unkeyed(2.0); } catch (...) {}
+    try { if (unkey_failed_) drop_permit(); } catch (...) {}       // given up: the transmit grant is off, so nothing can key with the permit anyway
+}
 void TxGate::note(const std::string& s) { char b[32]; std::snprintf(b, sizeof b, "%.3f ", clk_.now()); log_.push_back(b + s); }
 
-void TxGate::disarm(const std::string& why) { unkey(why); armed_ = false; }
+void TxGate::disarm(const std::string& why) { unkey(why); ensure_unkeyed(2.0); armed_ = false; }
 
 bool TxGate::key(const std::string& purpose, double max_s, std::string* why_not) {
     auto refuse = [&](const std::string& w) { note("refused: " + w); if (why_not) *why_not = w; return false; };
     if (!armed_) return refuse("transmit is not armed");
     if (keyed_) return refuse("already keyed");
+    if (unkey_failed_ && !retry_unkey()) return refuse(last_reason_);   // an earlier unkey has still not got through: never key on top of it
     if (!(max_s > 0)) return refuse("no key-down time given");
     Safety& s = fx_.safety();
     had_permit_ = s.permitted(kMox); s.permit(kMox); s.set_tx_grant(true);
     keyed_ = true; deadline_ = clk_.now() + std::min(max_s, cfg_.max_key_s); fwd_since_ = rev_since_ = swr_since_ = -1;   // marked keyed BEFORE sending: if the send half-works, unkey still runs
     try { fx_.set(kMox, 1, 0); fx_.sync(); }                      // wait until the firmware has taken it (a write is otherwise unacknowledged)
-    catch (const std::exception& e) { unkey(std::string("key failed: ") + e.what()); return refuse(std::string("the radio refused the key: ") + e.what()); }
+    catch (const std::exception& e) {
+        unkey(std::string("key failed: ") + e.what()); ensure_unkeyed(2.0);
+        std::string w = std::string("the radio refused the key: ") + e.what();
+        if (unkey_failed_) w += "; " + last_reason_;                // the unkey after it did not get through either: the caller must say so
+        return refuse(w);
+    }
     note("KEY " + purpose); return true;
 }
 
-void TxGate::unkey(const std::string& why) {
-    if (!keyed_) return;
-    keyed_ = false; last_reason_ = why;
-    Safety& s = fx_.safety(); s.set_tx_grant(false);              // first: nothing can start a tune or re-key from here on
-    std::string err;
-    for (int attempt = 0; attempt < 3; ++attempt) {               // the unkey must get through: three tries, 50 ms apart
-        try { fx_.set(kMox, 0, 0); fx_.sync(); err.clear(); break; } catch (const std::exception& e) { err = e.what(); clk_.sleep(0.05); }
+bool TxGate::send_unkey(int tries, std::string& err) {
+    for (int attempt = 0; attempt < tries; ++attempt) {
+        try { fx_.set(kMox, 0, 0); fx_.sync(); err.clear(); return true; } catch (const std::exception& e) { err = e.what(); clk_.sleep(0.05); }
     }
-    if (!err.empty()) { unkey_failed_ = true; last_reason_ = why + " (SET_MOX 0 FAILED 3 times: " + err + ": the radio may still be keyed, power it off)"; }
-    if (!had_permit_) s.unpermit(kMox);
-    note("UNKEY " + why + (err.empty() ? "" : " (SET_MOX 0 FAILED: " + err + ")"));
+    return false;
+}
+void TxGate::drop_permit() { if (!had_permit_) fx_.safety().unpermit(kMox); }
+
+void TxGate::unkey(const std::string& why) {
+    if (!keyed_) { if (unkey_failed_) retry_unkey(); return; }
+    keyed_ = false; last_reason_ = why;
+    fx_.safety().set_tx_grant(false);                             // first: nothing can start a tune or re-key from here on
+    std::string err;
+    if (!send_unkey(3, err)) {                                     // the unkey must get through: three tries, 50 ms apart, then keep trying (retry_unkey)
+        unkey_failed_ = true; last_reason_ = why + " (SET_MOX 0 FAILED 3 times: " + err + ": the radio may still be keyed, power it off)";
+        note("UNKEY " + why + " (SET_MOX 0 FAILED: " + err + ")");
+        return;                                                   // the MOX permit is kept, so the retries can still send SET_MOX 0
+    }
+    drop_permit();
+    note("UNKEY " + why);
+}
+bool TxGate::retry_unkey() {
+    if (!unkey_failed_) return true;
+    std::string err;
+    if (!send_unkey(1, err)) return false;
+    unkey_failed_ = false; last_reason_ += " - SET_MOX 0 got through on a later try";
+    drop_permit(); note("UNKEY retry got through");
+    return true;
+}
+bool TxGate::ensure_unkeyed(double max_s) {
+    const double t0 = clk_.now();
+    while (unkey_failed_ && !retry_unkey()) { if (clk_.now() - t0 >= max_s) return false; clk_.sleep(0.1); }
+    return true;
 }
 
-void TxGate::tick() { if (keyed_ && clk_.now() >= deadline_) unkey("key-down time limit"); }
+void TxGate::tick() { if (keyed_ && clk_.now() >= deadline_) unkey("key-down time limit"); else if (unkey_failed_) retry_unkey(); }
 
 void TxGate::report(const txm::Reading& r) {
     if (!keyed_) return;

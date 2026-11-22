@@ -17,6 +17,7 @@ struct RadioModel {
     double best_swr = 1.0;                         // what this antenna can be tuned to
     int tune_time_polls = 60;                      // result polls until the tune finishes
     bool silent = false;                           // never answers a tune
+    bool pass_regardless = false; int pass_swr_b3 = 0;   // a tuner that reports PASS even when it found no match, with this SWR byte (255 = SWR ~1022, seen on 12 m 2026-11-21)
     std::vector<uint8_t> requests;
     // PA detector
     int adc_fwd = 966, adc_rev = 238;              // fixed readings while keyed (the last readings of a passing tune on the radio) ...

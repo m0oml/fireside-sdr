@@ -17,6 +17,10 @@
 
 namespace fireside::txc {
 constexpr double kOverGraceS = 0.15;           // FT8/FT4, voice and other programs: how long a reading may sit above a limit (two or three readings) before unkeying
+// The forward-power limits of an over scale with the set power, but never above fixed ceilings tied to the PA's rating (kMaxWatts): at 100 W the
+// sustained limit is 110 W (not 150 W) and the instant one 130 W (not 300 W).
+double fwd_limit_w(double power_w) { return std::min(std::max(2.0, 1.5 * power_w), kFwdCeilingW); }
+double hard_fwd_limit_w(double power_w) { return std::min(std::max(6.0, 3.0 * power_w), kHardFwdCeilingW); }
 bool TxControl::is_safety_stop(const std::string& r) {
     for (const char* k : {" above ", "time limit", "FAILED", " failed", "under 5 mW", "refused the key"}) if (r.find(k) != std::string::npos) return true;
     return false;                                     // "ramp finished", "over finished", "tune finished", "PTT released", "aborted", ...: normal ends
@@ -61,7 +65,8 @@ TxControl::BackupSaved TxControl::backup_eeprom(const std::string& dir, const Lo
     say(log, "EEPROM backup saved: " + (r.paths.empty() ? std::string("(no file)") : r.paths.front()));
     return r;
 }
-void TxControl::disarm() { abort_ = true; std::lock_guard<std::mutex> l(op_); armed_ = false; }   // waits for a running operation (it sees abort_ and unkeys)
+// armed_ goes false BEFORE waiting: an operation queued behind the running one clears abort_ when it starts (Busy), but then finds itself disarmed and refuses.
+void TxControl::disarm() { armed_ = false; abort_ = true; std::lock_guard<std::mutex> l(op_); armed_ = false; }   // waits for a running operation (it sees abort_ and unkeys)
 void TxControl::retire() { retired_ = true; disarm(); }
 
 double TxControl::k_for(int band) const { auto it = k_.find(band); return it != k_.end() ? it->second : 0.0; }
@@ -120,7 +125,7 @@ RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const 
     GateConfig gc; gc.max_key_s = (target_w > 5 ? 10.0 : 6.0) + hold_s; gc.max_fwd_w = std::min(22.5, std::max(1.0, 2 * target_w)); gc.max_swr = 3.0; gc.swr_min_fwd_w = 0.5;
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
-    if (!gate.key("drive ramp", gc.max_key_s, &why)) { r.stop = why; note_stop(why); return r; }
+    if (!gate.key("drive ramp", gc.max_key_s, &why)) { r.stop = why; r.unkey_failed = gate.unkey_failed(); note_stop(why); return r; }
     keyed_ = true; src.set_keyed(true);
     const double step = std::pow(10.0, 0.1), t0 = clk_.now(); double drive = d1w / 10, hold = -1, next = 0.2, last_step = 0, last_trim = 0, kmax = 0, cmp_t = -1;
     MeterCompare cmp_; bool cmp_pending = false;
@@ -159,7 +164,7 @@ RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const 
         }
         clk_.sleep(0.05);
     }
-    src.set_keyed(false); keyed_ = false;
+    src.set_keyed(false); gate.ensure_unkeyed(2.0); keyed_ = false;   // a failed unkey: keep trying for 2 s before reporting it
     r.stop = gate.last_unkey_reason(); r.seconds = now(); r.k = kmax; r.unkey_failed = gate.unkey_failed(); note_stop(r.stop);
     if (r.reached && kmax > 1000) set_k(band, kmax);
     char m[160]; std::snprintf(m, sizeof m, "ramp: %s, max %.2f W, %.0f W per drive^2", r.stop.c_str(), r.max_fwd_w, kmax); say(log, m);
@@ -207,7 +212,16 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     r.outcome = run_atu_tune(gate, atu_, cal_.meter, band, threshold, true, 1, ready, &meter, &r.why_not, carrier, poll);
     if (!r.outcome && abort_) r.why_not = "stopped before keying";
     for (auto& x : meter.readings) { if (x.fwd_w > 0.5) { r.last_fwd_w = x.fwd_w; r.last_swr = x.swr; } }
+    gate.ensure_unkeyed(2.0);
     r.max_fwd_w = meter.max_fwd_w; r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); keyed_ = false; note_stop(r.stop);
+    // A pass only counts when the tuner finished by itself ("tune finished") and reports a usable SWR. A "pass" read after our own limit cut the
+    // carrier (the key-down time limit, a power limit, Stop) is not a match: seen 2026-11-21 on 12 m (15 s limit, SWR 1022 stored).
+    if (r.outcome && r.outcome->result == atu::Atu::TuneResult::Pass) {
+        const auto& s = r.outcome->status;
+        if (r.stop != "tune finished") r.pass_rejected = "the tuner reported a pass only after the carrier was cut (" + r.stop + "): not a match, nothing saved";
+        else if (s.swr && *s.swr > 3.0) { char b[120]; std::snprintf(b, sizeof b, "the tuner reported a pass at SWR %.1f: not a match, nothing saved", *s.swr); r.pass_rejected = b; }
+        if (!r.pass_rejected.empty()) { r.outcome->result = atu::Atu::TuneResult::Timeout; say(log, "tune: " + r.pass_rejected); }
+    }
     if (r.outcome && r.outcome->result == atu::Atu::TuneResult::Pass && r.outcome->status.ind && r.outcome->status.cap && r.outcome->status.hiz) {
         const auto& s = r.outcome->status; atu::Setting set; set.ind = *s.ind; set.cap = *s.cap; set.hiz = *s.hiz != 0;
         set.swr = s.swr ? *s.swr : 0; set.fwd_w = s.fwd_w ? *s.fwd_w : 0; set.freq_hz = mhz * 1e6;
@@ -290,11 +304,11 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     wait_until(plan.skip_s > 0 ? plan.audio_start_utc - 0.15 : plan.slot.start_utc - 0.15);   // ~0.15 s before the slot (joining late: as planned)
     if (abort_) { r.stop = "aborted before keying"; return r; }
     if (st.failed()) return no("the I/Q stream failed to start");
-    GateConfig gc; gc.max_key_s = slot_len; gc.max_fwd_w = std::max(2.0, 1.5 * power_w); gc.max_rev_w = std::max(2.0, 0.5 * power_w); gc.max_swr = 3.0;
-    gc.grace_s = kOverGraceS; gc.hard_fwd_w = std::max(6.0, 3.0 * power_w);           // a key-down overshoot is ridden out for 0.15 s; 3 x the set power never
+    GateConfig gc; gc.max_key_s = slot_len; gc.max_fwd_w = fwd_limit_w(power_w); gc.max_rev_w = std::max(2.0, 0.5 * power_w); gc.max_swr = 3.0;
+    gc.grace_s = kOverGraceS; gc.hard_fwd_w = hard_fwd_limit_w(power_w);              // a key-down overshoot is ridden out for 0.15 s; the hard limit never
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
-    if (!gate.key(std::string(ft4 ? "FT4 " : "FT8 ") + text, gc.max_key_s, &why)) { note_stop(why); return no(why); }
+    if (!gate.key(std::string(ft4 ? "FT4 " : "FT8 ") + text, gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
     keyed_ = true;
     src.seek((long long)std::llround((utc_() + latency_s - plan.slot.start_utc) * o.rate)); src.set_keyed(true);
     const double sig_start = plan.slot.start_utc + off, sig_end = sig_start + sig, t0 = clk_.now();
@@ -316,7 +330,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
         }
         clk_.sleep(0.05);
     }
-    src.set_keyed(false); keyed_ = false; r.unkeyed_utc = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    src.set_keyed(false); gate.ensure_unkeyed(2.0); keyed_ = false; r.unkeyed_utc = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
     r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.drive = drive; note_stop(r.stop);
     if (n_fwd > 3) {
         r.mean_fwd_w = sum_fwd / n_fwd; r.k = r.mean_fwd_w / (drive * drive);
@@ -372,11 +386,11 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     if (failed) return no("audio input: " + prod_err);
     if (st.failed()) return no("the I/Q stream failed to start");
     if (!ptt()) { r.stop = "PTT released before keying"; return r; }
-    GateConfig gc; gc.max_key_s = v.max_key_s; gc.max_fwd_w = 1.5 * peak_w; gc.max_rev_w = std::max(2.0, 0.5 * peak_w); gc.max_swr = 3.0;
-    gc.grace_s = kOverGraceS; gc.hard_fwd_w = std::max(6.0, 3.0 * peak_w);            // as FT8: a key-down overshoot (a data program's tone starts hard) is ridden out, 3 x never
+    GateConfig gc; gc.max_key_s = v.max_key_s; gc.max_fwd_w = fwd_limit_w(peak_w); gc.max_rev_w = std::max(2.0, 0.5 * peak_w); gc.max_swr = 3.0;
+    gc.grace_s = kOverGraceS; gc.hard_fwd_w = hard_fwd_limit_w(peak_w);               // as FT8: a key-down overshoot (a data program's tone starts hard) is ridden out, the hard limit never
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
-    if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) { note_stop(why); return no(why); }
+    if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
     keyed_ = true; r.keyed = true; src.set_keyed(true); const double t0 = clk_.now(); double last_trim = t0;
     while (gate.keyed()) {
         if (abort_) { gate.unkey("aborted"); break; }
@@ -391,7 +405,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
         if (rd.fwd_w > 1.1 * peak_w && clk_.now() - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = clk_.now(); }   // ALC: only ever down
         clk_.sleep(0.02);
     }
-    src.set_keyed(false); keyed_ = false;
+    src.set_keyed(false); gate.ensure_unkeyed(2.0); keyed_ = false;
     r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns(); note_stop(r.stop);
     char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, peak_w); say(log, m);
     return r;

@@ -208,7 +208,7 @@ Open **Transmit** under the decoder: the **Radio transmit (ATU, power, SWR)** ca
   compressor, 10-band graphic EQ (32 Hz..16 kHz, +-15 dB). Saved in QSettings fireside/audio.
 - **Voice (Transmit card)**: Auto (LSB < 10 MHz) / USB / LSB, PEP 1..100 W (default 20), PTT: hold the button, the space bar (if ticked; never while
   typing) or the mic / rear RCA PTT (READ_PTT polled, if ticked). `TxControl::voice`: input -> processing -> SSB -> the clamped transmit
-  path; gate: forward 1.5 x PEP, SWR 3, 3-minute time-out; drive from the band's measured level, trimmed only down. Tested on the simulated
+  path; gate: forward 1.5 x PEP (at most 110 W; 0.15 s grace) and 3 x PEP at once (at most 130 W), SWR 3, 3-minute time-out; drive from the band's measured level, trimmed only down. Tested on the simulated
   radio (sideband, PEP, PTT, time-out, mic failure); not on the air yet (no microphone).
 - **FT8 / FT4 send**: message, audio frequency (USB above the dial), even / odd slot, power, **Send** (no question: the status line shows what is queued and when; **Stop** cancels) and **Repeat** (calls in every slot of that
   parity until Stop). The signal is rendered at once; receive pauses only ~0.8 s before the slot and comes back after the over. Closed-loop power: the
@@ -218,7 +218,11 @@ Open **Transmit** under the decoder: the **Radio transmit (ATU, power, SWR)** ca
   the gate (forward > 1.5 x) within a second and teaches nothing; high SWR mid-over unkeys; joining up to 2 s late stays on time; a dying playback device,
   an empty message, a wrong rate, < 1 W or off-band all leave the radio unkeyed. On the air since 2026-11-19 (first CQ answered by DK0ULR).
 - Meters: forward / reflected watts and SWR from the PA detector with this radio's EEPROM calibration; the **TX** lamp is red while keyed.
-- If the unkey command ever fails (three tries), the card says UNKEY FAILED and a dialog tells you to power the radio off.
+- If the unkey command fails (three tries), the gate keeps sending it every 0.1 s for 2 s more, and again on every later tick; it never keys on top of it.
+  Only if it still has not got through does the card say UNKEY FAILED and a dialog tell you to power the radio off.
+- A safety stop (power, SWR, reflected, time limit, a failed key or unkey, an exception) ends an auto sequence and any repeat: nothing keys again by
+  itself, not even the next waiting caller. It is decided by the transmit core's own trip signal, not by the wording of the status line.
+- A tuner "pass" is saved only when the tuner finished by itself (not after our time or power limit cut the carrier) and reports SWR 3 or less.
 - Start-up: with "Start receiving when the app opens" (Device tab, remembered, on by default) the app connects, starts the radio and opens the stream at
   the last frequency and rate with no question. Order (user 2026-11-19): the radio starts, the EEPROM is read and compared with the backup (~16 s,
   read-only) and the PA bias set, and only then does receiving start. Once verified it is never read again while the app runs (a radio restart re-arms

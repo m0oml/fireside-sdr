@@ -40,14 +40,14 @@ void RadioModel::on_send(uint32_t d1) {
 }
 void RadioModel::report(bool after_tune) {
     std::vector<uint32_t> r = {res(atu::R_IND, uint8_t(ind)), res(atu::R_CAP, uint8_t(cap)), res(atu::R_HILOZ, uint8_t(hiz)), res(atu::R_ANTENNA, 0)};
-    if (after_tune) { r.push_back(res(atu::R_SWRTHRESH, uint8_t(thr))); r.push_back(res(atu::R_FWDPWR, 0x04, 0x24)); r.push_back(res(atu::R_REVPWR, 0, 0)); r.push_back(res(atu::R_SWR, 0, 0)); }
+    if (after_tune) { r.push_back(res(atu::R_SWRTHRESH, uint8_t(thr))); r.push_back(res(atu::R_FWDPWR, 0x04, 0x24)); r.push_back(res(atu::R_REVPWR, 0, 0)); r.push_back(res(atu::R_SWR, 0, uint8_t(pass_swr_b3))); }
     for (auto w : r) q.push_back(w);
 }
 uint32_t RadioModel::next() {
     if (tune_polls >= 0 && !silent && ++tune_polls >= tune_time_polls) {
         tune_polls = -1;
         if (!keyed) q.push_back(res(atu::R_TUNEFAIL, 0));
-        else if (best_swr > atu::kThresholds[thr]) q.push_back(res(atu::R_TUNEFAIL, 2));
+        else if (best_swr > atu::kThresholds[thr] && !pass_regardless) q.push_back(res(atu::R_TUNEFAIL, 2));
         else { ind = 30; cap = 7; hiz = 1; q.push_back(res(atu::R_TUNEPASS)); report(true); }
     }
     if (q.empty()) return 0x00FFFFFFu;

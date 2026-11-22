@@ -774,6 +774,11 @@ int main(int argc, char** argv) {
                         step("a second program cannot key or release it", ask(b, "T 1\n") == "RPRT -9\n" && ask(b, "T 0\n") == "RPRT 0\n" && w.simRadio()->keyed);
                         step("the dial is locked while keyed", ask(a, "F 14080000\n") == "RPRT -9\n" && std::fabs(rx->dialHz() - 14.074e6) < 1);
                         step("T 0 unkeys", ask(a, "T 0\n") == "RPRT 0\n" && wait_keyed(false) && tc->statusLabel()->text().contains("PTT released"));
+                        {   // WSJT-X re-keys as soon as the radio unkeys: inside the over's closing window or after it, the T 1 must end up keyed (never accepted then lost)
+                            const bool k1 = ask(a, "T 1\n") == "RPRT 0\n" && wait_keyed(true);
+                            ask(a, "T 0\n"); for (int i = 0; i < 300 && w.simRadio()->keyed; ++i) pump(1);
+                            step("a T 1 straight after the unkey keys again", k1 && ask(a, "T 1\n") == "RPRT 0\n" && wait_keyed(true));
+                        }
                         step("T 1 keys again, unticking unkeys", ask(a, "T 1\n") == "RPRT 0\n" && wait_keyed(true));
                         tc->extAllowBox()->setChecked(false); step("unticking unkeys", wait_keyed(false));
                         tc->extAllowBox()->setChecked(true);

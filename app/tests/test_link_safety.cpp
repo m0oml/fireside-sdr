@@ -22,6 +22,8 @@ TEST(safety_gates) {
     CHECK_THROWS(r.check(eew, true), SafetyError); CHECK_THROWS(r.check(mox, true), SafetyError);           // reading a write opcode is refused
     r.check(*find_opcode("READ_TRX_EEPROM_UINT32"), true); r.check(*find_opcode("GET_MODEL"), true);
     CHECK(Safety::matches_dangerous("RDAL_OP_SET_PA_BIAS")); CHECK(!Safety::matches_dangerous("RDAL_OP_SET_RX1_FREQ"));
+    for (const char* n : {"RDAL_OP_SET_PA_FILTER", "RDAL_OP_BYPASS_PA_FILTER", "RDAL_OP_BYPASS_TX_FILTER", "RDAL_OP_SET_TX_FILTER"})
+        CHECK(Safety::matches_dangerous(n));                                          // the PA and TX filters switch transmit hardware
 }
 TEST(get_over_pty_and_stale_replies) {
     FakeRadio radio; RawMidi t(radio.path()); MidiLink link(t); Flex fx(link);

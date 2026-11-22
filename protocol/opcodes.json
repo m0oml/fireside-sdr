@@ -1465,7 +1465,7 @@
    "data1": "f32",
    "data2": "u32",
    "result": null,
-   "safety": "write",
+   "safety": "dangerous",
    "in_use": false,
    "group": "Tuning and receive path",
    "note": ""
@@ -1477,7 +1477,7 @@
    "data1": "f32",
    "data2": "u32",
    "result": null,
-   "safety": "write",
+   "safety": "dangerous",
    "in_use": false,
    "group": "Tuning and receive path",
    "note": ""
@@ -1525,7 +1525,7 @@
    "data1": "u32",
    "data2": "u32",
    "result": null,
-   "safety": "write",
+   "safety": "dangerous",
    "in_use": false,
    "group": "Tuning and receive path",
    "note": ""
@@ -1537,7 +1537,7 @@
    "data1": "u32",
    "data2": "u32",
    "result": null,
-   "safety": "write",
+   "safety": "dangerous",
    "in_use": false,
    "group": "Tuning and receive path",
    "note": ""

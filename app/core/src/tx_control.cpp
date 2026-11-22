@@ -39,7 +39,8 @@ void TxControl::arm(const std::vector<uint8_t>& now, const std::vector<uint8_t>&
     if (backup.empty()) throw std::runtime_error("no EEPROM backup to compare with");
     if (now != backup) {
         size_t n = 0, first = 0; const size_t m = std::min(now.size(), backup.size()); for (size_t i = 0; i < m; ++i) if (now[i] != backup[i]) { if (!n) first = i; ++n; }
-        char b[200]; std::snprintf(b, sizeof b, "the radio's EEPROM differs from the saved backup (%zu byte%s differ%s, first at 0x%zX; sizes %zu / %zu): transmit refused, because the PA bias comes from it. "
+        if (now.size() != backup.size()) { if (!n) first = m; n += std::max(now.size(), backup.size()) - m; }   // the bytes one image has and the other lacks
+        char b[400]; std::snprintf(b, sizeof b, "the radio's EEPROM differs from the saved backup (%zu byte%s differ%s, first at 0x%zX; sizes %zu / %zu): transmit refused, because the PA bias comes from it. "
             "Dump it (firesidectl eeprom-dump) and compare; if the change is expected, remove the old backup and the app will offer to save a new one", n, n == 1 ? "" : "s", n == 1 ? "s" : "", first, now.size(), backup.size());
         throw std::runtime_error(b);
     }
@@ -195,7 +196,7 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     if (drive > dcap) { r.why_not = "the drive for this power is above the tune ceiling (30 W)"; return r; }
     prepare(mhz, 1, 1);                                           // tune: ANT1 (the ATU's)
     atu_.drain(); atu_.init(); clk_.sleep(1.5); atu_.drain();                  // relays settle (two runs keyed straight after a reset saw an open-like load)
-    auto rep = atu_report();
+    auto rep = atu_report_locked();
     if (!rep || !rep->ind || !rep->cap || !rep->hiz) { r.why_not = "the tuner did not report its relays: not keying"; return r; }
     txo::ToneSource src(o.rate, 8); src.set_cap(std::min(dcap, drive * 1.25)); src.set_target(drive); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]);
@@ -233,7 +234,12 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     return r;
 }
 
-std::optional<atu::Status> TxControl::atu_report() { if (retired_ || !armed_) return std::nullopt; try { atu_.request_update(); return atu_.status(); } catch (...) { return std::nullopt; } }
+std::optional<atu::Status> TxControl::atu_report_locked() { if (retired_ || !armed_) return std::nullopt; try { atu_.request_update(); return atu_.status(); } catch (...) { return std::nullopt; } }
+std::optional<atu::Status> TxControl::atu_report() {              // never alongside an over or a tune (they use the same tuner link): busy reads as no report
+    std::unique_lock<std::mutex> l(op_, std::try_to_lock);
+    if (!l.owns_lock()) return std::nullopt;
+    return atu_report_locked();
+}
 
 bool TxControl::restore_relays(int band, const LogFn& log) {
     std::lock_guard<std::mutex> l(op_);
@@ -323,7 +329,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
         catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
         r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (p) p({clk_.now() - t0, src.level(), rd});
         gate.report(rd); gate.tick(); if (!gate.keyed()) break;
-        if (now > sig_start + 0.3 && now < sig_end - 0.2 && rd.fwd_w > 0.2) {
+        if (now > sig_start + 0.3 && now < sig_end - 0.2 && rd.fwd_w > 0.05) {   // a low floor: an EEPROM-estimated drive reads low at a few W; drive_max bounds the rise
             if (now >= next_trim && now < sig_start + 3.0) {        // closed loop: trim towards the set power in the first 3 s (constant envelope)
                 drive = std::clamp(drive * std::clamp(std::sqrt(power_w / rd.fwd_w), 0.8, 1.25), 0.0, drive_max); src.set_target(drive); next_trim = now + 0.25;
             } else if (now >= sig_start + 3.3) { sum_fwd += rd.fwd_w; ++n_fwd; r.swr = rd.swr; }

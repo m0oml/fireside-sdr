@@ -74,7 +74,7 @@ Decoded decode_eeprom(const std::vector<uint8_t>& data, const std::string& which
         r.problems.push_back(b);
     }
     for (const TableSpec& s : kTables) {
-        if (!(which == "TRX" ? s.trx : s.rx2) || s.addr + s.rows * s.per * 4 > data.size()) continue;
+        if (!(which == "TRX" ? s.trx : s.rx2) || s.addr + s.rows * s.per * 4 > data.size() || s.csum >= data.size()) continue;
         TableResult t; t.name = s.name; t.pointer_addr = s.ptr; t.pointer = u16(data, s.ptr); t.address = s.addr; t.rows = s.rows; t.per_row = s.per; t.checksum_addr = s.csum;
         t.pointer_ok = t.pointer == s.addr;
         t.checksum_stored = data[s.csum]; t.checksum_calc = xor_bytes(&data[s.addr], size_t(s.rows) * s.per * 4);
@@ -108,7 +108,7 @@ Decoded decode_eeprom(const std::vector<uint8_t>& data, const std::string& which
                 e.push_back({round6(double((uint64_t(hi) << 32) + lo) * std::pow(2.0, -20) * 1e-6), val});
                 off += 12;
             }
-            r.tx_terminated = off + 12 <= data.size() && u32(data, off) == kEndOfTable;
+            r.tx_terminated = off + 4 <= data.size() && u32(data, off) == kEndOfTable;   // the terminator is 4 bytes
             r.tx_carrier = std::move(e);
         }
     }
@@ -147,7 +147,7 @@ std::vector<uint8_t> read_image(Flex& fx, const std::string& which, size_t lengt
         for (int attempt = 0;; ++attempt) {
             try { w = fx.get(op, uint32_t(addr), 0, timeout_s); break; }
             catch (const TimeoutError&) {
-                if (attempt == retries - 1) { char b[96]; std::snprintf(b, sizeof b, "%s EEPROM: no reply reading 0x%04zX after %d tries", which.c_str(), addr, retries); throw EepromReadError(b); }
+                if (attempt + 1 >= retries) { char b[96]; std::snprintf(b, sizeof b, "%s EEPROM: no reply reading 0x%04zX after %d tries", which.c_str(), addr, retries); throw EepromReadError(b); }
             }
         }
         for (int k = 0; k < 4; ++k) out.push_back(uint8_t(w >> (8 * k)));       // low byte first, as PowerSDR's Dump()

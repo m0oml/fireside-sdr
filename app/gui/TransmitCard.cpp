@@ -43,7 +43,6 @@
 #include "fireside/logbook.h"
 #include "fireside/session.h"
 #include "fireside/tx_dsp.h"
-#include "fireside/tx_dsp.h"
 #include "fireside/tx_render.h"
 #include "fireside/tx_meter.h"
 
@@ -152,10 +151,10 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     connect(test_, &QPushButton::clicked, this, &TransmitCard::onTestTone);
     connect(mirror_, &QCheckBox::toggled, this, [this] { saveState(); });
     connect(stop_, &QPushButton::clicked, this, [this] { ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false; if (seq_) { seq_->stop(); noteSeqEnd(false); }   // a logged QSO stopped during its RR73 repeats is still done
-                                                       ext_ptt_ = false; if (tx_) tx_->abort(); report("Stop pressed: unkeying, nothing queued."); updateButtons(); });
+                                                       extCancel(); if (tx_) tx_->abort(); report("Stop pressed: unkeying, nothing queued."); updateButtons(); });
     connect(send_, &QPushButton::clicked, this, &TransmitCard::onSend);
     connect(ext_allow_, &QCheckBox::toggled, this, [this](bool on) {
-        ext_allowed_ = on; if (!on) ext_ptt_ = false;                                            // a running over sees it and unkeys
+        ext_allowed_ = on; if (!on) extCancel();                                            // a running over sees it and unkeys
         report(on ? "Other programs may key the radio over CAT (this window only)." : "Other programs can no longer key the radio."); });
     connect(ptt_, &QPushButton::pressed, this, [this] { ptt_btn_ = true; onPttChanged(); });
     connect(ptt_, &QPushButton::released, this, [this] { ptt_btn_ = false; onPttChanged(); });
@@ -191,7 +190,7 @@ void TransmitCard::connectTrip() {
     QPointer<TransmitCard> me(this);                                                         // the hook runs on the worker thread: hand the reason to the GUI thread
     tx_->set_trip_hook([me](const std::string& why) { if (me) { me->job_tripped_ = true; const QString q = QString::fromStdString(why); QMetaObject::invokeMethod(me.data(), [me, q] { if (me) emit me->safetyTrip(q); }, Qt::QueuedConnection); } });
 }
-TransmitCard::~TransmitCard() { ext_ptt_ = false; ext_allowed_ = false; if (tx_) tx_->abort(); if (worker_.joinable()) worker_.join(); }
+TransmitCard::~TransmitCard() { extCancel(); ext_allowed_ = false; if (tx_) tx_->abort(); if (worker_.joinable()) worker_.join(); }
 
 // ---- keying by other programs over CAT --------------------------------------------------------------------------------------------------
 struct TransmitCard::ExtPtt : rigctl::PttRequest {
@@ -203,15 +202,42 @@ struct TransmitCard::ExtPtt : rigctl::PttRequest {
 rigctl::PttRequest* TransmitCard::pttRequest() { if (!ext_) ext_ = std::make_unique<ExtPtt>(this); return ext_.get(); }
 static qint64 now_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void TransmitCard::extHeartbeat(int client) { if (client == ext_owner_) ext_beat_ms_ = now_ms(); }
-bool TransmitCard::extActive() const {                                       // asked by the over's loop on the worker thread: atomics only
-    return ext_ptt_ && ext_allowed_ && now_ms() - ext_beat_ms_ < ext_watchdog_ms_;
+bool TransmitCard::extActive() const {                                       // asked by the over's loop on the worker thread
+    std::lock_guard<std::mutex> l(ext_m_);
+    if (ext_closing_) return false;                                          // voice() unkeys on the first no: stay no until the over has ended
+    const bool on = ext_ptt_ && ext_allowed_ && now_ms() - ext_beat_ms_ < ext_watchdog_ms_;
+    if (!on) ext_closing_ = true;
+    return on;
+}
+void TransmitCard::extCancel() { std::lock_guard<std::mutex> l(ext_m_); ext_ptt_ = false; ext_rekey_ = false; }
+void TransmitCard::extOverEnded(bool may_restart) {
+    int again = -1;
+    {
+        std::lock_guard<std::mutex> l(ext_m_);
+        if (!ext_over_) return;                                              // not the program's over
+        if (ext_rekey_ && may_restart) again = ext_owner_;
+        ext_ptt_ = false; ext_owner_ = -1; ext_over_ = false; ext_closing_ = false; ext_rekey_ = false;   // the program's next T 1 starts a new over
+    }
+    if (again >= 0) requestExt(again, true);                                 // it re-keyed while its last over was unkeying: all the checks again
 }
 bool TransmitCard::requestExt(int client, bool on) {                         // GUI thread (the CAT sockets live here)
-    if (!on) { if (client == ext_owner_) ext_ptt_ = false; return true; }    // releasing is never refused; a running over sees it and unkeys
+    if (!on) {                                                               // releasing is never refused; a running over sees it and unkeys
+        std::lock_guard<std::mutex> l(ext_m_);
+        if (client == ext_owner_) { ext_ptt_ = false; ext_rekey_ = false; }   // also drops a re-key held while the last over closes
+        return true;
+    }
     auto refuse = [&](const QString& why) { report("Transmit request from another program refused: " + why + "."); return false; };
     if (!ext_allow_->isChecked()) return refuse("\"Let other programs key\" is off");
     if (!tx_ || !tx_->armed()) return refuse("transmit is not ready");
-    if (ext_over_) { if (client == ext_owner_) { ext_ptt_ = true; ext_beat_ms_ = now_ms(); return true; } return refuse("another program is transmitting"); }
+    {
+        std::lock_guard<std::mutex> l(ext_m_);
+        if (ext_over_) {
+            if (client != ext_owner_) return refuse("another program is transmitting");
+            if (ext_closing_) ext_rekey_ = true;                             // the over is already unkeying: start a new one when it has ended (extOverEnded)
+            else { ext_ptt_ = true; ext_beat_ms_ = now_ms(); }
+            return true;
+        }
+    }
     if (worker_running_ || ft_pending_) return refuse("this app is transmitting or has an over queued");
     const double hz = rx_->dialHz(); const int band = txm::band_of(hz);
     if (band < 0) return refuse("the dial is outside the amateur bands");
@@ -223,21 +249,26 @@ bool TransmitCard::requestExt(int client, bool on) {                         // 
     v.peak_w = ext_w_->value(); v.max_key_s = kExtMaxKeyS; v.chain = tx::data_chain_defaults(); v.lsb = rx_->modeIndex() == 1;
     if (!(v.o.rate > 0)) { voice_in_.reset(); return refuse("no playback rate for transmit"); }
     const double mhz = hz / 1e6; auto* in = voice_in_.get();
-    ext_owner_ = client; ext_beat_ms_ = now_ms(); ext_ptt_ = true; ext_over_ = true;
+    { std::lock_guard<std::mutex> l(ext_m_); ext_owner_ = client; ext_beat_ms_ = now_ms(); ext_ptt_ = true; ext_over_ = true; ext_closing_ = false; ext_rekey_ = false; }
     run(QString("Keyed by another program over CAT: %1 on %2 MHz, up to %3 W").arg(v.lsb ? "LSB" : "USB").arg(mhz, 0, 'f', 4).arg(v.peak_w, 0, 'f', 0), false,
         [this, mhz, v, in](txc::TxControl& t) {
             txc::VoiceResult r;
             try { r = t.voice(mhz, *in, [this] { return extActive(); }, v, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; }); }
-            catch (...) { ext_ptt_ = false; ext_owner_ = -1; ext_over_ = false; throw; }
-            const bool quiet = ext_ptt_ && now_ms() - ext_beat_ms_ >= ext_watchdog_ms_;
-            ext_ptt_ = false; ext_owner_ = -1; ext_over_ = false;                                   // the program's next T 1 starts a new over
+            catch (...) { std::lock_guard<std::mutex> l(ext_m_); ext_ptt_ = false; ext_rekey_ = false; throw; }   // a throw is a safety stop: no restart
+            bool quiet;
+            {
+                std::lock_guard<std::mutex> l(ext_m_); ext_closing_ = true;                          // a T 1 from here on is held for extOverEnded
+                quiet = ext_ptt_ && now_ms() - ext_beat_ms_ >= ext_watchdog_ms_;
+                if (quiet || r.unkey_failed || !r.keyed) ext_rekey_ = false;                         // these never restart by themselves
+                ext_ptt_ = false;
+            }
             if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
             if (!r.keyed) return QString("Other program: not keyed: ") + QString::fromStdString(r.why_not.empty() ? r.stop : r.why_not);
             QString stop = QString::fromStdString(r.stop); if (quiet) stop = "the program stopped talking to us for 15 s";
             if (quiet) QMetaObject::invokeMethod(this, [this] { emit safetyTrip("the other program stopped talking to us for 15 s"); }, Qt::QueuedConnection);
             return QString("Other program's over: %1, %2 s, peak %3 W (set %4 W)").arg(stop).arg(r.seconds, 0, 'f', 1).arg(r.max_fwd_w, 0, 'f', 1).arg(v.peak_w, 0, 'f', 0);
         });
-    if (!worker_running_) { ext_ptt_ = false; ext_owner_ = -1; ext_over_ = false; voice_in_.reset(); return refuse("the transmit worker did not start"); }
+    if (!worker_running_) { { std::lock_guard<std::mutex> l(ext_m_); ext_ptt_ = false; ext_owner_ = -1; ext_over_ = false; } voice_in_.reset(); return refuse("the transmit worker did not start"); }
     return true;
 }
 
@@ -318,6 +349,7 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
             if (!resend && !safety) QTimer::singleShot(300, this, [this] { autoNext(); });               // an ended QSO waiting for this over to finish
             voice_in_.reset();                                                                  // a voice over's input (a PC capture lives on this thread)
             if (after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }               // start-up: receiving starts once the check is done
+            extOverEnded(!safety);                                                                  // a program re-keyed while its last over was unkeying
             if (unkey_failed_) { unkey_failed_ = false; if (auto_confirm_ < 0) QMessageBox::critical(this, "The radio may still be transmitting",
                 "The unkey command did not get through (three tries, then 2 s of retries).\n\nPower the radio off now (front panel), then check the FireWire connection.\n\n" + res); }
         }, Qt::QueuedConnection);
@@ -652,7 +684,6 @@ void TransmitCard::startSend() {
         QString res = QString("%1 %2 at %3 UTC: %4, %5 W (set %6 W)%7.").arg(prep->ft4 ? "FT4" : "FT8", r.sent ? "sent" : "stopped", when, QString::fromStdString(r.stop))
                       .arg(r.mean_fwd_w, 0, 'f', 1).arg(w, 0, 'f', 0).arg(r.late_s > 0 ? ", joined late" : "");
         if (r.limited_to_w > 0) res += QString(" This band's limit is %1 W: set the power to %1 W or less.").arg(r.limited_to_w, 0, 'f', 0);
-        if (r.limited_to_w > 0) res += QString(" This band's limit is %1 W: set the power to %1 W or less.").arg(r.limited_to_w, 0, 'f', 0);
         unkeyed_utc_ = r.unkeyed_utc;
         if (r.sent && r.mean_fwd_w > 0.1) { last_tx_w_ = r.mean_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }   // for the log's TX_PWR
         if (r.sent) res += " #sent";
@@ -670,7 +701,7 @@ void TransmitCard::onRestore() {
 }
 
 void TransmitCard::onRadioRunning(bool on) {
-    if (!on) { ext_ptt_ = false; tx_.reset(); QSignalBlocker b(arm_); arm_->setChecked(false); arm_tried_ = false; report("Radio stopped: transmit disarmed."); }
+    if (!on) { extCancel(); tx_.reset(); QSignalBlocker b(arm_); arm_->setChecked(false); arm_tried_ = false; report("Radio stopped: transmit disarmed."); }
     else if (auto_arm_) QTimer::singleShot(300, this, [this] { autoArm(); });               // the EEPROM check runs as soon as the radio is up
     updateButtons();
 }

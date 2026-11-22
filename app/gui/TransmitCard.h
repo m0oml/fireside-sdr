@@ -111,6 +111,12 @@ private:
     std::atomic<int> ext_owner_{-1}; std::atomic<bool> ext_ptt_{false}, ext_allowed_{false}, ext_over_{false}; std::atomic<qint64> ext_beat_ms_{0};
     static constexpr qint64 kExtWatchdogMs = 15000; static constexpr double kExtMaxKeyS = 120;
     std::atomic<qint64> ext_watchdog_ms_{kExtWatchdogMs};                       // tests shorten it (setExtWatchdogForTests)
+    // ext_m_ orders the end of an over against a re-key from the same program. Once extActive() has said no, the over is closing (latched); a T 1 from
+    // its owner from then until the job's completion has run on the GUI thread is held (ext_rekey_) and started there as a new over, never folded into
+    // the over that is unkeying and never refused as "busy". The owner and ext_over_ are cleared only by that completion (extOverEnded).
+    mutable std::mutex ext_m_; mutable bool ext_closing_ = false; bool ext_rekey_ = false;
+    void extCancel();                                                              // Stop, untick, radio stop, close: release and drop any held re-key
+    void extOverEnded(bool may_restart);                                           // GUI thread, from run()'s completion of the program's over
     bool extActive() const; bool requestExt(int client, bool on); void extHeartbeat(int client);
     std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_; void noteSeqEnd(bool may_continue = true); void autoNext(); QSet<QString> auto_tried_; bool auto_reply_ = false, from_cq_ = false, follow_pending_ = false; QPushButton *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
     QCheckBox* auto_seq_ = nullptr; std::unique_ptr<fireside::seq::Sequencer> seq_; std::function<QString()> my_grid_;

@@ -120,13 +120,13 @@ number,name,access,data1,data2,result,safety,in_use,group,note
 1256,SET_XREF,w,u32,u32,,write,,Other,
 1257,SET_RX1_FILTER,w,f32,u32,,write,,Tuning and receive path,
 1258,SET_RX2_FILTER,w,f32,u32,,write,,Tuning and receive path,
-1259,SET_TX_FILTER,w,f32,u32,,write,,Tuning and receive path,
-1260,SET_PA_FILTER,w,f32,u32,,write,,Tuning and receive path,
+1259,SET_TX_FILTER,w,f32,u32,,dangerous,,Tuning and receive path,
+1260,SET_PA_FILTER,w,f32,u32,,dangerous,,Tuning and receive path,
 1261,SET_INT_SPKR,w,u32,u32,,write,,Audio codec and outputs,0/1 internal speaker amp (5000C only); also clear its mute bit in codec reg 0x07.
 1262,SET_RX1_TAP,w,u32,u32,,write,,Tuning and receive path,
 1263,BYPASS_RX1_FILTER,w,u32,u32,,write,,Tuning and receive path,
-1264,BYPASS_TX_FILTER,w,u32,u32,,write,,Tuning and receive path,
-1265,BYPASS_PA_FILTER,w,u32,u32,,write,,Tuning and receive path,
+1264,BYPASS_TX_FILTER,w,u32,u32,,dangerous,,Tuning and receive path,
+1265,BYPASS_PA_FILTER,w,u32,u32,,dangerous,,Tuning and receive path,
 1266,READ_PTT,r,u32,u32,u32,read,yes,Transmit and keying,"Returns the same bitmap as the EVENT register: bit0 dot, bit1 dash, bit2 RCA PTT, bit3 mic PTT."
 1267,SET_HEADPHONE,w,u32,u32,,write,,Audio codec and outputs,0/1 headphone amp; also codec reg 0x07 bits 0x0C.
 1268,SET_PLL,w,u32,u32,,dangerous,,EEPROM and registers,

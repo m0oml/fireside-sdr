@@ -73,7 +73,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
     if (QWidget* adv = receiver_->takeAdvancedWidget()) { auto* al = new QVBoxLayout; al->addWidget(adv); col->addWidget(theme::makeCard("Receive I/Q (advanced)", al)); }
     device_col_ = col; col->addWidget(theme::makeCard("MIDI (read-only identify)", row)); col->addWidget(theme::makeCard("Log", logbox, true), 1);
     tabs_ = new QTabWidget;
-    tabs_->addTab(receiver_, "Radio"); tabs_->addTab(antennas_, "Antennas"); tabs_->addTab(central, "Device"); log_panel_ = new LogPanel(receiver_); receiver_->setLookupWidget(log_panel_->takeLookupWidget()); receiver_->setLogFormWidget(log_panel_->takeFormWidget()); connect(log_panel_, &LogPanel::activeChanged, receiver_, &ReceiverPanel::setLogActive); tabs_->addTab(log_panel_, "Log"); audio_panel_ = new AudioPanel(radio_); audio_panel_->setReceiveOutputWidget(receiver_->takeOutputWidget()); tabs_->addTab(audio_panel_, "Audio"); psk_panel_ = new PskPanel([this] { return receiver_->myCall(); }, [this] { const QString g = log_panel_->myGrid().trimmed(); return g.size() >= 4 || !tx_card_ ? g : tx_card_->myGrid4(); },
+    tabs_->addTab(receiver_, "Radio"); tabs_->addTab(antennas_, "Antennas"); tabs_->addTab(central, "Device"); device_tab_ = central; log_panel_ = new LogPanel(receiver_); receiver_->setLookupWidget(log_panel_->takeLookupWidget()); receiver_->setLogFormWidget(log_panel_->takeFormWidget()); connect(log_panel_, &LogPanel::activeChanged, receiver_, &ReceiverPanel::setLogActive); tabs_->addTab(log_panel_, "Log"); audio_panel_ = new AudioPanel(radio_); audio_panel_->setReceiveOutputWidget(receiver_->takeOutputWidget()); tabs_->addTab(audio_panel_, "Audio"); psk_panel_ = new PskPanel([this] { return receiver_->myCall(); }, [this] { const QString g = log_panel_->myGrid().trimmed(); return g.size() >= 4 || !tx_card_ ? g : tx_card_->myGrid4(); },
         [this] { return QString(fireside::txm::band_name(fireside::txm::band_of(receiver_->dialHz()))); });
     tabs_->addTab(psk_panel_, "PSK Reporter"); connect(psk_panel_, &PskPanel::shortSummaryChanged, receiver_, &ReceiverPanel::setHeardNote); connect(receiver_, &ReceiverPanel::ftxLine, psk_panel_, &PskPanel::onDecodeLine); connect(audio_panel_, &AudioPanel::message, this, [this](const QString& m) { log_->appendPlainText(m); appLog("audio", m); });
     tx_panel_ = new TxPanel;                                                                 // transmit lives on the Receiver screen, under the decoder (a transceiver is one display)
@@ -163,7 +163,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
         if (tx_card_) connect(tx_card_, &TransmitCard::safetyTrip, this, &MainWindow::showTrip);
     }
     resize(1400, 860);
-    if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) { QSettings q("fireside", "window"); if (q.contains("geometry")) restoreGeometry(q.value("geometry").toByteArray()); tabs_->setCurrentIndex(std::clamp(q.value("tab", 0).toInt(), 0, 1)); }
+    if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) { QSettings q("fireside", "window"); if (q.contains("geometry")) restoreGeometry(q.value("geometry").toByteArray()); tabs_->setCurrentIndex(std::clamp(q.value("tab", 0).toInt(), 0, tabs_->count() - 1)); }
     connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshDevices);
     connect(ident, &QPushButton::clicked, this, &MainWindow::identify);
     log_->appendPlainText(QString("fireside_core: %1 opcodes. The MIDI Identify button only reads. The FireWire session above writes only after you tick \"Allow writes\", connect and confirm Start; the transmitter is never keyed.").arg(unsigned(fireside::kOpCount)));
@@ -211,7 +211,7 @@ void MainWindow::closeEvent(QCloseEvent* e) {
         QMessageBox::warning(this, "Radio shutdown failed", "The radio did not confirm the shutdown (MOX off, standby, PA bias off). Check it, and power-cycle it if anything looks wrong.");
     QMainWindow::closeEvent(e);
 }
-void MainWindow::showRadio() { tabs_->setCurrentIndex(2); }                     // the Device tab (FireWire, session)
+void MainWindow::showRadio() { if (device_tab_) tabs_->setCurrentWidget(device_tab_); }   // the Device tab (FireWire, session)
 void MainWindow::showReceiver() { tabs_->setCurrentWidget(receiver_); }
 QString MainWindow::deviceSummary() const { return QString("%1 MIDI device(s)").arg(devices_->count()); }
 

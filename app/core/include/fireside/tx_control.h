@@ -139,9 +139,10 @@ public:
     struct GenCheck { bool ok = false, preamp_measured = false; std::string why, restore_error; double off_dbfs = -200, on_dbfs = -200, preamp_dbfs = -200, peak_hz = 0; };
     GenCheck sig_gen_check(double dial_mhz, double tone_hz, const std::function<std::pair<double, double>()>& read, const std::function<bool(bool)>& preamp,
                            bool preamp_was_on, const LogFn& log = {});
-    std::optional<atu::Status> atu_report();                      // no RF: the tuner's relays
+    std::optional<atu::Status> atu_report();                      // no RF: the tuner's relays; nullopt while an over or tune runs
 
 private:
+    std::optional<atu::Status> atu_report_locked();               // the same, for callers already holding op_
     Flex& fx_; PcmFactory pcm_; atu::Clock clk_; std::function<double()> utc_; txs::TxCal cal_; atu::Atu atu_; atu::Memory mem_; std::map<int, double> k_;
     std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool)> key_hook_; std::function<void(const std::string&)> trip_hook_;
     void note_stop(const std::string& s) { if (trip_hook_ && is_safety_stop(s)) { try { trip_hook_(s); } catch (...) {} } }

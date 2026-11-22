@@ -46,5 +46,5 @@ public:
 private:
     void applyExternal(bool on, bool restoring = false);   // the decoder card's "External program" switch
     int ext_prev_decoder_ = 0; bool ext_prev_seq_ = true, ext_prev_upload_ = false, ext_prev_data_ = false;
-    QComboBox* devices_; QPlainTextEdit* log_; QTabWidget* tabs_; ReceiverPanel* receiver_; RadioPanel* radio_ = nullptr; AntennaPanel* antennas_ = nullptr; LogPanel* log_panel_ = nullptr; class AudioPanel* audio_panel_ = nullptr; class PskPanel* psk_panel_ = nullptr; class CatPanel* cat_ = nullptr; QBoxLayout* device_col_ = nullptr; TxPanel* tx_panel_ = nullptr; TransmitCard* tx_card_ = nullptr; std::unique_ptr<fireside::sim::DiceBus> sim_; std::unique_ptr<fireside::sim::RadioModel> sim_radio_;
+    QComboBox* devices_; QPlainTextEdit* log_; QTabWidget* tabs_; ReceiverPanel* receiver_; RadioPanel* radio_ = nullptr; AntennaPanel* antennas_ = nullptr; LogPanel* log_panel_ = nullptr; class AudioPanel* audio_panel_ = nullptr; class PskPanel* psk_panel_ = nullptr; class CatPanel* cat_ = nullptr; QBoxLayout* device_col_ = nullptr; QWidget* device_tab_ = nullptr; TxPanel* tx_panel_ = nullptr; TransmitCard* tx_card_ = nullptr; std::unique_ptr<fireside::sim::DiceBus> sim_; std::unique_ptr<fireside::sim::RadioModel> sim_radio_;
 };

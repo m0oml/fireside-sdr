@@ -14,7 +14,7 @@ from .opcodes import OPCODES, BY_VALUE
 DANGEROUS = re.compile(
     r"EEPROM|REG_SET|WRITE_.*REG|_REG$|I2C_WRITE|FIRESIDEWIRE_WRITE|PA_BIAS|POT|RDAC|"
     r"RESET|PWRBT|POWER_OFF|POWER_DOWN|INITIALIZE|CLOCK|PLL|DDS_REG|GPIO|FAN|"
-    r"MOX|ATU_SEND|ENABLE_ATU|SET_TR$|AMP_TX|TX_DAC|FULL_DUPLEX|XVTR|XVTXEN|KEY_2M")  # TX-capable
+    r"MOX|ATU_SEND|ENABLE_ATU|SET_TR$|AMP_TX|TX_DAC|FULL_DUPLEX|XVTR|XVTXEN|KEY_2M|PA_FILTER|TX_FILTER")  # TX-capable
 
 
 # Reviewed exemptions (analysis/startup-review.md): a permit() for these opcodes covers ONLY these raw wire values.

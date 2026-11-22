@@ -53,12 +53,12 @@ The same table for programs: [`opcodes.json`](opcodes.json) and [`opcodes.csv`](
 | 1254 | `SET_QSD` | w | u32, u32 | write | | Calibration only (Quadrature Sampling Detector enable). |
 | 1257 | `SET_RX1_FILTER` | w | f32, u32 | write | |  |
 | 1258 | `SET_RX2_FILTER` | w | f32, u32 | write | |  |
-| 1259 | `SET_TX_FILTER` | w | f32, u32 | write | |  |
-| 1260 | `SET_PA_FILTER` | w | f32, u32 | write | |  |
+| 1259 | `SET_TX_FILTER` | w | f32, u32 | dangerous | |  |
+| 1260 | `SET_PA_FILTER` | w | f32, u32 | dangerous | |  |
 | 1262 | `SET_RX1_TAP` | w | u32, u32 | write | |  |
 | 1263 | `BYPASS_RX1_FILTER` | w | u32, u32 | write | |  |
-| 1264 | `BYPASS_TX_FILTER` | w | u32, u32 | write | |  |
-| 1265 | `BYPASS_PA_FILTER` | w | u32, u32 | write | |  |
+| 1264 | `BYPASS_TX_FILTER` | w | u32, u32 | dangerous | |  |
+| 1265 | `BYPASS_PA_FILTER` | w | u32, u32 | dangerous | |  |
 | 1275 | `SET_RX1_LOOP` | w | u32, u32 | write | | 0/1: route selected antenna to RX1 OUT, with RX1 IN as the return (external preamp/filter loop). |
 | 1277 | `SET_ANT` | w | u32, u32 | write | |  |
 | 1278 | `SET_RX1_ANT` | w | u32, u32 | write | yes | 0 N/C, 1 ANT1, 2 ANT2, 3 ANT3, 4 RX1 IN, 5 RX2 IN, 6 RX1 TAP, 7 SIG GEN, 8 VHF, 9 UHF. RX1 valid choices in the UI: ANT1 (default), ANT2, ANT3, RX1 IN, N/C. |

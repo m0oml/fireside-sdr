@@ -57,6 +57,7 @@ public:
     void heardLine(const QString& decoderLine);          // every decoded line addressed to me (the sequencer moves on; nothing is sent here)
     void setMyGridSource(std::function<QString()> f) { my_grid_ = std::move(f); }
     QCheckBox* autoSeqBox() const { return auto_seq_; }
+    void setMaxTriesForTests(int n) { test_tries_ = n; }   // smoke tests: a QSO gives up after n tries (not 6)
     QSpinBox* ftHzBox() const { return ft_hz_; } QCheckBox* ftClearBox() const { return ft_clear_; }
     QPushButton* cqButton() const { return cq_; }
     double recentTxPowerW() const;                       // mean forward power of our last FT8/FT4 over if it was in the last 10 minutes, else 0 (the log's TX_PWR)
@@ -123,7 +124,8 @@ private:
     std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_; void noteSeqEnd(bool may_continue = true); void autoNext(); QSet<QString> auto_tried_; bool auto_reply_ = false, from_cq_ = false, follow_pending_ = false; QPushButton *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
     QCheckBox* auto_seq_ = nullptr; std::unique_ptr<fireside::seq::Sequencer> seq_; std::function<QString()> my_grid_;
     void pauseReceive(); QString resumeReceive();        // receive pauses for an over (the slot so far decoded first) and comes back after it
-    fireside::seq::Sequencer& sequencer();
+    fireside::seq::Sequencer& sequencer(); int test_tries_ = 0;
+    static constexpr int kCallerTries = 3;                                         // a waiting caller answered by auto mode: this many tries, then the next one
     void takeLog();
     fireside::txc::PcmFactory pcmFactory() const;
     static double playbackRate();

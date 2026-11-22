@@ -936,42 +936,36 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
 
 qint64 ReceiverPanel::callersNow() const { return callers_now_ ? callers_now_() : QDateTime::currentMSecsSinceEpoch(); }
 void ReceiverPanel::addCaller(const QString& call, const QString& line) {
+    const qint64 now = callersNow();
+    if (moved_on_.contains(call)) { if (now - moved_on_.value(call) < kMovedOnMs) return; moved_on_.remove(call); }   // worked or given up on: not again for 10 min
     removeCaller(call); caller_list_.append({call, line, info_by_call_.value(call), tag_by_call_.value(call, -1), callersNow()}); renderCallers();       // a repeat call refreshes the entry (and moves it to the newest place)
 }
 void ReceiverPanel::removeCaller(const QString& call) {
     if (call.isEmpty()) return;
     for (int i = 0; i < caller_list_.size(); ++i) if (caller_list_[i].call == call) { caller_list_.removeAt(i); renderCallers(); return; }
 }
-void ReceiverPanel::clearCallers() { caller_list_.clear(); if (callers_) callers_->clear(); }
-void ReceiverPanel::tickCallers() {
-    fadeQsos();
-    if (caller_list_.isEmpty()) return;
-    const bool ft4 = decoderIndex() == 5; const double cycle_ms = ft4 ? 7500.0 : 15000.0; const int limit = ft4 ? 10 : 6;   // unanswered for this many cycles: gone
-    const qint64 now = callersNow();
-    for (int i = caller_list_.size() - 1; i >= 0; --i) if (double(now - caller_list_[i].ms) >= limit * cycle_ms) caller_list_.removeAt(i);
-    renderCallers();
-}
+void ReceiverPanel::clearCallers() { caller_list_.clear(); moved_on_.clear(); if (callers_) callers_->clear(); }
+void ReceiverPanel::tickCallers() { fadeQsos(); }                                  // the callers stay until worked or tried (no time limit, no fade)
 QString ReceiverPanel::callersText() const { return callers_ ? callers_->toPlainText() : QString(); }
 void ReceiverPanel::renderCallers() {
     if (!callers_) return;
-    const bool ft4 = decoderIndex() == 5; const double span_ms = (ft4 ? 10 : 6) * (ft4 ? 7500.0 : 15000.0); const qint64 now = callersNow();
-    auto mix = [](const QColor& a, const QColor& b, double t) { return QColor(int(a.red() + (b.red() - a.red()) * t), int(a.green() + (b.green() - a.green()) * t), int(a.blue() + (b.blue() - a.blue()) * t)); };
+    while (caller_list_.size() > kMaxCallers) caller_list_.removeFirst();                     // a very busy pile-up: the oldest go
     callers_->clear(); QTextCursor c(callers_->document());
-    const int from = std::max(0, int(caller_list_.size()) - 4);                                  // the newest four
-    for (int i = from; i < caller_list_.size(); ++i) {
-        const double t = std::clamp(double(now - caller_list_[i].ms) / span_ms, 0.0, 1.0);        // 0 = just heard, 1 = about to go
-        QTextCharFormat f; f.setForeground(mix(QColor("#ffffff"), QColor("#5d6675"), t)); if (t < 0.5) f.setFontWeight(QFont::Bold);
-        QTextBlockFormat bf; bf.setBackground(mix(QColor("#7a1f2b"), QColor("#12161d"), t));
+    const int n = int(caller_list_.size()), shown = n > 4 ? 3 : n, from = n - shown;          // four lines: the newest four, or the newest three and a count
+    for (int i = from; i < n; ++i) {
+        QTextCharFormat f; f.setForeground(QColor("#ffffff")); f.setFontWeight(QFont::Bold);   // no fading: every waiting caller looks the same
+        QTextBlockFormat bf; bf.setBackground(QColor("#7a1f2b"));
         if (i > from) c.insertBlock(); c.setBlockFormat(bf); c.insertText(caller_list_[i].line, f);
         const Caller& cl = caller_list_[i];
         if (cl.tag >= 0 || !cl.info.isEmpty()) {                                                      // the same "| NEW  Name, City, Country, km" tail as the decoder lines
             static const char* const tagtext[] = {"NEW", "new band/mode", "worked"}; static const QColor tagcol[] = {QColor("#3ddc84"), QColor("#ffb454"), QColor("#8b93a7")};
-            QTextCharFormat fd; fd.setForeground(mix(QColor("#aab3c5"), QColor("#4a5261"), t)); fd.setFontWeight(QFont::Normal);
+            QTextCharFormat fd; fd.setForeground(QColor("#aab3c5")); fd.setFontWeight(QFont::Normal);
             c.insertText(kInfoSep, fd);
-            QTextCharFormat ft = fd; if (cl.tag >= 0) ft.setForeground(mix(tagcol[cl.tag], QColor("#4a5261"), t)); c.insertText((cl.tag >= 0 ? QString(tagtext[cl.tag]) : QString()).leftJustified(kTagCols), ft);
+            QTextCharFormat ft = fd; if (cl.tag >= 0) ft.setForeground(tagcol[cl.tag]); c.insertText((cl.tag >= 0 ? QString(tagtext[cl.tag]) : QString()).leftJustified(kTagCols), ft);
             c.insertText(cl.info, fd);
         }
     }
+    if (n > 4) { QTextCharFormat f; f.setForeground(QColor("#aab3c5")); c.insertBlock(); c.setBlockFormat(QTextBlockFormat()); c.insertText(QString("... and %1 more waiting").arg(n - shown), f); }
 }
 bool ReceiverPanel::qsoPaneAtBottom(int* maximum) const {
     if (!qso_text_) return true; auto* sb = qso_text_->verticalScrollBar(); if (maximum) *maximum = sb->maximum(); return sb->value() == sb->maximum();
@@ -1001,6 +995,7 @@ void ReceiverPanel::setQsoPartner(const QString& call) {
 }
 void ReceiverPanel::endQso(const QString& call, bool done) {               // the sequence finished: a closing line, and the pane takes callers again
     const QString b = QString::fromStdString(fireside::qrz::base_call(call.toStdString()));
+    if (!b.isEmpty()) { removeCaller(b); moved_on_.insert(b, callersNow()); }   // worked, or tried and moved on: off the callers list (not back for 10 min)
     if (qso_text_) { qso_text_->moveCursor(QTextCursor::End); QTextCursor c = qso_text_->textCursor(); if (!qso_text_->document()->isEmpty()) c.insertBlock();
         QTextCharFormat f; f.setForeground(done ? QColor("#3ddc84") : QColor("#8b93a7")); f.setFontWeight(QFont::Bold); c.setBlockFormat(QTextBlockFormat());
         c.insertText(done ? QString::fromUtf8("\u2500\u2500 QSO with %1 done \u2500\u2500").arg(b) : QString::fromUtf8("\u2500\u2500 QSO with %1 not completed (no answer) \u2500\u2500").arg(b), f);

@@ -403,7 +403,9 @@ bool TransmitCard::haveStation() {
 fireside::seq::Sequencer& TransmitCard::sequencer() {
     const QString grid = myGrid4();
     const QString me = rx_->myCall();                                                       // callers have checked haveStation(): never another station's call
-    if (!seq_ || QString::fromStdString(seq_->describe()).isEmpty()) seq_ = std::make_unique<fireside::seq::Sequencer>(me.toStdString(), grid.left(4).toUpper().toStdString());
+    if (!seq_ || QString::fromStdString(seq_->describe()).isEmpty())
+        seq_ = test_tries_ > 0 ? std::make_unique<fireside::seq::Sequencer>(me.toStdString(), grid.left(4).toUpper().toStdString(), test_tries_)
+                               : std::make_unique<fireside::seq::Sequencer>(me.toStdString(), grid.left(4).toUpper().toStdString());
     return *seq_;
 }
 namespace {
@@ -432,7 +434,7 @@ void TransmitCard::replyTo(const QString& line) {
     if (!sq.reply_to(h)) { report("Nothing to answer in: " + QString::fromStdString(text)); return; }
     { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - line_parity(line, ft_mode_->currentIndex() == 1)); }   // our slots are the other parity
     { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); }
-    ft_msg_->setText(QString::fromStdString(sq.current())); saveState(); ended_for_.clear(); emit qsoPartner(QString::fromStdString(sq.dx()));
+    ft_msg_->setText(QString::fromStdString(sq.current())); saveState(); ended_for_.clear(); logged_for_.clear(); emit qsoPartner(QString::fromStdString(sq.dx()));
     ft_timer_->stop(); ft_pending_.reset();
     if (tx_ && tx_->armed() && !worker_running_) queueSend(); else report(QString("Reply ready: %1 (%2). Transmit is not ready yet.").arg(ft_msg_->text(), ft_par_->currentText()));
 }
@@ -441,7 +443,9 @@ void TransmitCard::heardLine(const QString& line) {
     int snr = 0; const std::string text = fireside::logbook::ftx_line_text(line.toStdString(), &snr); const auto h = fireside::seq::parse(text, snr);   // two statements: argument order is unspecified
     const bool was_cq = seq_->stage() == fireside::seq::Stage::Cq;
     if (seq_->heard(h)) {
-        if (was_cq && seq_->stage() != fireside::seq::Stage::Cq) from_cq_ = true;            // someone answered our CQ: afterwards, back to CQ
+        if (was_cq && seq_->stage() != fireside::seq::Stage::Cq) {                             // someone answered our CQ: afterwards, back to CQ
+            from_cq_ = true; ended_for_.clear(); logged_for_.clear();                           // a new QSO, even with a station we just gave up on or worked
+        }
         emit qsoPartner(QString::fromStdString(seq_->dx()));
         if (!seq_->current().empty()) ft_msg_->setText(QString::fromStdString(seq_->current()));
         report(QString::fromStdString(seq_->describe()) + (seq_->current().empty() ? QString() : QString(": next ") + QString::fromStdString(seq_->current())));
@@ -477,7 +481,7 @@ void TransmitCard::autoNext() {                         // auto mode, a QSO (or 
         if (!h.ok || h.seventy3 || h.rr73 || h.rrr) continue;
         auto_reply_ = true; replyTo(c.second); auto_reply_ = false;
         if (seq_ && seq_->active() && QString::fromStdString(seq_->dx()).contains(c.first)) {
-            seq_->limit_tries(2); report(QString("Answering %1, who called earlier (2 tries, then the next one): %2").arg(c.first, ft_msg_->text()));
+            seq_->limit_tries(kCallerTries); report(QString("Answering %1, who called earlier (%2 tries, then the next one): %3").arg(c.first).arg(kCallerTries).arg(ft_msg_->text()));
             return;
         }
         if (seq_ && seq_->active()) return;                                                  // answering someone (the operator's or this one)

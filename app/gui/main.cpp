@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
         lp->logNow(); step("decode-filled QSO logged", waitFor([&] { return lp->status() == "Logged to Wavelog"; }));
         { QString b2; for (const auto& s2 : seen) if (s2.method == "POST" && s2.path.contains("/api/v2/qso")) b2 = s2.body;
           step("decode-filled fields", b2.contains("<CALL:5>DL2AL") && b2.contains("<RST_SENT:3>-09") && b2.contains("<RST_RCVD:3>-07")); }
-        {   // the callers area: whoever calls me stays, fading, until I answer them or they have gone unanswered for 6 FT8 / 10 FT4 cycles
+        {   // the callers area: whoever calls me stays (no time limit, no fade) until worked or tried; then not listed again for 10 min
             qint64 clk = 1000000; r->setCallersClockForTests([&clk] { return clk; });
             r->setDecoderIndex(4); r->myCallBox()->setText("M0OML"); r->clearDecoded();
             r->addDecodedText("093300  -3  0.2 1200 ~  CQ DL2AL JO31\n093300  -8  0.1  800 ~  SP9ABC DL2AL -05\n093315  -6  0.1 2576 ~  M0OML DK0ULR JN58\n");
@@ -137,18 +137,20 @@ int main(int argc, char** argv) {
             r->showCallInfo("DK0ULR", "Klaus, Ulm, Germany, 770 km"); r->markWorked("DK0ULR", 0);
             step("callers: the callbook info and the NEW tag show in the callers area", r->callersText().contains("Klaus, Ulm, Germany, 770 km") && r->callersText().contains("NEW"));
             r->addDecodedText("093325  -5  0.1 1500 ~  M0OML DK0ULR JN58\n"); step("callers: a repeat call keeps the info", r->callersText().contains("Klaus, Ulm") && r->callersText().count("DK0ULR") == 1);
-            clk += 5 * 15000; r->tickCallers(); step("callers: still listed after 5 FT8 cycles", r->callersText().contains("DK0ULR"));
-            clk += 15000; r->tickCallers(); step("callers: gone after 6 unanswered FT8 cycles", r->callersText().isEmpty());
+            clk += 60 * 60000; r->tickCallers(); step("callers: still listed an hour later (no time limit)", r->callersText().contains("DK0ULR"));
             r->addDecodedText("093330  -6  0.1 1500 ~  M0OML EA3ABC JN11\n"); clk += 4 * 15000;
             r->addDecodedText("093430  -5  0.1 1500 ~  M0OML EA3ABC JN11\n"); clk += 4 * 15000; r->tickCallers();
             step("callers: a repeat call refreshes the entry (listed once)", r->callersText().count("EA3ABC") == 1);
-            r->addQsoTx("093445", 1500, "EA3ABC M0OML -05"); step("callers: our over to them answers them (removed at once)", r->callersText().isEmpty());
+            r->addQsoTx("093445", 1500, "EA3ABC M0OML -05"); step("callers: our over to them answers them (removed at once)", !r->callersText().contains("EA3ABC"));
             for (int k = 1; k <= 6; ++k) { r->addDecodedText(QString("0935%1  -6  0.1 1500 ~  M0OML CALL%2X JN11\n").arg(10 + k).arg(k)); clk += 1000; }
-            step("callers: only the newest four are shown", r->callersText().split('\n').size() == 4 && r->callersText().contains("CALL6X") && !r->callersText().contains("CALL2X"));
+            step("callers: four lines, the newest three and how many more wait", r->callersText().split('\n').size() == 4 && r->callersText().contains("CALL6X") && r->callersText().contains("CALL4X")
+                 && !r->callersText().contains("CALL3X") && r->callersText().contains("and 4 more waiting"));
+            step("callers: the ones not shown are still in the list", r->nextCaller({"CALL6X", "CALL5X", "CALL4X", "CALL3X", "CALL2X", "CALL1X"}).first == "DK0ULR");
             r->setQsoPartner("CALL6X"); step("callers: replying to a line (partner set) removes that caller", !r->callersText().contains("CALL6X")); r->setQsoPartner(QString());
-            r->setDecoderIndex(5); r->addDecodedText("093700  -9  0.2 1200 ~  M0OML DK0ULR JN58\n");
-            clk += 9 * 7500; r->tickCallers(); step("callers: still listed after 9 FT4 cycles", r->callersText().contains("DK0ULR"));
-            clk += 7500; r->tickCallers(); step("callers: gone after 10 unanswered FT4 cycles", r->callersText().isEmpty());
+            r->endQso("CALL5X", false); step("callers: a QSO given up on takes them off the list", r->nextCaller({}).first != "CALL5X" && !r->callersText().contains("CALL5X"));
+            r->addDecodedText("093600  -6  0.1 1500 ~  M0OML CALL5X JN11\n"); step("callers: calling again within 10 min, not listed again", !r->callersText().contains("CALL5X"));
+            clk += 11 * 60000; r->addDecodedText("094700  -6  0.1 1500 ~  M0OML CALL5X JN11\n"); step("callers: after 10 min, listed again", r->callersText().contains("CALL5X"));
+            r->clearDecoded();
             {   // the QSO pane during a QSO: only the partner (and our overs); anyone else calling waits in the callers area; the end is marked
                 r->setDecoderIndex(4); r->clearQso(); r->setQsoPartner("DK0ULR");
                 r->addDecodedText("093800  -7  0.1 1500 ~  M0OML DK0ULR -10\n093800  -9  0.1 1800 ~  M0OML OK1XYZ JO70\n");
@@ -753,6 +755,21 @@ int main(int argc, char** argv) {
                                 step("late 73: shown inside that QSO's block, just above its done line", i73 >= 0 && idone > i73 && between.count('\n') == 1 && qp.count("M0OML DL3BBB 73") == 1); }
                             QPushButton* sb2 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb2 = bt;
                             if (sb2) sb2->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
+                        }
+                        {   // a station we gave up on answers our CQ again and goes silent again: after the second give-up, CQ carries on (it stopped)
+                            tc->autoSeqBox()->setChecked(true); tc->setMaxTriesForTests(2);
+                            auto until = [&](const std::function<bool()>& f) { for (int i = 0; i < 6000 && !f(); ++i) pump(1); return f(); };
+                            tc->ftHzBox()->setValue(1200); tc->cqButton()->click(); pump(2);
+                            step("give-up twice: CQ goes out", until([&] { return tc->busy(); }));
+                            rx->addDecodedText(label(wall()) + " -10  0.1 1200 ~  M0OML SV1EKI KM18\n"); pump(2);
+                            step("give-up twice: their answer gets our report", tc->messageText().startsWith("SV1EKI M0OML "));
+                            step("give-up twice: no reply, it gives up and calls CQ again", until([&] { return tc->qsoText().startsWith("Calling CQ"); }));
+                            rx->addDecodedText(label(wall()) + " -10  0.1 1200 ~  M0OML SV1EKI KM18\n"); pump(2);
+                            step("give-up twice: they answer the CQ again: a new QSO", tc->messageText().startsWith("SV1EKI M0OML "));
+                            step("give-up twice: no reply again, and CQ still carries on", until([&] { return tc->qsoText().startsWith("Calling CQ"); }));
+                            QPushButton* sb4 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb4 = bt;
+                            if (sb4) sb4->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
+                            tc->setMaxTriesForTests(0);
                         }
                         {   // a safety stop during the RR73 repeat of an already-logged QSO, with another station waiting: nothing keys again by itself
                             auto* sim = w.simRadio(); tc->autoSeqBox()->setChecked(true);

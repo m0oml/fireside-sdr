@@ -115,6 +115,7 @@ private:
     // its owner from then until the job's completion has run on the GUI thread is held (ext_rekey_) and started there as a new over, never folded into
     // the over that is unkeying and never refused as "busy". The owner and ext_over_ are cleared only by that completion (extOverEnded).
     mutable std::mutex ext_m_; mutable bool ext_closing_ = false; bool ext_rekey_ = false;
+    void stopEverything(const QString& why);                                       // the Stop button: unkey, nothing queued, the QSO / CQ / repeat ended
     void extCancel();                                                              // Stop, untick, radio stop, close: release and drop any held re-key
     void extOverEnded(bool may_restart);                                           // GUI thread, from run()'s completion of the program's over
     bool extActive() const; bool requestExt(int client, bool on); void extHeartbeat(int client);

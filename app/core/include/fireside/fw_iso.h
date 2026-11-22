@@ -172,7 +172,10 @@ std::unique_ptr<IIsoTransmitter> open_cdev_iso_transmitter(const std::string& lo
 // The direct stream as an IPcm: S32 frames of 8 channels at 48/96/192 kHz, filled by a worker thread. Plug into PcmIqSource.
 // duplex: also send to the radio (its RX[0] stream) on our own channel, clocked by replaying the radio's packet sequence tx_lead
 // cycles later (analysis/duplex-iso-tx.md); the samples come from open_fw_iso_out() (silence when nothing is written).
-struct FwIsoOptions { std::string local_node, radio_node; double ring_seconds = 1.0; double stall_seconds = 1.0; bool duplex = false; int tx_lead_cycles = 128; double out_ring_seconds = 0.02; };
+struct FwIsoOptions { std::string local_node, radio_node; double ring_seconds = 1.0; double stall_seconds = 1.0; bool duplex = false;
+                     // 512 cycles (64 ms): our packets are queued that far ahead of the radio's, so the stream thread may be held up ~60 ms (a busy PC) before
+                     // the radio's input runs dry (128 = 16 ms, refilled every 4 ms, left ~12 ms and stalled under load). FT8 timing allows for it (out_latency_s).
+                     int tx_lead_cycles = 512; double out_ring_seconds = 0.02; };
 struct FwIsoTxStats { uint64_t packets = 0, data_packets = 0, frames = 0, underrun_frames = 0, refused = 0, filled = 0, dropped = 0; bool started = false; };
 class FwIsoPcm : public IPcm {
 public:
@@ -194,6 +197,8 @@ public:
     double out_latency_s() const;                         // a written frame goes out about this much later
     // Input tap: one input channel (7 = the radio's mic) copied as float at the stream rate into a ring for a reader (voice TX). -1 = off.
     void set_input_tap(int channel, size_t ring_frames = 0);
+    bool failed() const;                                      // the worker has stopped on an error (stall, bus reset): nothing more goes out or comes in
+    bool realtime() const { return rt_; }                      // the worker thread got real-time priority
     size_t read_tap(float* x, size_t n, double timeout_s);   // up to n samples (stream rate); 0 if none within the timeout; throws IoError once failed
     void tap_hold();                                          // a reader announces itself (under the published-stream lock) before read_tap, which releases it;
                                                               // close() waits until no reader is left, so a reader never touches a destroyed stream
@@ -213,7 +218,8 @@ private:
     std::unique_ptr<IIsoTransmitter> tx_; std::unique_ptr<AmdtpEncoder> enc_; std::unique_ptr<ReplayScheduler> sched_; std::vector<OutPacket> outq_; std::vector<uint8_t> payload_; std::vector<int32_t> frames_;
     struct OutRing { std::vector<int32_t> buf; size_t head = 0, count = 0; uint64_t written = 0; };
     OutRing out_[2]; FwIsoTxStats txs_;
-    int tap_ch_ = -1; std::vector<float> tap_; size_t tap_head_ = 0, tap_count_ = 0; std::condition_variable tap_cv_; int tap_readers_ = 0;   // guarded by m_                    // [0] transmit I/Q (ch0/1), [1] audio (ch2..7): guarded by m_
+    int tap_ch_ = -1; std::vector<float> tap_; size_t tap_head_ = 0, tap_count_ = 0; std::condition_variable tap_cv_; int tap_readers_ = 0;   // guarded by m_
+    std::atomic<bool> rt_{false};                    // [0] transmit I/Q (ch0/1), [1] audio (ch2..7): guarded by m_
 };
 // duplex: the transmit side of the running direct stream as an IPcmOut (8 channels at the stream's rate), for TxControl. Throws IoError if
 // no duplex stream runs; its write() throws IoError once that stream is closed. Writes nothing to the radio itself: the stream's worker

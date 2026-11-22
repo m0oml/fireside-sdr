@@ -709,6 +709,16 @@ int main(int argc, char** argv) {
                         if (sb) sb->click();
                         for (int i = 0; i < 200 && tc->busy(); ++i) pump(1); pump(10);
                         step("Stop ends the CQ: nothing queued, unkeyed", !tc->sendQueued() && !tc->busy() && !w.simRadio()->keyed && (count(1292) == m1 || count(1292) == m1 + 2) && !tc->qsoText().startsWith("Calling"));
+                        {   // a band change during a CQ: the CQ stops, nothing is queued and nothing keys on the new band
+                            const double d0 = rx->dialHz(); const size_t m2 = count(1292); tc->cqButton()->click(); pump(2);
+                            const bool calling = tc->qsoText().startsWith("Calling CQ");
+                            for (int i = 0; i < 200 && tc->busy(); ++i) pump(1);                                   // an over already joining this slot ends first
+                            if (tc->qsoText().startsWith("Calling CQ")) rx->setDialHz(d0 < 10e6 ? 14.074e6 : 7.074e6);
+                            for (int i = 0; i < 200 && tc->busy(); ++i) pump(1); pump(10);
+                            step("a band change stops the CQ", calling && !tc->sendQueued() && !tc->busy() && !tc->qsoText().startsWith("Calling") && tc->statusLabel()->text().startsWith("Band changed")
+                                 && (count(1292) - m2) % 2 == 0 && !w.simRadio()->keyed);
+                            rx->setDialHz(d0); pump(5);
+                        }
                         {   // a safety stop during the RR73 repeat of an already-logged QSO, with another station waiting: nothing keys again by itself
                             auto* sim = w.simRadio(); tc->autoSeqBox()->setChecked(true);
                             QString logged2; QObject scope2; QObject::connect(tc, &TransmitCard::logQso, &scope2, [&](const QString& c, const QString&, const QString&, const QString&) { logged2 = c; });

@@ -150,8 +150,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     connect(restore_, &QPushButton::clicked, this, &TransmitCard::onRestore);
     connect(test_, &QPushButton::clicked, this, &TransmitCard::onTestTone);
     connect(mirror_, &QCheckBox::toggled, this, [this] { saveState(); });
-    connect(stop_, &QPushButton::clicked, this, [this] { ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false; if (seq_) { seq_->stop(); noteSeqEnd(false); }   // a logged QSO stopped during its RR73 repeats is still done
-                                                       extCancel(); if (tx_) tx_->abort(); report("Stop pressed: unkeying, nothing queued."); updateButtons(); });
+    connect(stop_, &QPushButton::clicked, this, [this] { stopEverything("Stop pressed: unkeying, nothing queued."); });
     connect(send_, &QPushButton::clicked, this, &TransmitCard::onSend);
     connect(ext_allow_, &QCheckBox::toggled, this, [this](bool on) {
         ext_allowed_ = on; if (!on) extCancel();                                            // a running over sees it and unkeys
@@ -750,9 +749,19 @@ void TransmitCard::autoArm() {
     if (worker_running_ || (tx_ && tx_->armed())) return;
     arm_tried_ = true; { QSignalBlocker b(arm_); arm_->setChecked(true); } onArm(true);
 }
+void TransmitCard::stopEverything(const QString& why) {
+    ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false;
+    if (seq_) { seq_->stop(); noteSeqEnd(false); }                                           // a logged QSO stopped during its RR73 repeats is still done
+    extCancel(); if (tx_) tx_->abort(); report(why); updateButtons();
+}
 void TransmitCard::onDial(double hz) {
     const int band = txm::band_of(hz); if (band == last_band_) return;
+    const bool qso_running = ft_pending_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || (worker_running_ && !ext_over_);
     last_band_ = band; updateMemoryLabel(); updateButtons();
+    if (qso_running) {                                                                        // a QSO or CQ belongs to its band: never carried to another one
+        stopEverything("Band changed: the QSO / CQ is stopped and nothing is queued (the callers waiting on the old band are cleared).");
+        rx_->clearCallers();
+    }
     if (band >= 0 && auto_restore_->isChecked() && tx_ && tx_->armed() && !worker_running_ && tx_->memory().recall(band)) onRestore();
 }
 

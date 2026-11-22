@@ -9,6 +9,8 @@
 #include <linux/firewire-cdev.h>
 #include <linux/firewire-constants.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdexcept>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -293,7 +295,7 @@ std::unique_ptr<IIsoReceiver> open_cdev_iso_receiver(const std::string& node, si
 namespace {
 class CdevIsoTransmitter : public IIsoTransmitter {
 public:
-    static constexpr size_t kPackets = 512, kSlot = 2048;  // 64 ms of packets; each in its own slot of the mmap'ed buffer
+    static constexpr size_t kPackets = 2048, kSlot = 2048;  // 256 ms of packets (room for the 64 ms lead and more); each in its own slot of the mmap'ed buffer
     CdevIsoTransmitter(const std::string& node, size_t max_payload) : node_(node), max_(max_payload) {
         if (max_payload > kSlot) throw std::invalid_argument("iso transmitter: packet larger than a buffer slot");
         fd_ = ::open(node.c_str(), O_RDWR);
@@ -412,6 +414,10 @@ void FwIsoPcm::begin(DiceStreamControl::Sleep sleep) {
 }
 
 void FwIsoPcm::worker() {
+    {   // real-time priority if the system allows it (RLIMIT_RTPRIO / rtkit); a normal thread otherwise: the 64 ms lead is the margin then
+        sched_param sp{}; sp.sched_priority = 10;
+        rt_ = ::pthread_setschedparam(::pthread_self(), SCHED_FIFO, &sp) == 0;
+    }
     std::vector<int32_t> tmp; tmp.reserve(size_t(channels_) * 4096);
     const size_t cap = ring_.size() / size_t(channels_);
     auto last_data = std::chrono::steady_clock::now();
@@ -505,8 +511,10 @@ void FwIsoPcm::send_for(const uint8_t* p, size_t len, uint32_t ts) {
         }
     }
 }
+bool FwIsoPcm::failed() const { std::lock_guard<std::mutex> l(m_); return !error_.empty(); }
 size_t FwIsoPcm::write_out(const int32_t* x, size_t frames, OutKind kind) {
     std::lock_guard<std::mutex> l(m_);
+    if (!error_.empty()) throw IoError("direct FireWire stream: " + error_);   // a stalled stream: the over stops (it would key with nothing going out)
     if (!tx_ || closed_) return 0;
     OutRing& r = out_[kind == OutKind::Tx ? 0 : 1];
     const size_t cap = r.buf.size() / size_t(channels_), n = std::min(frames, cap - r.count);
@@ -554,6 +562,7 @@ private:
 std::unique_ptr<IPcmOut> open_fw_iso_out(FwIsoPcm::OutKind kind) {
     std::lock_guard<std::mutex> g(g_duplex_m);
     if (!g_duplex) throw IoError("no duplex direct FireWire stream is running");
+    if (g_duplex->failed()) throw IoError("the direct FireWire stream has stopped (no data from the radio): not keying");
     return std::make_unique<FwIsoOut>(g_duplex, g_duplex_gen, kind);
 }
 namespace {
@@ -583,13 +592,14 @@ private:
 std::unique_ptr<AudioTap> open_fw_iso_input(int ch) {
     std::lock_guard<std::mutex> g(g_duplex_m);
     if (!g_duplex) throw IoError("no duplex direct FireWire stream is running (start receiving on 48 / 96 / 192)");
+    if (g_duplex->failed()) throw IoError("the direct FireWire stream has stopped (no data from the radio)");
     if (ch < 0 || ch >= g_duplex->channels()) throw std::invalid_argument("no such input channel");
     g_duplex->set_input_tap(ch);
     return std::make_unique<FwIsoInput>(g_duplex, g_duplex_gen, ch);
 }
 std::string fw_iso_last_open_note() { std::lock_guard<std::mutex> g(g_duplex_m); return g_open_note; }
 std::string fw_iso_last_close_note() { std::lock_guard<std::mutex> g(g_duplex_m); return g_close_note; }
-bool fw_iso_duplex_running(double* rate) { std::lock_guard<std::mutex> g(g_duplex_m); if (g_duplex && rate) *rate = g_duplex->rate(); return g_duplex != nullptr; }
+bool fw_iso_duplex_running(double* rate) { std::lock_guard<std::mutex> g(g_duplex_m); if (g_duplex && rate) *rate = g_duplex->rate(); return g_duplex != nullptr; }   // still true while stalled: an over then fails on it (open/write), never falls back to ALSA
 
 // ---------------------------------------------------------------- discovery
 namespace {

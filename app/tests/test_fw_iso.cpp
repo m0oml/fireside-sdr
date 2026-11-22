@@ -382,3 +382,16 @@ TEST(fw_iso_duplex_close_wakes_a_waiting_tap_reader_and_waits_for_it) {   // the
     const auto t0 = std::chrono::steady_clock::now(); pcm.reset(); rd.join();
     CHECK(threw); CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));         // woken by the close, not the 5 s timeout
 }
+TEST(fw_iso_duplex_a_stalled_stream_refuses_to_transmit) {   // the radio stops sending: an over must not key with nothing going out (it sent 0 W before)
+    std::vector<std::string> log; DuplexBus b(&log); TxLog txl; FwIsoOptions o; o.duplex = true; o.stall_seconds = 0.2;
+    auto rx = std::make_unique<FakeRx>(&log, false); FakeRx* r = rx.get();
+    FwIsoPcm pcm(b, std::move(rx), 48000, o, nosleep, std::make_unique<FakeTx>(&txl));
+    CHECK_EQ(o.tx_lead_cycles, 512); CHECK(FwIsoOptions{}.tx_lead_cycles == 512);
+    auto out = open_fw_iso_out(); std::vector<int32_t> x(8 * 16, 0); out->write(x.data(), 16);   // fine while it runs
+    r->stall = 1; for (int i = 0; i < 300 && !pcm.failed(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(pcm.failed());
+    CHECK_THROWS(out->write(x.data(), 16), IoError);                                    // an over running now stops
+    CHECK_THROWS(open_fw_iso_out(), IoError); CHECK_THROWS(open_fw_iso_input(0), IoError);   // and a new one is refused
+    CHECK(fw_iso_duplex_running());                                                     // still published until closed: no fallback to the ALSA path
+    pcm.close(); CHECK(!fw_iso_duplex_running());
+}

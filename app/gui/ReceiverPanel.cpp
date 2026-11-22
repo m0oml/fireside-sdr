@@ -590,6 +590,7 @@ void ReceiverPanel::refresh() {
     peak_hz_ = st.peak_hz; peak_db_ = st.peak_db; signal_dbfs_ = st.signal_dbfs; chk_dbfs_ = st.signal_dbfs; chk_peak_hz_ = st.peak_hz; audio_total_ = size_t(st.audio_samples);
     if (playing_ && !st.running) { playing_ = false; QSignalBlocker b(play_); play_->setChecked(false); play_->setText("Play"); }
     if (st.ended) note_ = "End of recording."; else if (!st.error.empty()) note_ = QString("Stopped: ") + QString::fromStdString(st.error);
+    if (!st.error.empty() && st.live && direct_rate_ > 0 && !restart_pending_) restartDirect(QString::fromStdString(st.error));   // the direct stream died: bring it back
     { std::string t; if (engine_.take_text(t) > 0) addDecodedText(QString::fromStdString(t));
       if (decoderIndex() != 0) dec_status_->setText(st.decoder.empty() ? "Waiting for a signal..." : QString::fromStdString(st.decoder)); }
     meter_->setLevel(st.signal_dbfs <= -199 ? -120 : st.signal_dbfs);
@@ -799,6 +800,23 @@ void ReceiverPanel::pushFocus() {
 // ---------------------------------------------------------------- audio output: PC sound or the radio's jacks
 void ReceiverPanel::setSourceIsLive(bool live) {
     source_live_ = live; QSignalBlocker b(mirror_); mirror_->setChecked(live ? mirror_live_ : mirror_file_);      // the caller applies the settings
+}
+void ReceiverPanel::restartDirect(const QString& why) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (!restarts_ || now - first_restart_ms_ > kRestartWindowMs) { restarts_ = 0; first_restart_ms_ = now; }
+    if (++restarts_ > kMaxRestarts) {
+        if (restarts_ == kMaxRestarts + 1) appLog("receiver", QString("direct stream stopped again (%1): %2 restarts in 2 min, not trying again. Press Stop radio, then start it.").arg(why).arg(kMaxRestarts));
+        note_ = QString("Stopped: %1. Restarted %2 times in 2 min without luck: press Stop radio, then start it again.").arg(why).arg(kMaxRestarts); updateStatus(); return;
+    }
+    restart_pending_ = true; const unsigned rate = direct_rate_;
+    appLog("receiver", QString("direct stream stopped (%1): restarting it at %2 kHz (try %3 of %4)").arg(why).arg(rate / 1000).arg(restarts_).arg(kMaxRestarts));
+    note_ = QString("Stream stopped (%1): restarting it ...").arg(why); updateStatus();
+    QTimer::singleShot(500, this, [this, rate] {                                 // a moment for the radio; Stop radio meanwhile leaves it closed
+        restart_pending_ = false;
+        if (direct_rate_ != rate) return;                                        // closed or changed by hand in the meantime
+        closeLive();
+        if (loadLiveDirect(rate)) { appLog("receiver", "direct stream restarted"); note_ = QString("Stream restarted by itself (try %1 of %2).").arg(restarts_).arg(kMaxRestarts); updateStatus(); }
+    });
 }
 bool ReceiverPanel::closeLive() {
     if (!engine_.status().live) return false;

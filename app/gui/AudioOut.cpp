@@ -5,6 +5,7 @@
 #include <QMediaDevices>
 #endif
 #include <QDateTime>
+#include <QSettings>
 #include <QTimer>
 #include <algorithm>
 #include <cmath>
@@ -17,20 +18,35 @@ bool AudioOut::deviceExists(const QString& device) {
 #endif
     return false;
 }
-AudioOut::AudioOut(bool enable, QObject* parent, const QString& device) : QObject(parent) {
+namespace {
+std::vector<AudioOut*>& live() { static std::vector<AudioOut*> v; return v; }        // GUI thread only
+QString& pc_out() { static QString d; static bool loaded = false; if (!loaded) { loaded = true; d = QSettings("fireside", "audio").value("pc_output").toString(); } return d; }
+}
+QString AudioOut::pcOutput() { return pc_out(); }
+void AudioOut::setPcOutput(const QString& description) {
+    if (description == pc_out()) return;
+    pc_out() = description; QSettings("fireside", "audio").setValue("pc_output", description);
+    for (auto* o : live()) if (o->follows_pc_) o->open();
+}
+AudioOut::AudioOut(bool enable, QObject* parent, const QString& device) : QObject(parent), device_(device), follows_pc_(device.isEmpty()), enabled_(enable) {
+    live().push_back(this); open();
+}
+AudioOut::~AudioOut() { auto& v = live(); v.erase(std::remove(v.begin(), v.end(), this), v.end()); }
+void AudioOut::open() {
 #ifdef FIRESIDE_QT_AUDIO
-    if (!enable) return;
-    QAudioDevice dev = device.isEmpty() ? QMediaDevices::defaultAudioOutput() : QAudioDevice();
-    if (!device.isEmpty()) for (const auto& d : QMediaDevices::audioOutputs()) if (d.description().contains(device, Qt::CaseInsensitive)) { dev = d; break; }
+    if (!enabled_) return;
+    if (sink_) { sink_->stop(); sink_->deleteLater(); sink_ = nullptr; io_ = nullptr; available_ = false; }
+    const QString want = follows_pc_ ? pc_out() : device_;
+    QAudioDevice dev = want.isEmpty() ? QMediaDevices::defaultAudioOutput() : QAudioDevice();
+    if (!want.isEmpty()) for (const auto& d : QMediaDevices::audioOutputs()) if (d.description() == want || (!follows_pc_ && d.description().contains(want, Qt::CaseInsensitive))) { dev = d; break; }
+    if (dev.isNull() && follows_pc_) dev = QMediaDevices::defaultAudioOutput();               // the chosen output is unplugged: the system default
     if (dev.isNull()) return;
     QAudioFormat fmt; fmt.setSampleRate(48000); fmt.setChannelCount(2); fmt.setSampleFormat(QAudioFormat::Int16);      // stereo: the same audio on left and right, so it does not depend on the sound server upmixing mono
     if (!dev.isFormatSupported(fmt)) { fmt.setChannelCount(1); if (!dev.isFormatSupported(fmt)) return; }          // a device that only does mono: the server handles it
     channels_ = fmt.channelCount();
     sink_ = new QAudioSink(dev, fmt, this); sink_->setBufferSize(48000 * 2 * channels_ / 4);   // 250 ms
     io_ = sink_->start(); available_ = io_ != nullptr;
-    if (available_) { auto* t = new QTimer(this); t->setInterval(40); connect(t, &QTimer::timeout, this, [this] { keepAlive(); }); t->start(); }
-#else
-    (void)enable; (void)device;
+    if (available_ && !keep_) { keep_ = new QTimer(this); keep_->setInterval(40); connect(keep_, &QTimer::timeout, this, [this] { keepAlive(); }); keep_->start(); }
 #endif
 }
 void AudioOut::push(const std::vector<float>& audio, float volume) {

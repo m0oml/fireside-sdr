@@ -2,6 +2,7 @@
 #include "ReceiverPanel.h"
 #include <QCheckBox>
 #include <QComboBox>
+#include "AudioOut.h"
 #include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -63,7 +64,15 @@ AudioPanel::AudioPanel(RadioPanel* radio, QWidget* parent) : QWidget(parent), ra
     auto* outer = new QVBoxLayout(this); outer->setContentsMargins(16, 16, 16, 16); outer->setSpacing(12);
     auto* top = new QHBoxLayout; top->setSpacing(12);
     // receive output
-    { auto* l = new QVBoxLayout; rx_box_ = l; auto* n = new QLabel("Where the receive audio plays. The radio's outputs need the direct stream (48 / 96 / 192)."); n->setObjectName("muted"); n->setWordWrap(true); l->addWidget(n); l->addStretch(1);
+    { auto* l = new QVBoxLayout; rx_box_ = l; auto* n = new QLabel("Where the receive audio plays. The radio's outputs need the direct stream (48 / 96 / 192)."); n->setObjectName("muted"); n->setWordWrap(true); l->addWidget(n);
+      auto* pc = new QComboBox; pc->addItem("PC output: system default", QString());
+#ifdef FIRESIDE_QT_AUDIO
+      for (const auto& d : QMediaDevices::audioOutputs()) if (!d.description().startsWith("Fireside ")) pc->addItem("PC output: " + d.description(), d.description());   // not our virtual devices
+#endif
+      { const int i = pc->findData(AudioOut::pcOutput()); if (i >= 0) pc->setCurrentIndex(i); else if (!AudioOut::pcOutput().isEmpty()) pc->addItem("PC output: " + AudioOut::pcOutput() + " (not plugged in)", AudioOut::pcOutput()), pc->setCurrentIndex(pc->count() - 1); }
+      pc->setToolTip("The computer output for receive audio ('PC speakers'), the transmit monitor, the feedback test and the CW sidetone: a USB headset, for example. Remembered.");
+      connect(pc, &QComboBox::activated, this, [pc] { AudioOut::setPcOutput(pc->currentData().toString()); });
+      l->addWidget(pc); l->addStretch(1);
       top->addWidget(theme::makeCard("Receive audio", l), 2); }
     // transmit input
     { auto* g = new QGridLayout; g->setHorizontalSpacing(10); g->setVerticalSpacing(8);

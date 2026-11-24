@@ -42,7 +42,7 @@ void TransmitCard::buildCw() {
     cw_lights_ = new QLabel; cw_lights_->setMinimumWidth(110); cw_lights_->setToolTip("The KEY jack as the radio reports it: lights while a contact is closed (no RF needed to check the wiring)");
     cw_text_ = new QLineEdit; cw_text_->setPlaceholderText("Text to send (Enter or Send)"); cw_text_->setToolTip("A-Z, 0-9 and . , ? / = + -. Touching the paddle stops it");
     cw_send_ = new QPushButton("Send"); cw_send_->setToolTip("Send the text at the keyer speed (semi break-in: receive is back after the delay)");
-    cw_stop_ = new QPushButton("Stop"); cw_stop_->setToolTip("Unkey now");
+    cw_stop_ = new QPushButton("Stop"); cw_stop_->setObjectName("txstop"); cw_stop_->setToolTip("Unkey now");
     cw_mem_ = new QComboBox; cw_mem_->addItem("Memory..."); cw_mem_->setToolTip("The CW memories (TX lab): pick one to put it in the text box");
     auto row = [](std::initializer_list<QWidget*> ws, bool stretch = true) { auto* h = new QHBoxLayout; h->setSpacing(8); for (auto* w : ws) h->addWidget(w); if (stretch) h->addStretch(1); return h; };
     cw_part_ = new QWidget(this); auto* v = new QVBoxLayout(cw_part_); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(6);

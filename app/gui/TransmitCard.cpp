@@ -85,7 +85,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     measure_ = new QPushButton("Measure drive (2 W)"); measure_->setToolTip("A 2 W tone ramp (about 4 s) that measures this band's drive level. Needed once per band before tuning there.");
     restore_ = new QPushButton("Restore ATU"); restore_->setToolTip("Puts this band's stored ATU relays back. No RF.");
     auto_restore_ = new QCheckBox("on band change"); auto_restore_->setChecked(true); auto_restore_->setToolTip("While armed: restore the stored ATU relays whenever the dial moves to another band (no RF)");
-    stop_ = new QPushButton("Stop"); stop_->setToolTip("Unkey now");
+    stop_ = new QPushButton("Stop"); stop_->setObjectName("txstop"); stop_->setToolTip("Unkey now");
     test_ = new QPushButton("Test tone (8 s)"); test_->setToolTip("A steady tone exactly 1 kHz ABOVE the dial for 8 s at the power beside it, to find on another receiver: there = I/Q sign right; 1 kHz BELOW the dial = the mirror is wrong");
     test_w_ = new QDoubleSpinBox; test_w_->setRange(1, 15); test_w_->setDecimals(0); test_w_->setValue(2); test_w_->setSuffix(" W"); test_w_->setToolTip("Test tone power (ramped up to it; unkeys above 1.5 x, or at SWR > 3)");
     mirror_ = new QCheckBox("Mirror TX I/Q"); mirror_->setChecked(true);
@@ -133,7 +133,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     auto part = [this](std::initializer_list<QLayout*> ls) { auto* w = new QWidget(this); auto* v = new QVBoxLayout(w); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(6); for (auto* l : ls) v->addLayout(l); return w; };
     status_->setWordWrap(false); status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); status_->setMinimumWidth(0);          // one clipped line (the tooltip has all of it)
     auto_restore_->setText("on band change");
-    stop2_ = new QPushButton("Stop"); stop2_->setToolTip("Unkey now (the same as the Stop button on the digital message card)"); connect(stop2_, &QPushButton::clicked, this, [this] { stop_->click(); });
+    stop2_ = new QPushButton("Stop"); stop2_->setObjectName("txstop"); stop2_->setToolTip("Unkey now (the same as the Stop button on the digital message card)"); connect(stop2_, &QPushButton::clicked, this, [this] { stop_->click(); });
     {   // the tuner settings: a window of their own, so the antenna card stays short
         tuner_dialog_ = new QDialog(this, Qt::Tool); tuner_dialog_->setWindowTitle("Tuner settings"); auto* dv = new QVBoxLayout(tuner_dialog_); dv->setSpacing(8);
         auto* cal = new QPushButton("Calibration  \u25B8"); cal->setCheckable(true); cal->setToolTip("Measure drive and the test tone: used once per band, not for everyday operation");
@@ -144,7 +144,8 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
         cal_body_ = part({row({measure_, test_, test_w_, mirror_}), row({gen_btn_})}); cal_body_->setVisible(false);
         connect(cal, &QPushButton::toggled, this, [this, cal](bool on) { cal_body_->setVisible(on); cal->setText(on ? QStringLiteral("Calibration  \u25BE") : QStringLiteral("Calibration  \u25B8")); tuner_dialog_->adjustSize(); });
         mem_->setWordWrap(true); mem_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-        dv->addLayout(row({tl, power_, thr_})); dv->addLayout(row({restore_, auto_restore_})); dv->addWidget(mem_); dv->addLayout(row({cal, stop2_})); dv->addWidget(cal_body_);
+        tune2_ = new QPushButton("Tune ATU"); connect(tune2_, &QPushButton::clicked, this, [this] { tune_->click(); });   // the same Tune as on the card (it asks first)
+        dv->addLayout(row({tl, power_, thr_, tune2_})); dv->addLayout(row({restore_, auto_restore_})); dv->addWidget(mem_); dv->addLayout(row({cal, stop2_})); dv->addWidget(cal_body_);
         { auto* close = new QPushButton("Close"); close->setDefault(true); connect(close, &QPushButton::clicked, tuner_dialog_, &QDialog::hide); auto* cr = new QHBoxLayout; cr->addStretch(1); cr->addWidget(close); dv->addLayout(cr); }
         tuner_btn_ = new QPushButton("Tuner settings..."); tuner_btn_->setToolTip("Tune power, the SWR limit, Restore ATU, calibration (Measure drive, Test tone)");
         connect(tuner_btn_, &QPushButton::clicked, this, [this] { tuner_dialog_->show(); tuner_dialog_->raise(); tuner_dialog_->activateWindow(); });
@@ -153,6 +154,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     digi_part_ = part({row({ft_mode_, ft_hz_, ft_clear_, ft_par_}), row({ft_msg_, ft_w_}, false), row({send_, cq_, ft_repeat_, auto_seq_, stop_}, false)});
     voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_})});
     { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
+    if (stop3_) stop3_->setObjectName("txstop");                                            // the transmit Stops: a muted red, easy to find
     buildCw();                                                                        // the CW part (TransmitCardCw.cpp)
     buildVox();                                                                       // VOX + monitor under the voice controls (TransmitCardVox.cpp)
     hide();                                                                           // this object only owns the parts: the window places them (Antenna, Transmit, decoder row, voice strip)
@@ -878,6 +880,7 @@ void TransmitCard::updateButtons() {
     send_->setEnabled(armed && idle && band >= 0 && !ft_pending_); cq_->setEnabled(send_->isEnabled()); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_);
     restore_->setEnabled(armed && idle && band >= 0 && on_atu && tx_->memory().recall(band).has_value());
     if (!on_atu) { tune_->setToolTip(QString("This band transmits on ANT%1: the ATU is on ANT1 only (Antennas tab)").arg(txAnt())); }
+    if (tune2_) { tune2_->setEnabled(tune_->isEnabled()); tune2_->setToolTip(tune_->toolTip()); }
     power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr || att_pause_);
     ext_allow_->setEnabled(armed || ext_allow_->isChecked());                      // can always be unticked
     gen_btn_->setEnabled(armed && idle && band >= 0 && !ft_pending_);

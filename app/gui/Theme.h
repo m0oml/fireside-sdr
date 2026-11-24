@@ -37,6 +37,10 @@ QPushButton#primary { background: %9; border-color: %4; color: #ffffff; font-wei
 QPushButton#primary:hover { background: #2371b6; }
 QPushButton[rec="true"] { background: #b5322a; border-color: #e0584e; color: #ffffff; font-weight: 600; }
 QPushButton#pill { padding: 4px 6px; min-width: 34px; }
+QPushButton#txstop { background: #6e2a2a; border-color: #9c4a4a; color: #f4dede; font-weight: 600; }
+QPushButton#txstop:hover { background: #823434; }
+QPushButton#txstop:pressed { background: #5a2020; }
+QPushButton#txstop:disabled { background: #2a1f24; border-color: #4a3036; color: #7a6066; }
 QCheckBox { spacing: 6px; }
 QCheckBox::indicator { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #3a4358; background: %7; }
 QCheckBox::indicator:checked { background: %4; border-color: %4; }

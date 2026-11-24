@@ -51,7 +51,8 @@ void TransmitCard::saveVox() {
 bool TransmitCard::voxScreen() const { return rx_->modeGroup() == 0 && tx_ && tx_->armed() && audio_; }
 void TransmitCard::voxOn(bool on) {
     if (!on) {
-        if (vox_in_) { if (!worker_running_) vox_in_->set_reading(false); vox_in_.reset(); report("VOX off."); }   // an over now running keeps its own reference and ends on the hang
+        vox_cur_ = nullptr;                                                              // an over keyed by VOX unkeys now
+        if (vox_in_) { if (!worker_running_) vox_in_->set_reading(false); vox_in_.reset(); report("VOX off."); }   // an over now running: the card keeps the input until it has ended
         vox_lvl_->clear(); return;
     }
     auto refuse = [this](const QString& why) { report("VOX: " + why); QSignalBlocker b(vox_); vox_->setChecked(false); vox_lvl_->clear(); };
@@ -64,10 +65,11 @@ void TransmitCard::voxOn(bool on) {
     ReceiverPanel* rx = rx_;
     try { vox_in_ = std::make_shared<vox::VoxInput>(std::move(in), c, audio_->chainConfig().mic.mic_gain_db, 0.15, [rx] { return rx->speakerDbfs(); }); }
     catch (const std::exception& e) { return refuse(QString("cannot start (") + e.what() + ")."); }
-    vox_kill_ = false;
+    vox_kill_ = false; vox_cur_ = vox_in_.get();
     report(QString("VOX listening on %1: speech above %2 dBFS keys the transmitter (%3 W PEP), %4 ms hang.").arg(audio_->inputName()).arg(vox_thr_->value()).arg(voice_w_->value(), 0, 'f', 0).arg(vox_hang_->value()));
 }
 void TransmitCard::voxTick() {
+    struct Sync { TransmitCard* t; ~Sync() { t->vox_cur_ = t->vox_in_.get(); } } sync{this};   // whatever this tick did to vox_in_, the over's PTT sees it
     if (vox_kill_.exchange(false)) {                                    // set by an over that ended on a time-out / safety stop
         std::string why; { std::lock_guard<std::mutex> l(vox_m_); why = vox_kill_why_; }
         { QSignalBlocker b(vox_); vox_->setChecked(false); } vox_in_.reset(); vox_lvl_->clear();

@@ -374,7 +374,7 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
             if (att_cq) QTimer::singleShot(300, this, [this, g = stop_gen_] {
                 if (g != stop_gen_ || !ft_repeat_->isChecked() || worker_running_ || ft_pending_ || (seq_ && seq_->active())) return;
                 report(QString("Attended CQ: \"%1\" was sent %2 times, back to CQ.").arg(last_sent_).arg(att_calls_)); cq_->click(); });
-            voice_in_.reset();                                                                  // a voice over's input (a PC capture lives on this thread)
+            voice_in_.reset(); vox_over_in_.reset();                                            // a voice over's input (a PC capture lives on this thread; the worker has been joined)
             if (after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }               // start-up: receiving starts once the check is done
             extOverEnded(!safety);                                                                  // a program re-keyed while its last over was unkeying
             if (unkey_failed_) { unkey_failed_ = false; if (auto_confirm_ < 0) QMessageBox::critical(this, "The radio may still be transmitting",
@@ -799,7 +799,7 @@ void TransmitCard::startVoice() {
     const double mhz = rx_->dialHz() / 1e6; if (txm::band_of(mhz * 1e6) < 0) { report("The dial is outside the amateur bands."); return; }
     std::shared_ptr<vox::VoxInput> vin = vox_in_;                                         // VOX listening: the over reads its input (with the pre-roll); else the input opened now
     txc::IAudioIn* in = nullptr;
-    if (vin) { vin->set_reading(true); in = vin.get(); }
+    if (vin) { vin->set_reading(true); in = vin.get(); vox_over_in_ = vin; }                  // the card holds it: released on this thread after the over (a PC capture must close here)
     else {
         if (audio_->testInputOpen()) { report("Voice: the Audio tab's input test is running: stop it first."); return; }
         QString err; voice_in_ = audio_->openInput(&err);
@@ -809,10 +809,10 @@ void TransmitCard::startVoice() {
     txc::VoiceOptions v; v.o.rate = simulated_ ? 48000 : txRate(); v.o.mirror_q = mirror_->isChecked(); v.o.tx_ant = txAnt(); v.peak_w = voice_w_->value(); v.chain = audio_->chainConfig(); v.max_key_s = voice_timeout_s_;
     if (monitor_ && monitor_->isChecked()) { if (!mon_feed_) mon_feed_ = new PcAudioFeed(pc_audio_, this); PcAudioFeed* f = mon_feed_; v.monitor = [f](const float* a, size_t n) { f->push(a, n); }; }
     v.lsb = voice_mode_->currentIndex() == 2 || (voice_mode_->currentIndex() == 0 && (rx_->modeIndex() == 1 || (rx_->modeIndex() != 0 && mhz < 10.0 && !(mhz > 5.2 && mhz < 5.5))));   // Auto: as the receiver
-    if (!(v.o.rate > 0)) { report("No playback rate for transmit."); voice_in_.reset(); if (vin) vin->set_reading(false); return; }
+    if (!(v.o.rate > 0)) { report("No playback rate for transmit."); voice_in_.reset(); vox_over_in_.reset(); if (vin) vin->set_reading(false); return; }
     run(QString("Voice %1 on %2 MHz, %3 W PEP (%4%5)").arg(v.lsb ? "LSB" : "USB").arg(mhz, 0, 'f', 4).arg(v.peak_w, 0, 'f', 0).arg(audio_->inputName()).arg(vin ? ", VOX" : ""), !fw_iso_duplex_running(),
-        [this, mhz, v, in, vin](txc::TxControl& t) {
-            auto r = t.voice(mhz, *in, [this, vin] { return pttActive() || (vin && vin->on()); }, v, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });
+        [this, mhz, v, in, vin = vin.get()](txc::TxControl& t) {
+            auto r = t.voice(mhz, *in, [this, vin] { return pttActive() || (vin && vox_cur_.load() == vin && vin->on()); }, v, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });   // unticking VOX unkeys (vox_cur_)
             if (vin) {
                 vin->set_reading(false);
                 if (txc::TxControl::is_safety_stop(r.stop) || vin->failed() || !r.why_not.empty()) {   // (a blip too short to key is not a refusal)     // VOX never keys again by itself after a time-out (noise holding it on?), a safety stop or a refusal

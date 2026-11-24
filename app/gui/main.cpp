@@ -924,9 +924,13 @@ int main(int argc, char** argv) {
                             pump(30); step("VOX: room noise below the threshold keys nothing", count(1292) == v0 + 2 && !w.simRadio()->keyed);
                             tc->voxBox()->setChecked(false); pump(2); step("VOX off stops listening", !tc->voxListening());
                             w.audioPanel()->setInputFactoryForTests([] { return std::unique_ptr<fireside::txc::IAudioIn>(new GenVoice); });   // speech that never stops
+                            tc->voxBox()->setChecked(true); for (int i = 0; i < 100 && !w.simRadio()->keyed; ++i) pump(1);
+                            const bool vox_keyed = w.simRadio()->keyed; tc->voxBox()->setChecked(false);
+                            for (int i = 0; i < 100 && (tc->busy() || w.simRadio()->keyed); ++i) pump(1); pump(5);
+                            step("VOX: unticking it during an over unkeys it (speech still going), and nothing crashes", vox_keyed && !w.simRadio()->keyed && !tc->busy() && count(1292) == v0 + 4 && !tc->voxListening());
                             tc->setVoiceTimeoutForTests(1.0); tc->voxBox()->setChecked(true);
-                            for (int i = 0; i < 300 && !(count(1292) >= v0 + 4 && !tc->busy()); ++i) pump(1); pump(30);
-                            step("VOX: an over ending on its time-out switches VOX off (nothing keys again)", count(1292) == v0 + 4 && !w.simRadio()->keyed && !tc->voxBox()->isChecked() && !tc->voxListening()
+                            for (int i = 0; i < 300 && !(count(1292) >= v0 + 6 && !tc->busy()); ++i) pump(1); pump(30);
+                            step("VOX: an over ending on its time-out switches VOX off (nothing keys again)", count(1292) == v0 + 6 && !w.simRadio()->keyed && !tc->voxBox()->isChecked() && !tc->voxListening()
                                  && tc->statusLabel()->text().contains("VOX switched off"));
                             tc->setVoiceTimeoutForTests(180);
                         }

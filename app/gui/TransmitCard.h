@@ -146,6 +146,8 @@ private:
     static constexpr int kAttCalls = 6, kAttPauseSlots = 3;
     QTimer* att_timer_ = nullptr; bool att_pause_ = false; int att_count_ = 0; std::atomic<double> last_slot_utc_{0}; QString last_sent_;
     void startAttPause(); void endAttPause();
+    std::shared_ptr<fireside::vox::VoxInput> vox_over_in_;   // the VOX input an over is reading (released on the GUI thread)
+    std::atomic<fireside::vox::VoxInput*> vox_cur_{nullptr};   // the VOX input while VOX is ticked (the over's PTT reads it)
 public:
     bool attendedPause() const { return att_pause_; }
     void setAttendedPauseForTests(int ms) { att_pause_ms_for_tests_ = ms; }   // smoke tests: a short (or long) pause, and fewer calls per block

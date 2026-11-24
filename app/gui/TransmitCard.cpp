@@ -1,5 +1,6 @@
 #include "TransmitCard.h"
 #include "CwSidetone.h"
+#include "PcAudioFeed.h"
 #include "fireside/dxcc.h"
 #include "fireside/siggen.h"
 #include "fireside/preamp.h"
@@ -147,6 +148,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_})});
     { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
     buildCw();                                                                        // the CW part (TransmitCardCw.cpp)
+    buildVox();                                                                       // VOX + monitor under the voice controls (TransmitCardVox.cpp)
     hide();                                                                           // this object only owns the parts: the window places them (Antenna, Transmit, decoder row, voice strip)
     timer_ = new QTimer(this); timer_->setInterval(100); connect(timer_, &QTimer::timeout, this, &TransmitCard::tick); timer_->start();
     loadCheckedCal();
@@ -755,15 +757,28 @@ void TransmitCard::onPttChanged() {
 void TransmitCard::startVoice() {
     if (!audio_) { report("No Audio tab."); return; }
     const double mhz = rx_->dialHz() / 1e6; if (txm::band_of(mhz * 1e6) < 0) { report("The dial is outside the amateur bands."); return; }
-    QString err; voice_in_ = audio_->openInput(&err);
-    if (!voice_in_) { report("Voice: cannot open the input (" + err + ")"); return; }
-    txc::VoiceOptions v; v.o.rate = simulated_ ? 48000 : txRate(); v.o.mirror_q = mirror_->isChecked(); v.o.tx_ant = txAnt(); v.peak_w = voice_w_->value(); v.chain = audio_->chainConfig();
+    std::shared_ptr<vox::VoxInput> vin = vox_in_;                                         // VOX listening: the over reads its input (with the pre-roll); else the input opened now
+    txc::IAudioIn* in = nullptr;
+    if (vin) { vin->set_reading(true); in = vin.get(); }
+    else {
+        if (audio_->testInputOpen()) { report("Voice: the Audio tab's input test is running: stop it first."); return; }
+        QString err; voice_in_ = audio_->openInput(&err);
+        if (!voice_in_) { report("Voice: cannot open the input (" + err + ")"); return; }
+        in = voice_in_.get();
+    }
+    txc::VoiceOptions v; v.o.rate = simulated_ ? 48000 : txRate(); v.o.mirror_q = mirror_->isChecked(); v.o.tx_ant = txAnt(); v.peak_w = voice_w_->value(); v.chain = audio_->chainConfig(); v.max_key_s = voice_timeout_s_;
+    if (monitor_ && monitor_->isChecked()) { if (!mon_feed_) mon_feed_ = new PcAudioFeed(pc_audio_, this); PcAudioFeed* f = mon_feed_; v.monitor = [f](const float* a, size_t n) { f->push(a, n); }; }
     v.lsb = voice_mode_->currentIndex() == 2 || (voice_mode_->currentIndex() == 0 && (rx_->modeIndex() == 1 || (rx_->modeIndex() != 0 && mhz < 10.0 && !(mhz > 5.2 && mhz < 5.5))));   // Auto: as the receiver
-    if (!(v.o.rate > 0)) { report("No playback rate for transmit."); voice_in_.reset(); return; }
-    auto* in = voice_in_.get();
-    run(QString("Voice %1 on %2 MHz, %3 W PEP (%4)").arg(v.lsb ? "LSB" : "USB").arg(mhz, 0, 'f', 4).arg(v.peak_w, 0, 'f', 0).arg(audio_->inputName()), !fw_iso_duplex_running(),
-        [this, mhz, v, in](txc::TxControl& t) {
-            auto r = t.voice(mhz, *in, [this] { return pttActive(); }, v, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });
+    if (!(v.o.rate > 0)) { report("No playback rate for transmit."); voice_in_.reset(); if (vin) vin->set_reading(false); return; }
+    run(QString("Voice %1 on %2 MHz, %3 W PEP (%4%5)").arg(v.lsb ? "LSB" : "USB").arg(mhz, 0, 'f', 4).arg(v.peak_w, 0, 'f', 0).arg(audio_->inputName()).arg(vin ? ", VOX" : ""), !fw_iso_duplex_running(),
+        [this, mhz, v, in, vin](txc::TxControl& t) {
+            auto r = t.voice(mhz, *in, [this, vin] { return pttActive() || (vin && vin->on()); }, v, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });
+            if (vin) {
+                vin->set_reading(false);
+                if (txc::TxControl::is_safety_stop(r.stop) || vin->failed() || !r.why_not.empty()) {   // (a blip too short to key is not a refusal)     // VOX never keys again by itself after a time-out (noise holding it on?), a safety stop or a refusal
+                    std::lock_guard<std::mutex> l(vox_m_); vox_kill_why_ = vin->failed() ? "the input stopped" : !r.why_not.empty() ? r.why_not : r.stop; vox_kill_ = true;
+                }
+            }
             if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
             if (!r.keyed) return QString("Voice not keyed: ") + QString::fromStdString(r.why_not.empty() ? r.stop : r.why_not);
             if (r.max_fwd_w > 0.1) { last_tx_w_ = r.max_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }
@@ -805,7 +820,8 @@ void TransmitCard::tick() {
     rx_->setMeterTx(keyed);
     stop2_->setEnabled(stop_->isEnabled()); stop3_->setEnabled(stop_->isEnabled());
     if (status_->toolTip() != status_->text()) status_->setToolTip(status_->text());    // the line is clipped: the tooltip has all of it
-    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running(), cw_over_ ? txc::kCwOffsetHz : 0.0);   // a CW over: the DDS 1 kHz below the dial           // duplex: receive follows the DDS onto the dial for the over
+    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running(), cw_over_ ? txc::kCwOffsetHz : 0.0);   // a CW over: the DDS 1 kHz below the dial
+    rx_->setTxMute(keyed || cw_over_);                                                  // receive audio off while keyed (our own signal; it would also feed back into the mic)           // duplex: receive follows the DDS onto the dial for the over
     lamp_->setStyleSheet(keyed ? "background:#c62828;color:white;font-weight:bold;border-radius:4px;padding:2px" : "background:#3a3a3a;color:#888;border-radius:4px;padding:2px");
     txc::Progress p; bool have; { std::lock_guard<std::mutex> l(m_); p = last_; have = have_last_; }
     if (have) pm_->setReading(p.rd.fwd_w, p.rd.rev_w, p.rd.swr ? *p.rd.swr : 0.0, keyed); else pm_->setReading(0, 0, 0, false);

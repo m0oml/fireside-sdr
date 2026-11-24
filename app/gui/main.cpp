@@ -869,6 +869,38 @@ int main(int argc, char** argv) {
                         step("the power meter shows the voice over", tc->powerMeter()->text().startsWith("fwd"));
                         tc->setPttForTests(false); for (int i = 0; i < 300 && (tc->busy() || w.simRadio()->keyed); ++i) pump(1);
                         step("releasing PTT unkeys", !w.simRadio()->keyed && count(1292) == m0 + 2 && tc->statusLabel()->text().contains("PTT released"));
+                        {   // the feedback test (no RF): the processed voice plays on the PC, nothing is written to the radio; VOX waits for it to stop
+                            rx->setDecoderIndex(0); rx->setModeIndex(0); pump(2);                              // the Voice screen (USB)
+                            auto* ap = w.audioPanel(); const size_t n0 = ops().size(); ap->hearBox()->setChecked(true); ap->testButton()->setChecked(true); pump(20);
+                            step("feedback test: the processed voice is heard and nothing goes to the radio", ap->feedbackRunning() && ap->feedbackOutDbfs() > -20 && ops().size() == n0 && !w.simRadio()->keyed);
+                            tc->voxBox()->setChecked(true); pump(2);
+                            step("VOX refused while the input test runs", !tc->voxListening() && !tc->voxBox()->isChecked() && tc->statusLabel()->text().contains("input test"));
+                            ap->testButton()->setChecked(false); pump(2); step("feedback test stops", !ap->feedbackRunning());
+                        }
+                        {   // VOX: speech keys an over (with the pre-roll), silence unkeys it after the hang; never remembered; a time-out switches VOX off
+                            struct GenBurst : fireside::txc::IAudioIn {                                          // 0.6 s of quiet, 1.2 s of speech, then quiet
+                                size_t pos = 0; double talk_from = 0.6, talk_to = 1.8; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+                                size_t read(float* x, size_t n, double) override { std::this_thread::sleep_until(t0 + std::chrono::microseconds(int64_t(1e6 * double(pos + n) / 48000)));
+                                    for (size_t i = 0; i < n; ++i, ++pos) { const double t = double(pos) / 48000; x[i] = float((t > talk_from && t < talk_to ? 0.2 : 0.001) * std::sin(2 * M_PI * 700 * t)); } return n; }
+                                std::string describe() const override { return "generated speech burst"; }
+                            };
+                            w.audioPanel()->setInputFactoryForTests([] { return std::unique_ptr<fireside::txc::IAudioIn>(new GenBurst); });
+                            step("VOX is off in a new window", !tc->voxBox()->isChecked() && !tc->voxListening());
+                            const size_t v0 = count(1292); tc->voxBox()->setChecked(true); pump(2);
+                            step("VOX listens on the Voice screen with transmit ready", tc->voxListening() && !w.simRadio()->keyed);
+                            for (int i = 0; i < 100 && !w.simRadio()->keyed; ++i) pump(1);
+                            step("VOX: speech keys a voice over", w.simRadio()->keyed && tc->statusLabel()->text().contains("VOX"));
+                            for (int i = 0; i < 200 && (tc->busy() || w.simRadio()->keyed); ++i) pump(1);
+                            step("VOX: silence unkeys it after the hang, once", !w.simRadio()->keyed && count(1292) == v0 + 2 && tc->statusLabel()->text().contains("PTT released") && tc->voxListening());
+                            pump(30); step("VOX: room noise below the threshold keys nothing", count(1292) == v0 + 2 && !w.simRadio()->keyed);
+                            tc->voxBox()->setChecked(false); pump(2); step("VOX off stops listening", !tc->voxListening());
+                            w.audioPanel()->setInputFactoryForTests([] { return std::unique_ptr<fireside::txc::IAudioIn>(new GenVoice); });   // speech that never stops
+                            tc->setVoiceTimeoutForTests(1.0); tc->voxBox()->setChecked(true);
+                            for (int i = 0; i < 300 && !(count(1292) >= v0 + 4 && !tc->busy()); ++i) pump(1); pump(30);
+                            step("VOX: an over ending on its time-out switches VOX off (nothing keys again)", count(1292) == v0 + 4 && !w.simRadio()->keyed && !tc->voxBox()->isChecked() && !tc->voxListening()
+                                 && tc->statusLabel()->text().contains("VOX switched off"));
+                            tc->setVoiceTimeoutForTests(180);
+                        }
                         w.audioPanel()->setInputFactoryForTests({});
                     }
                     {   // keying by another program over CAT (Hamlib set_ptt): only with the tick, only the owning client, unkeys on T 0 / untick / disconnect / silence

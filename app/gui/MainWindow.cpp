@@ -130,6 +130,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
             connect(receiver_, &ReceiverPanel::dialChanged, this, redraw); redraw();
         }
         tx_card_->setAudioPanel(audio_panel_);
+        tx_card_->setPcAudioEnabled(enableAudio); audio_panel_->setPcAudioEnabled(enableAudio);   // smoke runs: no sound device (sidetone, monitor, feedback test)
         radio_->setBeforeStream([this](std::function<void()> go) { tx_card_->armThen(std::move(go)); });   // start-up: EEPROM check, then receive
         log_panel_->setTxPowerSource([this] { return tx_card_->recentTxPowerW(); });   // TX_PWR in the log: what our last over really put out
     }

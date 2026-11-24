@@ -8,6 +8,7 @@
 #include <memory>
 #include "fireside/tx_control.h"
 #include "fireside/tx_dsp.h"
+#include "fireside/vox.h"
 class QCheckBox; class QGridLayout; class QComboBox; class QDoubleSpinBox; class QLabel; class QProgressBar; class QPushButton; class QSlider; class QSpinBox; class QTimer;
 class RadioPanel; class ReceiverPanel;
 
@@ -22,6 +23,11 @@ public:
     std::unique_ptr<fireside::txc::IAudioIn> openInput(QString* error); // the chosen input, opened (48 kHz mono); nullptr + error if it cannot be
     void applyMicGain();                                            // sends the radio's mic gain (when the radio is started)
     QString inputName() const;
+    // The feedback test (no RF): "Test input" with "Hear it processed" ticked plays the mic through the transmit processing on the PC's speakers.
+    QPushButton* testButton() const { return test_; } QCheckBox* hearBox() const { return hear_; } bool feedbackRunning() const { return loop_ != nullptr; }
+    void setPcAudioEnabled(bool on) { pc_audio_ = on; }    // false (smoke tests): the feedback test never opens a sound device
+    double feedbackOutDbfs() const { return loop_ ? loop_->out_dbfs() : -200; }
+    bool testInputOpen() const { return test_in_ != nullptr || loop_ != nullptr; }
     void setInputFactoryForTests(std::function<std::unique_ptr<fireside::txc::IAudioIn>()> f) { test_factory_ = std::move(f); }
     // Other programs (WSJT-X, fldigi ...): the virtual devices of system/53-fireside-virtual-audio.conf.
     void addKeyingWidget(QWidget* w);                              // the CAT keying tick and its power (the Transmit card owns them)
@@ -41,6 +47,7 @@ private:
     QSpinBox *hp_, *lp_; QCheckBox *exp_on_, *lev_on_, *comp_on_, *eq_on_; QDoubleSpinBox *exp_thr_, *exp_ratio_, *lev_target_, *lev_max_, *comp_thr_, *comp_ratio_, *comp_makeup_;
     QSlider* eq_[10]; QLabel* eq_val_[10]; QLayout* rx_box_ = nullptr;
     std::unique_ptr<fireside::txc::IAudioIn> test_in_; QTimer* timer_; float test_peak_ = 0;
+    QCheckBox* hear_ = nullptr; QProgressBar* out_level_ = nullptr; std::unique_ptr<fireside::vox::MicLoop> loop_; class PcAudioFeed* feed_ = nullptr; QTimer* restart_ = nullptr; bool pc_audio_ = true;
     bool loading_ = false; std::function<std::unique_ptr<fireside::txc::IAudioIn>()> test_factory_, ext_factory_;
     ReceiverPanel* rx_ = nullptr; QCheckBox* data_out_ = nullptr; QGridLayout* other_grid_ = nullptr; QSpinBox* data_level_ = nullptr; QLabel* ext_note_ = nullptr; void applyDataOut();
     void load(); void save(); void resetProcessing();

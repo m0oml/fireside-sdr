@@ -59,6 +59,8 @@ struct VoiceOptions {
     double peak_w = 10;                           // peak envelope power (the processed audio's ceiling gives this), 1..100 W (txs::kMaxWatts)
     double max_key_s = 180;                       // the time-out timer
     tx::TxChainConfig chain = tx::voice_chain_defaults();   // the whole audio processing (EQ, expander, leveler, compressor, clipper, limiters, SSB filter)
+    // Monitor: called on the producer thread with what a receiver would hear of the over (the processed, SSB-filtered audio, 48 kHz). Must not block.
+    std::function<void(const float* audio, size_t n)> monitor;
 };
 struct VoiceResult { bool keyed = false, unkey_failed = false; std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0, limited_to_w = 0; uint64_t underruns = 0; };
 

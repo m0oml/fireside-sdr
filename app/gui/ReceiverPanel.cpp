@@ -585,6 +585,10 @@ void ReceiverPanel::refresh() {
     if (!frames.empty()) { spectrum_->setScale(scale_); spectrum_->setFrame(frames.back()); }
     audio_buf_.clear(); engine_.take_audio(audio_buf_);
     if (data_out_ && !audio_buf_.empty()) data_out_->push(audio_buf_, data_gain_);                     // other programs: fixed level, not muted
+    {   // anti-VOX: how loud the speaker is now
+        double pk = 0; if (!mute_->isChecked() && !tx_mute_) for (float v : audio_buf_) pk = std::max(pk, double(std::fabs(v)));
+        if (!audio_buf_.empty()) speaker_db_ = 20 * std::log10(pk * volume_->value() / 100.0 + 1e-10);
+    }
     if (!mute_->isChecked() && !tx_mute_ && !audio_buf_.empty()) {
         if (radio_out_) { radio_out_->set_volume(float(volume_->value()) / 100.0f); try { radio_out_->push(audio_buf_.data(), audio_buf_.size()); } catch (const std::exception& e) { note_ = QString("Radio audio stopped: ") + e.what(); radio_out_.reset(); QSignalBlocker b(out_target_); out_target_->setCurrentIndex(0); out_pair_->setEnabled(false); } }
         else audioOut_->push(audio_buf_, float(volume_->value()) / 100.0f);

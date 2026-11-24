@@ -378,10 +378,11 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     std::thread prod([&] {
         try {
             std::unique_ptr<dsp::RationalResampler> rs; if (v.o.rate != 48000) rs = std::make_unique<dsp::RationalResampler>(48000.0, v.o.rate);
-            std::vector<float> a(480); std::vector<tx::cf> iq; std::vector<dsp::cf> up; std::vector<std::complex<float>> out;
+            std::vector<float> a(480), mon; std::vector<tx::cf> iq; std::vector<dsp::cf> up; std::vector<std::complex<float>> out;
             while (!stop) {
                 const size_t n = in.read(a.data(), a.size(), 0.05); if (n == 0) continue;
                 iq.clear(); chain.process(a.data(), n, iq);
+                if (v.monitor) { mon.resize(iq.size()); for (size_t i = 0; i < iq.size(); ++i) mon[i] = iq[i].real(); try { v.monitor(mon.data(), mon.size()); } catch (...) {} }   // what a receiver hears
                 const std::complex<float>* src_p; size_t m;
                 if (rs) { up.clear(); rs->process(iq.data(), iq.size(), up); src_p = up.data(); m = up.size(); } else { out.assign(iq.begin(), iq.end()); src_p = out.data(); m = out.size(); }
                 size_t done = 0; while (done < m && !stop) { const size_t w = src.push_live(src_p + done, m - done); done += w; if (done < m) std::this_thread::sleep_for(std::chrono::milliseconds(2)); }

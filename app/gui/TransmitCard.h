@@ -12,6 +12,7 @@
 #include "fireside/rigctl.h"
 #include "fireside/eeprom.h"
 #include "fireside/cw_keys.h"
+#include "fireside/vox.h"
 #include <functional>
 class QCheckBox; class QComboBox; class QDialog; class QDoubleSpinBox; class QLabel; class QLineEdit; class QProgressBar; class QPushButton; class QSpinBox; class QTimer;
 class RadioPanel; class ReceiverPanel; class PowerMeter; class AudioPanel;
@@ -84,6 +85,12 @@ public:
     QCheckBox* cwPaddleBox() const { return cw_paddle_; } QDoubleSpinBox* cwPowerBox() const { return cw_w_; }
     bool cwWatching() const;                             // the paddle is being read (CW screen, armed, ticked)
     bool cwOver() const { return cw_over_; }
+    // VOX (voice keys the transmitter): off in every new window, never remembered; only on the Voice screen with transmit ready. Monitor: hear the
+    // processed over on the PC's speakers. See TransmitCardVox.cpp.
+    QCheckBox* voxBox() const { return vox_; } QCheckBox* monitorBox() const { return monitor_; } QSpinBox* voxThresholdBox() const { return vox_thr_; }
+    bool voxListening() const { return vox_in_ != nullptr; }
+    void setVoiceTimeoutForTests(double s) { voice_timeout_s_ = s; }
+    void setPcAudioEnabled(bool on) { pc_audio_ = on; }    // false (smoke tests): the sidetone and monitor never open a sound device
     void onReceiveLost(const QString& why);              // receive stopped by itself: the QSO, CQ, anything queued and a CAT-keyed over stop (a tune or the operator's voice PTT carries on)                          // the card's status line (tests)
     QString messageText() const;                         // newest F5K_*_trx.bin in backupDir() (or the remembered one)
     // Keying by other programs over CAT (Hamlib set_ptt): the ONLY implementation of rigctl::PttRequest. An over is TxControl::voice() with the data
@@ -139,7 +146,11 @@ private:
     QDoubleSpinBox* cw_w_ = nullptr; QLineEdit* cw_text_ = nullptr; QPushButton *cw_send_ = nullptr, *cw_stop_ = nullptr; QLabel* cw_lights_ = nullptr; QTimer* cw_timer_ = nullptr;
     std::unique_ptr<class CwSidetone> cw_tone_; std::shared_ptr<fireside::cwk::KeyWatcher> cw_keys_; bool cw_over_ = false; std::function<QStringList()> cw_mems_;
     void buildCw(); void cwTick(); void startCw(const QString& text); void saveCw(); void loadCw(); bool cwWanted() const;
-    bool rx_hold_ = false;                                     // receive was lost: nothing automatic sends again until the operator presses Send / CQ or double-clicks a station                // a double-click on a callsign no country uses: asked to confirm (second click within 15 s)
+    bool rx_hold_ = false;
+    // VOX + monitor
+    QCheckBox *vox_ = nullptr, *anti_vox_ = nullptr, *monitor_ = nullptr; QSpinBox *vox_thr_ = nullptr, *vox_hang_ = nullptr; QLabel* vox_lvl_ = nullptr; QTimer* vox_timer_ = nullptr;
+    std::shared_ptr<fireside::vox::VoxInput> vox_in_; class PcAudioFeed* mon_feed_ = nullptr; std::atomic<bool> vox_kill_{false}; std::string vox_kill_why_; std::mutex vox_m_; double voice_timeout_s_ = 180; bool pc_audio_ = true;
+    void buildVox(); void voxTick(); void voxOn(bool on); void saveVox(); void loadVox(); bool voxScreen() const;                                     // receive was lost: nothing automatic sends again until the operator presses Send / CQ or double-clicks a station                // a double-click on a callsign no country uses: asked to confirm (second click within 15 s)
     QCheckBox* auto_seq_ = nullptr; std::unique_ptr<fireside::seq::Sequencer> seq_; std::function<QString()> my_grid_;
     void pauseReceive(); QString resumeReceive();        // receive pauses for an over (the slot so far decoded first) and comes back after it
     fireside::seq::Sequencer& sequencer(); int test_tries_ = 0;

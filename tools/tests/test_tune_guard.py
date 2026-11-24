@@ -226,6 +226,20 @@ class TuningIsOneOpcode(unittest.TestCase):
         body = s[s.index("RadioSession::read_keys"):]; body = body[:body.index("\n}") + 2]
         self.assertEqual(re.findall(r'"(RDAL_OP_\w+)"', body), ["RDAL_OP_READ_PTT"]); self.assertIn("read_event()", body); self.assertNotIn(".set(", body)
 
+    def test_vox_is_never_remembered_and_keys_only_through_the_voice_over(self):
+        """VOX starts the same voice over as PTT (TransmitCard::startVoice -> TxControl::voice); its on / off state is never saved (off in every new
+        window); the VOX core and the feedback test hold nothing that can key or write to the radio."""
+        g = code("gui/TransmitCardVox.cpp", strip_strings=False)
+        self.assertEqual(sorted(set(re.findall(r'setValue\("(\w+)"', g))), ["anti_vox", "monitor", "vox_hang_ms", "vox_threshold_dbfs"])
+        self.assertIn("vox_->setChecked(false)", g); self.assertNotIn('value("vox"', g)
+        gs = code("gui/TransmitCardVox.cpp", strip_strings=True)
+        for bad in ("TxGate", "SET_MOX", "t.voice(", ".set(", "Flex", "set_keyed"):
+            self.assertNotIn(bad, gs, bad)
+        self.assertIn("startVoice()", gs)
+        v = code("core/src/vox.cpp") + code("core/include/fireside/vox.h")
+        for bad in (".set(", "MOX", "TxGate", "TxControl", "Flex", "permit("):
+            self.assertNotIn(bad, v.replace("txc::IAudioIn", "").replace("tx_control.h", ""), bad)
+
     def test_only_tune_cpp_and_startup_cpp_write(self):
         offenders = []
         for root in ("core/src", "gui", "tools"):

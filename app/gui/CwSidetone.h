@@ -11,7 +11,7 @@
 
 class CwSidetone : public QObject {
 public:
-    explicit CwSidetone(QObject* parent = nullptr) : QObject(parent), out_(new AudioOut(true, this)), t_(new QTimer(this)) {
+    explicit CwSidetone(bool enable, QObject* parent = nullptr) : QObject(parent), out_(new AudioOut(enable, this)), t_(new QTimer(this)) {   // enable=false: no device opened (tests)
         t_->setInterval(5); connect(t_, &QTimer::timeout, this, [this] { std::vector<float> v; { std::lock_guard<std::mutex> l(m_); v.swap(pending_); } if (!v.empty()) out_->push(v, vol_); });
         t_->start();
     }

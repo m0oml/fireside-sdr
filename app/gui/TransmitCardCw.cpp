@@ -109,7 +109,7 @@ void TransmitCard::startCw(const QString& raw) {
     c.keyer.mode = cw_mode_->currentIndex() == 1 ? tx::IambicMode::A : tx::IambicMode::B; c.straight = cw_mode_->currentIndex() == 2; c.hang_s = cw_hang_->value() / 1000.0; c.text = text.toStdString();
     if (!(c.o.rate > 0)) { report("No playback rate for transmit."); return; }
     if (cw_side_->isChecked()) {
-        if (!cw_tone_) cw_tone_ = std::make_unique<CwSidetone>(this);
+        if (!cw_tone_) cw_tone_ = std::make_unique<CwSidetone>(pc_audio_, this);
         CwSidetone* st = cw_tone_.get(); c.sidetone = [st](const uint8_t* k, size_t n, double r) { st->feed(k, n, r); };
     }
     std::shared_ptr<txc::ICwKeys> keys = cw_keys_ && cw_keys_->running() ? std::static_pointer_cast<txc::ICwKeys>(cw_keys_) : std::make_shared<NoKeys>();

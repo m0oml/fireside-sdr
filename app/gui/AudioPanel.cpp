@@ -23,6 +23,7 @@
 #include "Theme.h"
 #include "fireside/audio_fifo.h"
 #include "fireside/fw_iso.h"
+#include "PcAudioFeed.h"
 
 using namespace fireside;
 namespace {
@@ -78,12 +79,20 @@ AudioPanel::AudioPanel(RadioPanel* radio, QWidget* parent) : QWidget(parent), ra
       level_->setStyleSheet("QProgressBar{background:#151b24;border:1px solid #2a3442;border-radius:4px;color:#d8dee8;text-align:center;min-height:18px}"
                             "QProgressBar::chunk{background:#2e7d32;border-radius:3px}");
       test_ = new QPushButton("Test input"); test_->setCheckable(true); test_->setToolTip("Open the input and show its level (nothing transmits)");
+      hear_ = new QCheckBox("Hear it processed"); hear_->setChecked(true);
+      hear_->setToolTip("Feedback test: while Test input runs, your voice goes through the transmit processing (EQ, leveler, compressor, SSB filter) and plays on the PC's "
+                        "speakers as a receiver would hear it. Use headphones (speakers howl back into the mic). Nothing transmits.");
+      out_level_ = new QProgressBar; out_level_->setRange(0, 600); out_level_->setValue(0); out_level_->setFormat("processed -");
+      out_level_->setStyleSheet("QProgressBar{background:#151b24;border:1px solid #2a3442;border-radius:4px;color:#d8dee8;text-align:center;min-height:18px}"
+                                "QProgressBar::chunk{background:#1e6fb8;border-radius:3px}");
+      out_level_->setToolTip("The processed audio's peak: about -1 to -6 dBFS while you talk means the processing reaches the set power (PEP)");
       in_note_ = new QLabel(" "); in_note_->setObjectName("muted"); in_note_->setWordWrap(true);
       int r = 0;
       g->addWidget(new QLabel("Source"), r, 0); g->addWidget(source_, r++, 1, 1, 2);
       g->addWidget(new QLabel("Radio mic gain"), r, 0); g->addWidget(mic_gain_, r, 1); g->addWidget(mic_gain_lbl_, r++, 2);
       g->addWidget(new QLabel("Input gain"), r, 0); g->addWidget(pc_gain_, r++, 1);
       g->addWidget(test_, r, 0); g->addWidget(level_, r++, 1, 1, 2);
+      g->addWidget(hear_, r, 0); g->addWidget(out_level_, r++, 1, 1, 2);
       g->addWidget(in_note_, r++, 0, 1, 3); g->setColumnStretch(1, 1);
       top->addWidget(theme::makeCard("Transmit input", g), 3); }
     outer->addLayout(top);
@@ -209,13 +218,30 @@ void AudioPanel::applyMicGain() {
     std::string e; if (radio_->session().set_mic_gain_db(mic_gain_->value(), &e)) emit message(QString("Audio: radio mic gain %1 dB").arg(mic_gain_->value()));
 }
 void AudioPanel::onTestInput(bool on) {
-    test_in_.reset(); level_->setValue(0); level_->setFormat("input -");
+    loop_.reset(); test_in_.reset(); level_->setValue(0); level_->setFormat("input -"); out_level_->setValue(0); out_level_->setFormat("processed -");
     if (!on) { in_note_->setText(" "); return; }
-    QString err; test_in_ = openInput(&err);
-    if (!test_in_) { in_note_->setText("Cannot open the input: " + err); QSignalBlocker b(test_); test_->setChecked(false); return; }
-    in_note_->setText(QString("Listening to %1 (nothing transmits)").arg(QString::fromStdString(test_in_->describe())));
+    QString err; auto in = openInput(&err);
+    if (!in) { in_note_->setText("Cannot open the input: " + err); QSignalBlocker b(test_); test_->setChecked(false); return; }
+    const QString name = QString::fromStdString(in->describe());
+    if (hear_->isChecked()) {                                           // the feedback test: the processed voice on the PC's speakers
+        if (!feed_) feed_ = new PcAudioFeed(pc_audio_, this);
+        PcAudioFeed* f = feed_;
+        try { loop_ = std::make_unique<vox::MicLoop>(std::move(in), chainConfig(), [f](const float* a, size_t n) { f->push(a, n); }); }
+        catch (const std::exception& e) { in_note_->setText(QString("Cannot start the feedback test: ") + e.what()); QSignalBlocker b(test_); test_->setChecked(false); return; }
+        in_note_->setText(QString("Feedback test on %1: you hear yourself as transmitted (use headphones). Nothing transmits.%2").arg(name, f->available() ? QString() : QString(" (No PC audio output found.)")));
+        return;
+    }
+    test_in_ = std::move(in);
+    in_note_->setText(QString("Listening to %1 (nothing transmits)").arg(name));
 }
 void AudioPanel::tick() {
+    if (loop_) {                                                        // the feedback test: both meters from the loop
+        if (loop_->failed()) { in_note_->setText(QString::fromStdString("Input stopped: " + loop_->error())); loop_.reset(); QSignalBlocker bl(test_); test_->setChecked(false); return; }
+        const double a = loop_->in_dbfs(), b = loop_->out_dbfs();
+        level_->setValue(int(std::clamp((a + 60) * 10, 0.0, 600.0))); level_->setFormat(QString("input %1 dBFS").arg(a, 0, 'f', 0));
+        out_level_->setValue(int(std::clamp((b + 60) * 10, 0.0, 600.0))); out_level_->setFormat(QString("processed %1 dBFS").arg(b, 0, 'f', 0));
+        return;
+    }
     if (!test_in_) return;
     std::vector<float> b(4800); float pk = 0;
     try { for (int i = 0; i < 4; ++i) { const size_t n = test_in_->read(b.data(), b.size(), 0.0); if (!n) break; for (size_t k = 0; k < n; ++k) pk = std::max(pk, std::fabs(b[k])); } }
@@ -238,6 +264,10 @@ void AudioPanel::load() {
     loading_ = false;
 }
 void AudioPanel::save() {
+    if (loop_ && !loading_) {                                           // the feedback test hears a processing change at once (debounced while a slider moves)
+        if (!restart_) { restart_ = new QTimer(this); restart_->setSingleShot(true); restart_->setInterval(300); connect(restart_, &QTimer::timeout, this, [this] { if (loop_) onTestInput(true); }); }
+        restart_->start();
+    }
     if (loading_ || no_settings()) return;
     QSettings q("fireside", "audio");
     q.setValue("source", source_->currentData().toString().isEmpty() ? QString::fromUtf8(source_->currentData().toByteArray()) : source_->currentData().toString());

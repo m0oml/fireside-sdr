@@ -708,14 +708,14 @@ int main(int argc, char** argv) {
                         pump(20); step("a queued send is cancelled by Stop without keying", !tc->sendQueued() && count(1292) == mox2 && !w.simRadio()->keyed);
                         tc->messageBox()->setText("   "); const size_t mox3 = count(1292); tc->sendButton()->click(); pump(2);
                         step("an empty message is refused, nothing queued or keyed", !tc->sendQueued() && tc->statusLabel()->text().contains("Cannot send") && count(1292) == mox3);
-                        QCheckBox* rep = nullptr; for (auto* c : tc->digitalPart()->findChildren<QCheckBox*>()) if (c->text().startsWith("Repeat")) rep = c;
-                        step("repeat box exists", rep != nullptr);
+                        QCheckBox* rep = nullptr; for (auto* c : tc->digitalPart()->findChildren<QCheckBox*>()) if (c->text().startsWith("Attended CQ")) rep = c;
+                        step("Attended CQ box exists (was Repeat)", rep != nullptr);
                         if (rep) {   // Repeat: after an over the next slot of the same parity is queued by itself; Stop ends the calling
                             const double now2 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
                             const long long i2 = (long long)std::floor(now2 / 7.5) + ((std::fmod(now2, 7.5) > 5.0) ? 2 : 1);
                             tc->parityBox()->setCurrentIndex(int(i2 % 2)); tc->messageBox()->setText("CQ M0OML IO91"); rep->setChecked(true);
                             const size_t m4 = count(1292); tc->sendButton()->click(); pump(2);
-                            step("repeat: no question, the status says repeating", tc->sendQueued() && tc->statusLabel()->text().contains("repeating"));
+                            step("repeat: no question, the status says attended CQ", tc->sendQueued() && tc->statusLabel()->text().contains("attended CQ"));
                             for (int i = 0; i < 900 && !(count(1292) >= m4 + 2 && !tc->busy()); ++i) pump(1);
                             for (int i = 0; i < 50 && !tc->sendQueued(); ++i) pump(1);
                             step("repeat: after the over the next slot of that parity is queued", count(1292) == m4 + 2 && tc->sendQueued() && !w.simRadio()->keyed
@@ -829,6 +829,35 @@ int main(int argc, char** argv) {
                             QPushButton* sb4 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb4 = bt;
                             if (sb4) sb4->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
                             tc->setMaxTriesForTests(0);
+                        }
+                        {   // Attended CQ: a call we started that gives up goes back to CQ; after the block of calls a pause and the other slot; an answer in the pause; a typed message
+                            tc->autoSeqBox()->setChecked(true); tc->setMaxTriesForTests(1); tc->setAttendedCallsForTests(1); tc->setAttendedPauseForTests(600000);
+                            auto until = [&](const std::function<bool()>& f) { for (int i = 0; i < 6000 && !f(); ++i) pump(1); return f(); };
+                            QPushButton* sb5 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb5 = bt;
+                            tc->attendedBox()->setChecked(true);
+                            const long long ka = (long long)std::floor(wall() / 7.5) - 1;
+                            tc->replyTo(label(ka * 7.5) + " -10  0.1 1300 ~  CQ SP9XYZ KN09"); pump(2);
+                            step("attended CQ: a double-click keeps the box ticked", tc->attendedBox()->isChecked() && tc->messageText().startsWith("SP9XYZ M0OML"));
+                            step("attended CQ: the call we started gives up and CQ follows", until([&] { return tc->qsoText().startsWith("Calling CQ") || tc->attendedPause(); }));
+                            const int par0 = tc->parityBox()->currentIndex();
+                            step("attended CQ: after the block of calls it pauses, nothing queued, the slot flipped",
+                                 until([&] { return tc->attendedPause(); }) && !tc->sendQueued() && !tc->busy() && tc->parityBox()->currentIndex() != par0 && tc->statusText().contains("listening for 4 slots"));
+                            const long long kb = (long long)std::floor(wall() / 7.5) - 1;
+                            rx->addDecodedText(label(kb * 7.5) + " -10  0.1 1300 ~  M0OML OK1ABC JN79\n"); pump(2);
+                            step("attended CQ: an answer during the pause is worked straight away, in the slot after theirs",
+                                 !tc->attendedPause() && tc->sendQueued() && tc->messageText().startsWith("OK1ABC M0OML") && tc->parityBox()->currentIndex() == int((kb + 1) % 2));
+                            if (sb5) sb5->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
+                            step("attended CQ: Stop unticks it and nothing is queued", !tc->attendedBox()->isChecked() && !tc->sendQueued() && !tc->attendedPause());
+                            tc->setAttendedPauseForTests(300); tc->attendedBox()->setChecked(true); tc->cqButton()->click(); pump(2);
+                            step("attended CQ: CQ goes out", until([&] { return tc->busy(); }));
+                            step("attended CQ: the pause ends and CQ is queued in the other slot", until([&] { return tc->attendedPause(); }) && until([&] { return tc->sendQueued() && !tc->attendedPause(); })
+                                 && tc->messageText().startsWith("CQ M0OML"));
+                            if (sb5) sb5->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
+                            tc->attendedBox()->setChecked(true); tc->messageBox()->setText("DL1ABC M0OML 73"); tc->sendButton()->click(); pump(2);
+                            step("attended CQ: a typed message goes out", until([&] { return tc->busy(); }));
+                            step("attended CQ: after it, back to CQ", until([&] { return !tc->busy() && tc->messageText().startsWith("CQ M0OML") && (tc->sendQueued() || tc->busy()); }));
+                            if (sb5) sb5->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
+                            tc->setMaxTriesForTests(0); tc->setAttendedCallsForTests(0); tc->setAttendedPauseForTests(-1);
                         }
                         {   // a safety stop during the RR73 repeat of an already-logged QSO, with another station waiting: nothing keys again by itself
                             auto* sim = w.simRadio(); tc->autoSeqBox()->setChecked(true);

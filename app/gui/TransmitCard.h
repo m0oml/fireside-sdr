@@ -141,6 +141,18 @@ private:
     bool extActive() const; bool requestExt(int client, bool on); void extHeartbeat(int client);
     std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_; void noteSeqEnd(bool may_continue = true); void autoNext(); QSet<QString> auto_tried_; bool auto_reply_ = false, from_cq_ = false, follow_pending_ = false; QPushButton *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
     QString odd_call_; qint64 odd_call_ms_ = 0;
+    // Attended CQ (the box that was "Repeat"): kAttCalls calls in one slot parity, then kAttPauseSlots or more silent slots (to the next slot of the
+    // other parity), then CQ again in that other parity. A message typed by hand is sent kAttCalls times, then back to CQ; a QSO that ends goes back to CQ.
+    static constexpr int kAttCalls = 6, kAttPauseSlots = 3;
+    QTimer* att_timer_ = nullptr; bool att_pause_ = false; int att_count_ = 0; std::atomic<double> last_slot_utc_{0}; QString last_sent_;
+    void startAttPause(); void endAttPause();
+public:
+    bool attendedPause() const { return att_pause_; }
+    void setAttendedPauseForTests(int ms) { att_pause_ms_for_tests_ = ms; }   // smoke tests: a short (or long) pause, and fewer calls per block
+    void setAttendedCallsForTests(int n) { att_calls_ = n > 0 ? n : kAttCalls; }
+    QCheckBox* attendedBox() const { return ft_repeat_; }
+private:
+    int att_pause_ms_for_tests_ = -1, att_calls_ = kAttCalls;
     // CW
     QWidget* cw_part_ = nullptr; QSpinBox *cw_wpm_ = nullptr, *cw_weight_ = nullptr, *cw_hang_ = nullptr; QComboBox *cw_mode_ = nullptr, *cw_mem_ = nullptr; QCheckBox *cw_rev_ = nullptr, *cw_paddle_ = nullptr, *cw_side_ = nullptr;
     QDoubleSpinBox* cw_w_ = nullptr; QLineEdit* cw_text_ = nullptr; QPushButton *cw_send_ = nullptr, *cw_stop_ = nullptr; QLabel* cw_lights_ = nullptr; QTimer* cw_timer_ = nullptr;

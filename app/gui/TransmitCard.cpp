@@ -104,7 +104,13 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     auto_seq_->setToolTip("Double-click a decoded CQ or caller to reply. Each answer moves the QSO on (report, R-report, RR73, 73), repeated up to 6 times; the finished QSO is logged to Wavelog. Send with a CQ message calls CQ the same way.");
     ft_clear_ = new QCheckBox("Clear freq"); ft_clear_->setChecked(true);
     ft_clear_->setToolTip("CQ: if someone is on our transmit frequency (heard in the last 2 minutes), move to the middle of the widest clear gap (300-2700 Hz). A frequency that is already clear is kept.");
-    ft_repeat_ = new QCheckBox("Repeat"); ft_repeat_->setToolTip("Send again in every slot of this parity until Stop (calling CQ)");
+    ft_repeat_ = new QCheckBox("Attended CQ"); ft_repeat_->setToolTip("Keep calling while you are here, until Stop: CQ 6 times in one slot, listen for 4 slots, then CQ 6 times in the other slot, and so on. "
+        "A message you typed is sent 6 times, then back to CQ. With Auto sequence, a QSO that ends (logged or given up) goes back to CQ, also one you started by double-clicking.");
+    att_timer_ = new QTimer(this); att_timer_->setSingleShot(true);
+    connect(att_timer_, &QTimer::timeout, this, [this] {                                     // the pause is over: CQ in the other slot (Clear freq looks again)
+        if (!att_pause_) return; endAttPause();
+        if (!ft_repeat_->isChecked() || !tx_ || !tx_->armed() || worker_running_ || ft_pending_ || rx_hold_ || (seq_ && seq_->active() && seq_->stage() != fireside::seq::Stage::Cq)) return;
+        report(QString("Attended CQ: calling in the %1 slot now.").arg(ft_par_->currentIndex() ? "odd" : "even")); cq_->click(); });
     voice_mode_ = new QComboBox; voice_mode_->addItems({"Auto (as the receiver)", "USB", "LSB"}); voice_mode_->setToolTip("Sideband for voice: Auto = the receiver's USB / LSB (its Auto LSB / USB picks it per band), else USB above 10 MHz");
     voice_w_ = new QDoubleSpinBox; voice_w_->setRange(1, 100); voice_w_->setDecimals(0); voice_w_->setValue(20); voice_w_->setSuffix(" W PEP"); voice_w_->setToolTip("Peak envelope power: speech peaks reach it (the processing drives them into the limiter)");
     ptt_ = new QPushButton("PTT (hold)"); ptt_->setToolTip("Hold to talk: an SSB over with the Audio tab's input and processing (time-out 3 min)");
@@ -350,12 +356,22 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
             }
             if (sent_ok) takeLog();                                                                  // the over that completed a QSO has gone out: log it
             noteSeqEnd(!safety);                                                                     // after a safety stop: announce the end, but never go on to the next caller
-            const bool resend = !safety && (sent_ok && ft_repeat_->isChecked() && !(seq_ && seq_->stage() != fireside::seq::Stage::Idle)) || (seq_ && seq_->active() && !res.startsWith("Not sent"));
+            bool resend = !safety && (sent_ok && ft_repeat_->isChecked() && !(seq_ && seq_->stage() != fireside::seq::Stage::Idle)) || (seq_ && seq_->active() && !res.startsWith("Not sent"));
+            bool att_pause = false, att_cq = false;                                             // Attended CQ: 6 calls, then a pause (CQ) or back to CQ (a typed message)
+            if (!safety && sent_ok && ft_repeat_->isChecked()) {
+                const bool plain = !(seq_ && seq_->stage() != fireside::seq::Stage::Idle), seq_cq = seq_ && seq_->stage() == fireside::seq::Stage::Cq;
+                if (seq_cq || (plain && last_sent_.startsWith("CQ "))) { if (++att_count_ >= att_calls_) { resend = false; att_pause = true; } }
+                else if (plain && ++att_count_ >= att_calls_) { resend = false; att_cq = true; }
+            }
             if (seq_ && !seq_->describe().empty()) res += "  " + QString::fromStdString(seq_->describe()) + ".";
             if (res.endsWith(" #sent")) res.chop(6);
             report(res + rxnote); saveState(); updateButtons(); updateMemoryLabel();
             if (resend) QTimer::singleShot(200, this, [this, g = stop_gen_] { if (g == stop_gen_) queueSend(); });   // Stop in between cancels it             // calling: the next slot of the same parity
             if (!resend && !safety) QTimer::singleShot(300, this, [this] { autoNext(); });               // an ended QSO waiting for this over to finish
+            if (att_pause) startAttPause();
+            if (att_cq) QTimer::singleShot(300, this, [this, g = stop_gen_] {
+                if (g != stop_gen_ || !ft_repeat_->isChecked() || worker_running_ || ft_pending_ || (seq_ && seq_->active())) return;
+                report(QString("Attended CQ: \"%1\" was sent %2 times, back to CQ.").arg(last_sent_).arg(att_calls_)); cq_->click(); });
             voice_in_.reset();                                                                  // a voice over's input (a PC capture lives on this thread)
             if (after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }               // start-up: receiving starts once the check is done
             extOverEnded(!safety);                                                                  // a program re-keyed while its last over was unkeying
@@ -444,7 +460,7 @@ void TransmitCard::replyTo(const QString& line) {
     auto& sq = sequencer();
     if (!sq.reply_to(h)) { report("Nothing to answer in: " + QString::fromStdString(text)); return; }
     { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - line_parity(line, ft_mode_->currentIndex() == 1)); }   // our slots are the other parity
-    { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); }
+    att_count_ = 0; endAttPause();                                                          // Attended CQ stays ticked: when this QSO ends, back to CQ
     ft_msg_->setText(QString::fromStdString(sq.current())); saveState(); ended_for_.clear(); logged_for_.clear(); emit qsoPartner(QString::fromStdString(sq.dx()));
     ft_timer_->stop(); ft_pending_.reset();
     if (tx_ && tx_->armed() && !worker_running_) queueSend(); else report(QString("Reply ready: %1 (%2). Transmit is not ready yet.").arg(ft_msg_->text(), ft_par_->currentText()));
@@ -456,6 +472,11 @@ void TransmitCard::heardLine(const QString& line) {
     if (seq_->heard(h)) {
         if (was_cq && seq_->stage() != fireside::seq::Stage::Cq) {                             // someone answered our CQ: afterwards, back to CQ
             from_cq_ = true; ended_for_.clear(); logged_for_.clear();                           // a new QSO, even with a station we just gave up on or worked
+            if (att_pause_) {                                                                   // answered during the Attended CQ pause: reply in the slot after theirs
+                endAttPause(); { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - line_parity(line, ft_mode_->currentIndex() == 1)); } saveState();
+                if (!seq_->current().empty()) ft_msg_->setText(QString::fromStdString(seq_->current()));
+                if (!ft_pending_ && !worker_running_) queueSend();
+            }
         }
         emit qsoPartner(QString::fromStdString(seq_->dx()));
         if (!seq_->current().empty()) ft_msg_->setText(QString::fromStdString(seq_->current()));
@@ -499,7 +520,7 @@ void TransmitCard::autoNext() {                         // auto mode, a QSO (or 
         if (seq_ && seq_->active()) return;                                                  // answering someone (the operator's or this one)
     }
     auto_tried_.clear();
-    if (from_cq_) { from_cq_ = false; report("No one else is waiting: calling CQ again."); cq_->click(); }   // we were calling CQ: carry on
+    if (from_cq_ || ft_repeat_->isChecked()) { from_cq_ = false; report(ft_repeat_->isChecked() ? "Attended CQ: no one else is waiting, calling CQ again." : "No one else is waiting: calling CQ again."); cq_->click(); }   // we were calling CQ (or Attended CQ): carry on
 }
 
 void TransmitCard::offerBackup() {
@@ -664,11 +685,27 @@ void TransmitCard::onTestTone() {
 }
 
 void TransmitCard::onSend() {
-    rx_hold_ = false;                                                                        // the operator's Send / CQ
+    rx_hold_ = false; att_count_ = 0; endAttPause();                                         // the operator's Send / CQ (or the end of an Attended CQ pause)
     if (seq_) seq_->stop();
     if (auto_seq_->isChecked() && ft_msg_->text().trimmed().toUpper().startsWith("CQ ")) { if (!haveStation()) return; sequencer().call_cq(); ft_msg_->setText(QString::fromStdString(seq_->current())); }   // CQ: answers are worked automatically
     queueSend();
 }
+void TransmitCard::startAttPause() {          // after the 6th call in slot N: silent for at least kAttPauseSlots slots, then CQ in the other parity
+    const bool ft4 = ft_mode_->currentIndex() == 1; const double slot = ft4 ? 7.5 : 15.0;
+    const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    double n = last_slot_utc_.load(); if (!(n > 0) || n > now + slot) n = std::floor(now / slot) * slot;
+    int k = kAttPauseSlots + 1; if (k % 2 == 0) ++k;                                         // an odd number of slots on: the other parity (3 -> slot N+5, 4 silent)
+    const double resume = n + k * slot;
+    const int was = ft_par_->currentIndex(); { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - was); } saveState();
+    att_pause_ = true; att_count_ = 0;
+    const int ms = att_pause_ms_for_tests_ >= 0 ? att_pause_ms_for_tests_ : int(std::max(0.0, resume - 3.5 - now) * 1000);   // queued 3.5 s ahead, like a resend
+    att_timer_->start(ms);
+    report(QString("Attended CQ: %1 calls in the %2 slot, now listening for %3 slots; CQ in the %4 slot at %5 UTC (an answer is worked straight away; Stop ends it).")
+           .arg(att_calls_).arg(was ? "odd" : "even").arg(k - 1).arg(was ? "even" : "odd")
+           .arg(QDateTime::fromMSecsSinceEpoch(qint64(resume * 1000), Qt::UTC).toString("HH:mm:ss")));
+    updateButtons();
+}
+void TransmitCard::endAttPause() { if (att_timer_) att_timer_->stop(); if (att_pause_) { att_pause_ = false; updateButtons(); } }
 void TransmitCard::queueSend() {
     if (!tx_ || !tx_->armed() || worker_running_) return;
     const double mhz = rx_->dialHz() / 1e6; const bool ft4 = ft_mode_->currentIndex() == 1; const QString text = ft_msg_->text().trimmed().toUpper();
@@ -684,7 +721,7 @@ void TransmitCard::queueSend() {
     ft_pending_ = prep;
     const double start_in = plan.skip_s > 0 ? 0.0 : std::max(0.0, plan.slot.start_utc - 0.8 - now);   // receive pauses ~0.8 s before the slot
     ft_timer_->start(int(start_in * 1000)); report(QString("%1 \"%2\" queued for %3 UTC, %4 slot, %5 Hz, %6 W%7 (Stop cancels).").arg(ft4 ? "FT4" : "FT8", text, when).arg(par == tx::Parity::Even ? "even" : "odd")
-           .arg(ft_hz_->value()).arg(ft_w_->value()).arg(ft_repeat_->isChecked() ? ", repeating" : "")); updateButtons();
+           .arg(ft_hz_->value()).arg(ft_w_->value()).arg(ft_repeat_->isChecked() ? ", attended CQ" : "")); updateButtons();
 }
 void TransmitCard::startSend() {
     if (!ft_pending_ || !tx_ || !tx_->armed() || worker_running_) { ft_pending_.reset(); updateButtons(); return; }
@@ -696,6 +733,7 @@ void TransmitCard::startSend() {
         if (next != prep->text) { auto p2 = std::make_shared<txc::TxControl::FtPrepared>(*prep); p2->text = next; p2->buf.clear(); prep = p2; }   // rendered by the worker below
         ft_msg_->setText(QString::fromStdString(next));
     }
+    last_sent_ = QString::fromStdString(prep->text);
     const double mhz = rx_->dialHz() / 1e6, w = ft_w_->value(); const tx::Parity par = ft_par_->currentIndex() ? tx::Parity::Odd : tx::Parity::Even;
     txc::Options o; o.rate = prep->rate; o.mirror_q = mirror_->isChecked(); o.tx_ant = txAnt();
     {   // the QSO pane: what we send, labelled with the slot it goes out in
@@ -712,7 +750,7 @@ void TransmitCard::startSend() {
         QString res = QString("%1 %2 at %3 UTC: %4, %5 W (set %6 W)%7.").arg(prep->ft4 ? "FT4" : "FT8", r.sent ? "sent" : "stopped", when, QString::fromStdString(r.stop))
                       .arg(r.mean_fwd_w, 0, 'f', 1).arg(w, 0, 'f', 0).arg(r.late_s > 0 ? ", joined late" : "");
         if (r.limited_to_w > 0) res += QString(" This band's limit is %1 W: set the power to %1 W or less.").arg(r.limited_to_w, 0, 'f', 0);
-        unkeyed_utc_ = r.unkeyed_utc;
+        unkeyed_utc_ = r.unkeyed_utc; last_slot_utc_ = r.slot_utc;
         if (r.sent && r.mean_fwd_w > 0.1) { last_tx_w_ = r.mean_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }   // for the log's TX_PWR
         if (r.sent) res += " #sent";
         return res;
@@ -792,13 +830,13 @@ void TransmitCard::autoArm() {
     arm_tried_ = true; { QSignalBlocker b(arm_); arm_->setChecked(true); } onArm(true);
 }
 void TransmitCard::stopEverything(const QString& why) {
-    ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false;
+    ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); endAttPause(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false;
     if (seq_) { seq_->stop(); noteSeqEnd(false); }                                           // a logged QSO stopped during its RR73 repeats is still done
     extCancel(); if (tx_) tx_->abort(); report(why); updateButtons();
 }
 void TransmitCard::onDial(double hz) {
     const int band = txm::band_of(hz); if (band == last_band_) return;
-    const bool qso_running = ft_pending_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || (worker_running_ && !ext_over_);
+    const bool qso_running = ft_pending_ || att_pause_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || (worker_running_ && !ext_over_);
     last_band_ = band; updateMemoryLabel(); updateButtons();
     if (qso_running) {                                                                        // a QSO or CQ belongs to its band: never carried to another one
         stopEverything("Band changed: the QSO / CQ is stopped and nothing is queued (the callers waiting on the old band are cleared).");
@@ -808,7 +846,7 @@ void TransmitCard::onDial(double hz) {
 }
 
 void TransmitCard::onReceiveLost(const QString& why) {
-    const bool automatic = ft_pending_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || extActive();
+    const bool automatic = ft_pending_ || att_pause_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || extActive();
     if (!automatic) return;
     rx_hold_ = true;
     stopEverything(QString("Receive stopped (%1): auto transmit stopped, nothing queued. It does not start again by itself: check the receive, then press CQ or double-click a station.").arg(why));
@@ -825,7 +863,7 @@ void TransmitCard::tick() {
     lamp_->setStyleSheet(keyed ? "background:#c62828;color:white;font-weight:bold;border-radius:4px;padding:2px" : "background:#3a3a3a;color:#888;border-radius:4px;padding:2px");
     txc::Progress p; bool have; { std::lock_guard<std::mutex> l(m_); p = last_; have = have_last_; }
     if (have) pm_->setReading(p.rd.fwd_w, p.rd.rev_w, p.rd.swr ? *p.rd.swr : 0.0, keyed); else pm_->setReading(0, 0, 0, false);
-    stop_->setEnabled(worker_running_ || ft_pending_ != nullptr);
+    stop_->setEnabled(worker_running_ || ft_pending_ != nullptr || att_pause_);
 }
 
 void TransmitCard::updateButtons() {
@@ -840,7 +878,7 @@ void TransmitCard::updateButtons() {
     send_->setEnabled(armed && idle && band >= 0 && !ft_pending_); cq_->setEnabled(send_->isEnabled()); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_);
     restore_->setEnabled(armed && idle && band >= 0 && on_atu && tx_->memory().recall(band).has_value());
     if (!on_atu) { tune_->setToolTip(QString("This band transmits on ANT%1: the ATU is on ANT1 only (Antennas tab)").arg(txAnt())); }
-    power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr);
+    power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr || att_pause_);
     ext_allow_->setEnabled(armed || ext_allow_->isChecked());                      // can always be unticked
     gen_btn_->setEnabled(armed && idle && band >= 0 && !ft_pending_);
 }

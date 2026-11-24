@@ -210,8 +210,8 @@ Open **Transmit** under the decoder: the **Radio transmit (ATU, power, SWR)** ca
   typing) or the mic / rear RCA PTT (READ_PTT polled, if ticked). `TxControl::voice`: input -> processing -> SSB -> the clamped transmit
   path; gate: forward 1.5 x PEP (at most 110 W; 0.15 s grace) and 3 x PEP at once (at most 130 W), SWR 3, 3-minute time-out; drive from the band's measured level, trimmed only down. Tested on the simulated
   radio (sideband, PEP, PTT, time-out, mic failure); not on the air yet (no microphone).
-- **FT8 / FT4 send**: message, audio frequency (USB above the dial), even / odd slot, power, **Send** (no question: the status line shows what is queued and when; **Stop** cancels) and **Repeat** (calls in every slot of that
-  parity until Stop). The signal is rendered at once; receive pauses only ~0.8 s before the slot and comes back after the over. Closed-loop power: the
+- **FT8 / FT4 send**: message, audio frequency (USB above the dial), even / odd slot, power, **Send** (no question: the status line shows what is queued and when; **Stop** cancels) and **Attended CQ** (was Repeat: 6 CQs in one
+  slot, 4 slots listening, 6 in the other slot, and so on until Stop; a typed message 6 times, then CQ; an ended QSO goes back to CQ). The signal is rendered at once; receive pauses only ~0.8 s before the slot and comes back after the over. Closed-loop power: the
   forward meter trims the drive to the set power in the first 3 s (constant envelope), and every clean over refines the band's drive level. Tested on the
   simulated radio (`app/tests/test_atu_tx.cpp`, FT8 overs on 5 x simulated time): every QSO message decodes, FT8 and FT4, 48 and 96 kHz, |DT| < 0.1 s;
   on the wire the signal is mirrored (below the carrier) and inside the slot; the loop fixes a drive level 40 % low or 80 % high; one 1.7 x too low trips

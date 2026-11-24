@@ -165,8 +165,8 @@ number,name,access,data1,data2,result,safety,in_use,group,note
 1301,SET_XVTR_ACTIVE,?,u32,u32,,dangerous,,Transmit and keying,Transverter active.
 1302,SET_XVTR_SPLIT,w,u32,u32,,dangerous,,Transmit and keying,Transverter split.
 1303,SET_RX1OUT,w,u32,u32,,write,,Other,
-1304,FLEXWIRE_WRITE_VALUE,w,i32,i32,,write,,Other,
-1305,FLEXWIRE_WRITE_2_VALUE,w,u32,u32,,write,,Other,
+1304,FLEXWIRE_WRITE_VALUE,w,i32,i32,,dangerous,,EEPROM and registers,
+1305,FLEXWIRE_WRITE_2_VALUE,w,u32,u32,,dangerous,,EEPROM and registers,
 1306,SET_RX1_DSP_MODE,w,u32,u32,,write,,Tuning and receive path,"Tells firmware the demod mode. enum DSPMode: 0 LSB, 1 USB, 2 DSB, 3 CWL, 4 CWU, 5 FM, 6 AM, 7 DIGU, 8 SPEC, 9 DIGL, 10 SAM, 11 DRM"
 1307,SET_RX2_ANT,w,u32,u32,,write,,Tuning and receive path,"0 N/C, 1 ANT1, 2 ANT2, 3 ANT3, 4 RX1 IN, 5 RX2 IN, 6 RX1 TAP, 7 SIG GEN, 8 VHF, 9 UHF. RX2 valid choices: N/C, RX2 IN, RX1 TAP (default), ANT1 (not on early HRFIO ASSY 27)."
 1308,READ_RX2_EEPROM_UINT8,r,u32,u32,u32,read,,Tuning and receive path,
@@ -200,8 +200,8 @@ number,name,access,data1,data2,result,safety,in_use,group,note
 1339,SET_ATU_ATTN,w,u32,u32,,write,,Tuning and receive path,
 1340,SET_PDRVMON,w,u32,u32,,write,,Transmit and keying,
 1341,SET_RX_ATTN,w,u32,u32,,write,,Tuning and receive path,0/1 receive attenuator (FLEX-3000 path calls it at init; 5000 uses SET_ATT_*/preamp per band).
-1342,FLEXWIRE_READ_VALUE,r,u32,u32,u32,read,,Other,
-1343,FLEXWIRE_READ_2_VALUE,r,u32,u32,u32,read,,Other,
+1342,FLEXWIRE_READ_VALUE,r,u32,u32,u32,read,,EEPROM and registers,
+1343,FLEXWIRE_READ_2_VALUE,r,u32,u32,u32,read,,EEPROM and registers,
 1344,SET_FAN_PWM,w,u32,u32,,dangerous,,"PA, fan and power",Fan PWM duty.
 1345,SET_FAN_SPEED,w,f32,u32,,dangerous,,"PA, fan and power",Fan speed.
 1346,SYNC_PHASE,?,u32,u32,,dangerous,,Other,

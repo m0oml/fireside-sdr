@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <cctype>
 #include <ctime>
 #include <sstream>
 #include <stdexcept>
@@ -452,5 +454,106 @@ TxControl::GenCheck TxControl::sig_gen_check(double dial_mhz, double tone_hz, co
     if (std::fabs(r.peak_hz - tone_hz) > 150) { r.why = "the strongest signal was at " + std::to_string(int(std::lround(r.peak_hz))) + " Hz, not at the generator's " + std::to_string(int(tone_hz)) + " Hz"; return r; }
     if (r.on_dbfs > -3) { r.why = "the generator overloads the receiver"; return r; }
     r.ok = true; return r;
+}
+}  // namespace fireside::txc
+
+namespace fireside::txc {
+CwResult TxControl::cw(double mhz, ICwKeys& keys, const CwOptions& c, const ProgressFn& p, const LogFn& log) {
+    std::lock_guard<std::mutex> l(op_); CwResult r; Busy b(*this);
+    auto no = [&](const std::string& w) { r.why_not = w; say(log, "CW refused: " + w); return r; };
+    auto steady = [] { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };   // thread-safe (the generator uses it)
+    const double t_call = steady();
+    if (!armed_) return no("transmit is not armed");
+    const int band = txm::band_of(mhz * 1e6);
+    if (band < 0 || txm::band_of(mhz * 1e6 - 200) != band || txm::band_of(mhz * 1e6 + 200) != band) return no("outside the amateur bands");
+    if (!(c.power_w >= 1 && c.power_w <= txs::kMaxWatts)) return no("power must be 1..100 W");
+    if (!(c.hang_s >= 0.05 && c.hang_s <= 3)) return no("the break-in delay must be 0.05..3 s");
+    if (!(c.max_over_s > 0 && c.max_over_s <= 1800) || !(c.max_keydown_s >= 1 && c.max_keydown_s <= 60)) return no("bad time limits");
+    if (!(c.o.rate >= 8000 && c.o.rate <= 384000)) return no("bad stream rate");
+    for (char ch : c.text) if (!(std::isalnum(static_cast<unsigned char>(ch)) || std::strchr(" .,?/=+-", ch))) return no(std::string("cannot send '") + ch + "' in Morse");
+    const double k = k_for(band); if (!(k > 1000)) return no("no measured drive level on this band: press Measure drive first");
+    double power_w = c.power_w, drive = std::sqrt(power_w / k); const double dcap = drive_cap(band);
+    if (!(drive > 0)) return no("no usable drive for this power on this band");
+    if (drive > dcap) {
+        drive = dcap; power_w = std::max(1.0, dcap * dcap * k); r.limited_to_w = power_w;
+        char m[160]; std::snprintf(m, sizeof m, "%.0f W is above this band's limit: CW at %.1f W (the drive ceiling)", c.power_w, power_w); say(log, m);
+    }
+    tx::KeyerConfig kc = c.keyer; kc.sample_rate = c.o.rate;
+    std::unique_ptr<tx::IambicKeyer> keyer; std::unique_ptr<tx::CwShaper> shaper; std::vector<uint8_t> text_key;
+    try {
+        keyer = std::make_unique<tx::IambicKeyer>(kc);
+        shaper = std::make_unique<tx::CwShaper>(tx::CwShapeConfig{c.o.rate, c.edge_ms, kCwOffsetHz, 1.0});
+        if (!c.text.empty()) text_key = tx::text_keying(c.text, kc.wpm, c.o.rate, 0.0);
+    } catch (const std::exception& e) { return no(e.what()); }
+    if (!c.text.empty() && std::find(text_key.begin(), text_key.end(), uint8_t(1)) == text_key.end()) return no("nothing to send in that text");
+    if (c.o.tx_ant < 1 || c.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
+    prepare(mhz - kCwOffsetHz / 1e6, 4, c.o.tx_ant);                                   // CWU; the TX DDS 1 kHz below the dial, the tone 1 kHz above it: the carrier on the dial
+    txo::ToneSource src(c.o.rate, 8); src.set_cap(std::min(dcap, drive * 1.05)); src.set_target(drive); src.set_mirror(c.o.mirror_q);
+    src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(c.o.rate * 0.05));
+    // The generator: ~1 ms blocks, keeping only kLead of them queued ahead of the stream (the shorter, the sooner a paddle press is heard on the air).
+    const size_t blk = std::max<size_t>(8, size_t(std::lround(c.o.rate / 1000))), lead = blk * 6;
+    std::atomic<bool> stop{false}, go{false}, done{false}, stuck{false}; std::atomic<bool> text_done{c.text.empty()}, text_stopped{false};
+    std::atomic<double> first_key_t{-1};
+    std::thread gen([&] {
+        std::vector<uint8_t> key(blk); std::vector<tx::cf> iq; std::vector<std::complex<float>> out; size_t text_pos = 0;
+        const size_t hang = size_t(c.hang_s * c.o.rate), max_down = size_t(c.max_keydown_s * c.o.rate);
+        size_t since_down = 0, down_run = 0; bool any = false;
+        while (!stop) {
+            if (src.live_queued() >= lead) { std::this_thread::sleep_for(std::chrono::microseconds(250)); continue; }
+            if (!go) { std::fill(key.begin(), key.end(), 0); }                          // MOX not on yet: silence (the paddle presses wait in `keys`)
+            else {
+                uint8_t pad = keys.paddles() & 3;
+                bool paddle_mode = text_done.load();
+                if (!paddle_mode && pad) { text_done = true; text_stopped = true; paddle_mode = true; }   // touching the paddle stops the text
+                for (size_t i = 0; i < blk; ++i) {
+                    bool kd;
+                    if (!paddle_mode) { kd = text_pos < text_key.size() && text_key[text_pos]; if (++text_pos >= text_key.size()) { text_done = true; paddle_mode = true; } }
+                    else if (c.straight) kd = pad != 0;
+                    else kd = keyer->step(pad & 1, pad & 2);
+                    key[i] = kd;
+                    if (kd) { since_down = 0; ++down_run; if (!any) { any = true; first_key_t = steady(); } } else { ++since_down; down_run = 0; }
+                    if (down_run > max_down) stuck = true;
+                }
+                if (stuck) std::fill(key.begin(), key.end(), 0);
+                if (text_done && (c.straight || keyer->idle()) && since_down >= hang && !pad) done = true;   // the break-in delay has passed with the key up
+            }
+            iq.clear(); shaper->process(key.data(), key.size(), iq);
+            out.assign(iq.begin(), iq.end());
+            size_t w = 0; while (w < out.size() && !stop) { w += src.push_live(out.data() + w, out.size() - w); if (w < out.size()) std::this_thread::sleep_for(std::chrono::microseconds(250)); }
+            if (c.sidetone && go) { try { c.sidetone(key.data(), key.size(), c.o.rate); } catch (...) {} }
+            if (done || stuck) break;
+        }
+    });
+    struct Join { std::atomic<bool>& s; std::thread& t; ~Join() { s = true; if (t.joinable()) t.join(); } } join{stop, gen};
+    txo::Stream st(pcm_(c.o.rate), src);
+    for (int i = 0; i < 40 && src.live_queued() < lead / 2; ++i) clk_.sleep(0.002);
+    if (st.failed()) return no("the I/Q stream failed to start");
+    GateConfig gc; gc.max_key_s = c.max_over_s; gc.max_fwd_w = fwd_limit_w(power_w); gc.max_rev_w = std::max(2.0, 0.5 * power_w); gc.max_swr = 3.0;
+    gc.grace_s = kOverGraceS; gc.hard_fwd_w = hard_fwd_limit_w(power_w);
+    KeyHook kh(key_hook_, kCwOffsetHz);                                                     // the DDS 1 kHz below the dial for the over
+    TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
+    if (!gate.key("CW", gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
+    keyed_ = true; r.keyed = true; src.set_keyed(true);
+    clk_.sleep(0.008);                                                                       // the T/R relays settle before the first element (no hot switching)
+    go = true; const double t0 = clk_.now(); double last_trim = t0;
+    while (gate.keyed()) {
+        if (abort_) { gate.unkey("aborted"); break; }
+        if (stuck) { char m[120]; std::snprintf(m, sizeof m, "key held down for %.0f s (stuck key?): time limit", c.max_keydown_s); gate.unkey(m); break; }
+        if (done && src.live_queued() == 0) { clk_.sleep(std::min(0.2, st.latency_s() + 0.01)); gate.unkey("CW over finished"); break; }   // the last samples played out first
+        if (st.failed()) { gate.unkey("the I/Q stream failed"); break; }
+        txm::Reading rd;
+        try { rd = txm::read(cal_.meter, band, int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcFwd)), int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcRev))); }
+        catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
+        r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (p) p({clk_.now() - t0, src.level(), rd});
+        gate.report(rd); gate.tick(); if (!gate.keyed()) break;
+        if (rd.fwd_w > 1.1 * power_w && clk_.now() - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = clk_.now(); }   // ALC: only ever down
+        clk_.sleep(0.02);
+    }
+    src.set_keyed(false); gate.ensure_unkeyed(2.0); keyed_ = false;
+    r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns();
+    r.text_done = text_done && !text_stopped; r.text_stopped = text_stopped; r.key_delay_s = first_key_t >= 0 ? first_key_t - t_call : 0; r.queue_ms = 1000.0 * double(lead) / c.o.rate;
+    note_stop(r.stop);
+    char m[220]; std::snprintf(m, sizeof m, "CW: %s, %.1f s, max %.1f W (set %.0f W), first element %.0f ms after the key", r.stop.c_str(), r.seconds, r.max_fwd_w, power_w, 1000 * r.key_delay_s); say(log, m);
+    return r;
 }
 }  // namespace fireside::txc

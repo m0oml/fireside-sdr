@@ -14,7 +14,7 @@ GROUPS = [("Identity, status and firmware", r"GET_(MODEL|SERIAL|FIRMWARE|STATUS|
           ("Tuning and receive path", r"FREQ|RX1_|RX2_|_RX_|PREAMP|ATT|FILTER|_ANT|LOOP|DSP_MODE|QSD|MUX|TAP|DDS|SAMPLE"),
           ("Audio codec and outputs", r"CODEC|SPKR|HEADPHONE|CHANNEL|MUTE|VOL"),
           ("Transmit and keying", r"MOX|TX|_TR$|FULL_DUPLEX|AMP_|RCA_|PDRV|BREAK|IAMBIC|CW_|XV|PTT|KEY"),
-          ("ATU", r"ATU"), ("EEPROM and registers", r"EEPROM|REG|POT|RDAC|GPIO|I2C|FIRESIDEWIRE|PIO|CLOCK|PLL"),
+          ("ATU", r"ATU"), ("EEPROM and registers", r"EEPROM|REG|POT|RDAC|GPIO|I2C|FLEXWIRE|PIO|CLOCK|PLL"),
           ("PA, fan and power", r"PA_|FAN|POWER|BIAS|STANDBY|PWRBT|RESET|ADC"),
           ("VU (VHF/UHF) module", r"VU_|FWC_OP"), ("Other", r".")]
 

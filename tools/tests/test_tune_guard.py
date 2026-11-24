@@ -212,6 +212,20 @@ class TuningIsOneOpcode(unittest.TestCase):
         h = code("core/include/fireside/tx_control.h") + code("core/src/tx_control.cpp")
         self.assertIn("siggen::off(fx_)", h)                                         # the check always switches it off again
 
+    def test_cw_key_input_only_reads_and_the_cw_screen_keys_only_through_tx_control_cw(self):
+        """The paddle watcher reads the EVENT register (or READ_PTT) and nothing else; the CW part of the Transmit card keys only through TxControl::cw
+        (the gate, its limits and the hard clamp), never MOX or the gate itself."""
+        w = code("core/src/cw_keys.cpp") + code("core/include/fireside/cw_keys.h")
+        for bad in (".set(", "MOX", "TxGate", "key(", "allow_write", "permit("):
+            self.assertNotIn(bad, w, bad)
+        g = code("gui/TransmitCardCw.cpp", strip_strings=True)
+        self.assertEqual(re.findall(r"\bt\.(\w+)\(", g), ["cw"])
+        for bad in ("TxGate", "SET_MOX", "set_keyed", ".set(", "Flex"):
+            self.assertNotIn(bad, g, bad)
+        s = code("core/src/session.cpp")
+        body = s[s.index("RadioSession::read_keys"):]; body = body[:body.index("\n}") + 2]
+        self.assertEqual(re.findall(r'"(RDAL_OP_\w+)"', body), ["RDAL_OP_READ_PTT"]); self.assertIn("read_event()", body); self.assertNotIn(".set(", body)
+
     def test_only_tune_cpp_and_startup_cpp_write(self):
         offenders = []
         for root in ("core/src", "gui", "tools"):

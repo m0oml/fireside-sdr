@@ -62,6 +62,39 @@ struct VoiceOptions {
 };
 struct VoiceResult { bool keyed = false, unkey_failed = false; std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0, limited_to_w = 0; uint64_t underruns = 0; };
 
+// CW: a keyed carrier exactly ON the dial (where the receiver's CW mode listens; it makes the beat note itself). As PowerSDR does in CWU, the DDS
+// sits below the dial for the over (kCwOffsetHz) and the keyed tone is generated that far above it, through the same live ToneSource (mirror,
+// image correction, HARD clamp) as voice. Semi break-in: MOX goes on at the first key-down; the first element waits for it (it is delayed, never
+// shortened) and MOX drops hang_s after the last key-up, when the carrier has long been at zero (no hot switching).
+inline constexpr double kCwOffsetHz = 1000;
+// The key input: bit 0 = dit paddle (or a straight key), bit 1 = dah paddle. paddles() returns the current state OR any press seen since the last
+// call, so a tap shorter than the polling interval is not lost. Called from the over's generator thread about once a millisecond.
+class ICwKeys {
+public:
+    virtual ~ICwKeys() = default;
+    virtual uint8_t paddles() = 0;
+};
+struct CwOptions {
+    Options o;
+    double power_w = 20;                          // key-down power, 1..100 W
+    tx::KeyerConfig keyer;                        // speed, weight, iambic A / B, reverse paddles (sample_rate is set from o.rate)
+    bool straight = false;                        // a straight key (or an external keyer) on the key jack: either contact keys directly, no keyer
+    double hang_s = 0.6;                          // break-in delay: MOX stays on this long after the last key-up (0.05..3 s)
+    double edge_ms = 5;                           // rise / fall time of each element (1..20 ms): no key clicks
+    double max_over_s = 600;                      // the time-out for one over
+    double max_keydown_s = 15;                    // the key held down longer than this (a stuck key, a shorted lead) unkeys
+    std::string text;                             // sent at the keyer's speed (A-Z 0-9 . , ? / = + - and spaces); touching the paddle stops it. Empty: the paddle only
+    // Called on the generator thread with the key state of every block (one byte per sample at o.rate): the PC sidetone follows it. Must not block.
+    std::function<void(const uint8_t* key, size_t n, double rate)> sidetone;
+};
+struct CwResult {
+    bool keyed = false, unkey_failed = false, text_done = false, text_stopped = false;   // text_stopped: the paddle was touched while the text was sent
+    std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0, limited_to_w = 0;
+    double key_delay_s = 0;                       // from the call to the first element (MOX on and settled): how late the first element starts
+    double queue_ms = 0;                          // the generator's lead over the stream (excludes the stream's own latency)
+    uint64_t underruns = 0;
+};
+
 struct SendResult {
     bool sent = false, unkey_failed = false, estimated_drive = false; std::string why_not, stop; double limited_to_w = 0;   // > 0: sent at the band's drive ceiling (this many W), below the power asked
     double slot_utc = 0, late_s = 0, max_fwd_w = 0, mean_fwd_w = 0, drive = 0, k = 0; std::optional<double> swr;
@@ -117,8 +150,9 @@ public:
                              const ProgressFn& p = {}, const LogFn& log = {}, double min_lead_s = 1.5);
     void set_utc_source(std::function<double()> utc) { utc_ = std::move(utc); }   // tests; default: the system clock
     // Called with true right before every key-down and with false right after the unkey (the session moves the shared RX1/TX DDS onto
-    // the dial for the over and back to the receive IF shift afterwards, as PowerSDR does). Must not throw.
-    void set_key_hook(std::function<void(bool keyed)> h) { key_hook_ = std::move(h); }
+    // the dial for the over and back to the receive IF shift afterwards, as PowerSDR does). dds_below_dial_hz: where the DDS goes for the over
+    // (0 = on the dial; a CW over: kCwOffsetHz below it). Must not throw.
+    void set_key_hook(std::function<void(bool keyed, double dds_below_dial_hz)> h) { key_hook_ = std::move(h); }
     // A safety stop is not a normal end of an over: a power / SWR / reflected limit, the key-down time limit, a meter, stream or audio failure, no power at the
     // 1 W point, the radio refusing the key, or an unkey that did not get through. The hook is called (on the worker thread) with the reason right after
     // any operation that ended that way, so the GUI can show it where it cannot be missed. Normal ends (finished, PTT released, Stop) never call it.
@@ -129,6 +163,9 @@ public:
     // measured level (refused without one); it is only ever trimmed DOWN, when the forward meter reads peaks above 1.1 x peak_w.
     // Gate: forward <= fwd_limit_w(peak_w) (0.15 s grace), <= hard_fwd_limit_w at once, SWR <= 3, reflected <= 0.5 x peak_w (min 2 W), the time-out. The DDS key hook as for every over.
     VoiceResult voice(double dial_mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p = {}, const LogFn& log = {});
+    // CW over (semi break-in): see CwOptions. Blocks until the over ends: hang_s after the last key-up (and the text sent), abort(), a limit, or the
+    // time-out. Refused without a measured drive level on the band.
+    CwResult cw(double dial_mhz, ICwKeys& keys, const CwOptions& c, const ProgressFn& p = {}, const LogFn& log = {});
     // No RF: put a band's stored relays back. false if nothing is stored or the tuner does not report them.
     bool restore_relays(int band, const LogFn& log = {});
     // Receive-level check with the radio's built-in signal generator (siggen.h; PowerSDR CalibrateLevel for the FLEX-5000). Holds the transmit lock for
@@ -144,9 +181,9 @@ public:
 private:
     std::optional<atu::Status> atu_report_locked();               // the same, for callers already holding op_
     Flex& fx_; PcmFactory pcm_; atu::Clock clk_; std::function<double()> utc_; txs::TxCal cal_; atu::Atu atu_; atu::Memory mem_; std::map<int, double> k_;
-    std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool)> key_hook_; std::function<void(const std::string&)> trip_hook_;
+    std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool, double)> key_hook_; std::function<void(const std::string&)> trip_hook_;
     void note_stop(const std::string& s) { if (trip_hook_ && is_safety_stop(s)) { try { trip_hook_(s); } catch (...) {} } }
-    struct KeyHook { const std::function<void(bool)>& h; explicit KeyHook(const std::function<void(bool)>& f) : h(f) { if (h) h(true); } ~KeyHook() { if (h) try { h(false); } catch (...) {} } };   // declared before the TxGate: its end runs after the unkey
+    struct KeyHook { const std::function<void(bool, double)>& h; explicit KeyHook(const std::function<void(bool, double)>& f, double below_hz = 0) : h(f) { if (h) h(true, below_hz); } ~KeyHook() { if (h) try { h(false, 0); } catch (...) {} } };   // declared before the TxGate: its end runs after the unkey
     void prepare(double freq_mhz, uint32_t dsp_mode, int tx_ant); // TX antenna (1..3, else std::invalid_argument before any write), mode, DDS, filter, offset, carrier null
     struct Busy { TxControl& c; explicit Busy(TxControl& x) : c(x) { c.busy_ = true; c.abort_ = false; } ~Busy() { c.busy_ = false; c.keyed_ = false; } };
 };

@@ -1,4 +1,5 @@
 #include "fireside/qso_seq.h"
+#include "fireside/dxcc.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -96,6 +97,7 @@ bool Sequencer::heard(const Heard& h) {
     if (!h.ok || !to_me(h)) return false;
     if (st_ == Stage::Cq) {                                                                          // someone answered our CQ (a grid or a report): they become DX
         if (h.rr73 || h.rrr || h.seventy3) return false;                                             // a late RR73/73 from an earlier QSO is not an answer to the CQ
+        if (!decode::callsign_prefix_known(h.from)) return false;                                     // a callsign no country uses: a false decode, never answered by itself
         return reply_to(h);
     }
     // RR73 went out and nothing came back in time, so we stopped; their R-report again a little later (they missed it): RR73 once more (twice at most)

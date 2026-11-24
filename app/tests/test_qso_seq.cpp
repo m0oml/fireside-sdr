@@ -31,6 +31,7 @@ TEST(seq_answers_a_cq_through_to_73_and_logs_once) {
 TEST(seq_calls_cq_and_works_the_first_caller) {
     seq::Sequencer s("M0OML", "IO92");
     s.call_cq(); CHECK_EQ(s.next_message(), std::string("CQ M0OML IO92"));
+    CHECK(!s.heard(H("M0OML 0J0BQR JA35", -17))); CHECK(s.stage() == seq::Stage::Cq);                       // a callsign no country uses (a false decode): not answered
     CHECK(s.heard(H("M0OML SP9ABC KN09", -14))); CHECK_EQ(s.dx(), std::string("SP9ABC")); CHECK_EQ(s.next_message(), std::string("SP9ABC M0OML -14"));
     CHECK(!s.heard(H("M0OML OH2XYZ KP20")));                                         // a second caller waits
     CHECK(s.heard(H("M0OML SP9ABC R-09"))); CHECK_EQ(s.next_message(), std::string("SP9ABC M0OML RR73"));

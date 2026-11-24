@@ -117,7 +117,7 @@ class Safety(unittest.TestCase):
 
     def test_dangerous_blocked_even_with_allow_write(self):
         fx = Flex(self.t, allow_write=True)
-        for op in ("WRITE_TRX_EEPROM_UINT8", "SET_EEPROM_WC", "REG_SET", "I2C_WRITE_VALUE",
+        for op in ("WRITE_TRX_EEPROM_UINT8", "SET_EEPROM_WC", "REG_SET", "I2C_WRITE_VALUE", "FLEXWIRE_WRITE_VALUE", "FLEXWIRE_WRITE_2_VALUE",
                    "SET_PA_BIAS", "SET_POWER_OFF", "NOOP", "SET_MOX", "ATU_SEND_CMD", "SET_TR"):
             with self.assertRaises(SafetyError, msg=op): fx.set(op, 1, 1)
         self.assertEqual(self.sent(), [])

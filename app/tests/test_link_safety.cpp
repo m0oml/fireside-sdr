@@ -24,6 +24,9 @@ TEST(safety_gates) {
     CHECK(Safety::matches_dangerous("RDAL_OP_SET_PA_BIAS")); CHECK(!Safety::matches_dangerous("RDAL_OP_SET_RX1_FREQ"));
     for (const char* n : {"RDAL_OP_SET_PA_FILTER", "RDAL_OP_BYPASS_PA_FILTER", "RDAL_OP_BYPASS_TX_FILTER", "RDAL_OP_SET_TX_FILTER"})
         CHECK(Safety::matches_dangerous(n));                                          // the PA and TX filters switch transmit hardware
+    for (const char* n : {"RDAL_OP_FLEXWIRE_WRITE_VALUE", "RDAL_OP_FLEXWIRE_WRITE_2_VALUE", "RDAL_OP_I2C_WRITE_VALUE"})
+        CHECK(Safety::matches_dangerous(n));                                          // the rear accessory bus drives outside equipment (amplifiers, band decoders)
+    CHECK(!Safety::matches_dangerous("RDAL_OP_FLEXWIRE_READ_VALUE"));
 }
 TEST(get_over_pty_and_stale_replies) {
     FakeRadio radio; RawMidi t(radio.path()); MidiLink link(t); Flex fx(link);

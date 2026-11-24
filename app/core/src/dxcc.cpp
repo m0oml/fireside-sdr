@@ -48,6 +48,29 @@ Entity dxcc_entity(const std::string& in) {
     const DxccEntry* e = dxcc_lookup(pre); if (!e) return out;
     out = {true, e->dxcc, e->cont, e->cq, e->itu}; return out;
 }
+namespace {
+bool callsign_shaped(const std::string& w) {                       // WSJT-X's callok: the call-area digit 2nd or 3rd, a letter before it, letters after it
+    const int n = int(w.size()); if (n < 3) return false;
+    int i0 = -1; for (int i = n - 1; i >= 0; --i) if (std::isdigit(static_cast<unsigned char>(w[size_t(i)]))) { i0 = i; break; }
+    if (i0 != 1 && i0 != 2) return false;
+    bool letter = false; for (int i = 0; i < i0; ++i) if (std::isalpha(static_cast<unsigned char>(w[size_t(i)]))) letter = true;
+    if (!letter) return false;
+    for (int i = i0 + 1; i < n; ++i) if (!std::isalpha(static_cast<unsigned char>(w[size_t(i)]))) return false;
+    return true;
+}
+}  // namespace
+bool callsign_prefix_known(const std::string& in) {
+    if (in.empty() || in[0] == '<') return true;                                                      // a hashed call: nothing to check
+    std::string call; for (char ch : in) call += char(std::toupper(static_cast<unsigned char>(ch)));
+    if (exact_index().count(call)) return true;
+    size_t a = 0;
+    for (;;) {
+        const size_t b = call.find('/', a); const std::string p = call.substr(a, b == std::string::npos ? std::string::npos : b - a);
+        if (callsign_shaped(p) && !exact_index().count(p) && !dxcc_lookup(p)) return false;
+        if (b == std::string::npos) break; a = b + 1;
+    }
+    return true;
+}
 bool grid4_center(const std::string& g, double& lat, double& lon) {
     if (g.size() != 4 || g[0] < 'A' || g[0] > 'R' || g[1] < 'A' || g[1] > 'R' || g[2] < '0' || g[2] > '9' || g[3] < '0' || g[3] > '9') return false;
     lon = (g[0] - 'A') * 20.0 - 180.0 + (g[2] - '0') * 2.0 + 1.0; lat = (g[1] - 'A') * 10.0 - 90.0 + (g[3] - '0') + 0.5; return true;

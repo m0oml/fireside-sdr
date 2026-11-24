@@ -319,6 +319,14 @@ bool location_plausible(const char* text) {
     return callsign_grid_plausible(call, t.back());
 }
 
+// Every word of the message that looks like a callsign must have a prefix some country uses (dxcc.h). Weak and a-priori decodes only.
+bool calls_known(const char* text) {
+    std::string cur; for (const char* c = text;; ++c) { if (*c == ' ' || *c == 0) { if (!cur.empty() && !callsign_prefix_known(cur)) return false; cur.clear(); if (!*c) break; } else cur += *c; }
+    return true;
+}
+std::mutex g_false_m; FalseDrops g_false;
+void note_false(const char* text) { std::lock_guard<std::mutex> l(g_false_m); ++g_false.count; g_false.last = text; }
+
 // ---------------------------------------------------------------- multi-pass decoding with signal subtraction (as WSJT-X does)
 // A decoded message gives the exact tones sent, so its waveform can be rebuilt, fitted to the audio and subtracted; signals underneath it
 // (overlapping in time and frequency on a busy band) then decode in the next pass.
@@ -440,7 +448,8 @@ std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable
                 if (!decode_extra_type(msg.payload, &hif, extra)) continue;
                 std::snprintf(text, sizeof text, "%s", extra.c_str());
             }
-            if (fallback && !location_plausible(text)) { if (dbg_drop) std::fprintf(stderr, "DROP %s location '%s'\n", label.c_str(), text); continue; }                                    // a weak decode with an impossible locator: false (kept in `decoded`: not retried)
+            if (fallback && !calls_known(text)) { if (dbg_drop) std::fprintf(stderr, "DROP %s unknown-prefix '%s'\n", label.c_str(), text); note_false(text); continue; }                                  // a weak / a-priori decode with a callsign no country uses ("M0OML 0J0BQR JA35"): false
+            if (fallback && !location_plausible(text)) { if (dbg_drop) std::fprintf(stderr, "DROP %s location '%s'\n", label.c_str(), text); note_false(text); continue; }                                    // a weak decode with an impossible locator: false (kept in `decoded`: not retried)
             if (fallback && !ft4 && (std::strstr(text, "/R") || std::strncmp(text, "TU; ", 4) == 0)) { if (dbg_drop) std::fprintf(stderr, "DROP %s contest-form '%s'\n", label.c_str(), text); decoded.pop_back(); continue; }   // WSJT-X: implausible outside contests
             if (fallback) {                                                                          // weak decodes: how much evidence a message type needs (measured on 12000 noise slots and 250 real weak decodes)
                 const unsigned i3 = get_bits(msg.payload, 74, 3);
@@ -487,6 +496,7 @@ std::vector<Ft8Message> decode_slot_with(const float* audio, size_t n, HashTable
     return out;
 }
 }  // namespace
+FalseDrops false_decodes_dropped() { std::lock_guard<std::mutex> l(g_false_m); return g_false; }
 
 std::string hash_table_self_check() {
     auto t = std::make_unique<HashTable>(); char out[16];

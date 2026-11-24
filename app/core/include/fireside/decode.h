@@ -139,4 +139,8 @@ std::vector<float> synth_psk31(const std::string& text, double center_hz, double
 std::vector<float> synth_rtty(const std::string& text, double mark_hz = 2125, double shift_hz = 170, double baud = 45.45, double fs = 48000, double amplitude = 0.5, double lead_s = 0.5, bool reverse = false);
 // Adds white Gaussian noise of the given RMS (deterministic for a seed).
 void add_noise(std::vector<float>& x, double rms, uint32_t seed = 1);
+// Weak / a-priori decodes thrown away as false since the program started (a callsign no country uses, or an impossible locator), and the last one.
+struct FalseDrops { unsigned long count = 0; std::string last; };
+FalseDrops false_decodes_dropped();
+
 }  // namespace fireside::decode

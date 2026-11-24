@@ -422,7 +422,7 @@ void ReceiverPanel::setDialHz(double hz) { freq_->setHz(hz); }                  
 
 RxOptions ReceiverPanel::options() const {
     RxOptions o; o.threaded = threaded_;
-    o.rc.if_offset_hz = if_->currentIndex() == 0 && !tx_on_dial_ ? dsp::kIfOffsetHz : 0.0; o.rc.mirror = mirror_->isChecked();   // keyed: the DDS is on the dial
+    o.rc.if_offset_hz = tx_on_dial_ ? tx_dds_below_ : if_->currentIndex() == 0 ? dsp::kIfOffsetHz : 0.0; o.rc.mirror = mirror_->isChecked();   // keyed: the DDS is on the dial
     if (tune_sw_) o.rc.if_offset_hz += (o.rc.mirror ? -1.0 : 1.0) * (dialHz() - ref_hz_);                                                      // a recording or the demo: tuning moves the receiver within the recording (a radio would move its DDS)
     o.dc.mode = static_cast<dsp::Mode>(modeIndex()); o.dc.agc = static_cast<dsp::AgcMode>(agcIndex()); o.dc.manual_gain_db = double(gain_->value()); o.dc.noise_blanker = nb_->isChecked();
     o.dc.noise_reduction = nr_->isChecked(); o.dc.spectral_nr = nr2_->isChecked() && decoderIndex() < 2; o.dc.auto_notch = anf_->isChecked(); o.dc.notch_hz = notch_list_.empty() ? 0.0 : notch_list_[0]; for (size_t i = 1; i < notch_list_.size(); ++i) o.dc.extra_notches_hz.push_back(notch_list_[i]);
@@ -445,6 +445,7 @@ void ReceiverPanel::applySettings() {
 void ReceiverPanel::settingsChanged() { applySettings(); updateStatus(); }
 
 void ReceiverPanel::adopt(std::unique_ptr<IqSource> s, bool nineKhz, bool live) {
+    rx_lost_sent_ = false;
     direct_rate_ = 0; syncRateButtons(0);                                // a new source is not the direct stream until loadLiveDirect says so
     forgetLiveDevice();                                                  // a new source: audio goes back to the PC until a live radio capture is open again
     setPlaying(false); const double fs = s->sample_rate(); engine_.set_source(std::move(s));
@@ -501,7 +502,8 @@ bool ReceiverPanel::loadLiveDirect(unsigned rate) {
         if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) QSettings("fireside", "receiver").setValue("direct_rate", rate);
         setPlaying(true);
         if (note_.startsWith("Duplex stream refused")) { /* keep the reason */ }
-        else note_ = QString("Direct FireWire stream at %1 kHz (%2 kHz of band)%3. Audio plays on the PC; the radio-jacks output needs the ALSA capture.").arg(rate / 1000).arg(rate / 1000).arg(fw_iso_duplex_running() ? ", duplex: transmit keeps receive running" : "");
+        else { note_ = QString("Direct stream %1 kHz%2").arg(rate / 1000).arg(fw_iso_duplex_running() ? ", duplex" : "");   // short: the status line is one line
+               appLog("receiver", QString("Direct FireWire stream at %1 kHz%2. Audio plays on the PC; the radio-jacks output needs the ALSA capture.").arg(rate / 1000).arg(fw_iso_duplex_running() ? ", duplex: transmit keeps receive running" : "")); }
         { const std::string n = fw_iso_last_open_note(); if (!n.empty()) { note_ += QString(" Note: %1.").arg(QString::fromStdString(n)); appLog("receiver", QString::fromStdString(n)); } }
         updateStatus(); return playing_;
     } catch (const std::exception& e) { note_ = QString("Cannot start the direct stream: ") + e.what(); appLog("receiver", note_); updateStatus(); return false; }
@@ -583,7 +585,7 @@ void ReceiverPanel::refresh() {
     if (!frames.empty()) { spectrum_->setScale(scale_); spectrum_->setFrame(frames.back()); }
     audio_buf_.clear(); engine_.take_audio(audio_buf_);
     if (data_out_ && !audio_buf_.empty()) data_out_->push(audio_buf_, data_gain_);                     // other programs: fixed level, not muted
-    if (!mute_->isChecked() && !audio_buf_.empty()) {
+    if (!mute_->isChecked() && !tx_mute_ && !audio_buf_.empty()) {
         if (radio_out_) { radio_out_->set_volume(float(volume_->value()) / 100.0f); try { radio_out_->push(audio_buf_.data(), audio_buf_.size()); } catch (const std::exception& e) { note_ = QString("Radio audio stopped: ") + e.what(); radio_out_.reset(); QSignalBlocker b(out_target_); out_target_->setCurrentIndex(0); out_pair_->setEnabled(false); } }
         else audioOut_->push(audio_buf_, float(volume_->value()) / 100.0f);
     }
@@ -591,6 +593,7 @@ void ReceiverPanel::refresh() {
     peak_hz_ = st.peak_hz; peak_db_ = st.peak_db; signal_dbfs_ = st.signal_dbfs; chk_dbfs_ = st.signal_dbfs; chk_peak_hz_ = st.peak_hz; audio_total_ = size_t(st.audio_samples);
     if (playing_ && !st.running) { playing_ = false; QSignalBlocker b(play_); play_->setChecked(false); play_->setText("Play"); }
     if (st.ended) note_ = "End of recording."; else if (!st.error.empty()) note_ = QString("Stopped: ") + QString::fromStdString(st.error);
+    if (!st.error.empty() && st.live && !rx_lost_sent_) { rx_lost_sent_ = true; appLog("receiver", "receive lost: " + QString::fromStdString(st.error)); emit receiveLost(QString::fromStdString(st.error)); }   // once per source: auto transmit stops (it cannot hear the answers)
     if (!st.error.empty() && st.live && direct_rate_ > 0 && !restart_pending_) restartDirect(QString::fromStdString(st.error));   // the direct stream died: bring it back
     { std::string t; if (engine_.take_text(t) > 0) addDecodedText(QString::fromStdString(t));
       if (decoderIndex() != 0) dec_status_->setText(st.decoder.empty() ? "Waiting for a signal..." : QString::fromStdString(st.decoder)); }
@@ -989,9 +992,9 @@ void ReceiverPanel::addQsoLine(const QString& line, int kind) {       // kind 1 
     else f.setForeground(QColor("#c9d1dc"));
     c.setBlockFormat(bf); c.insertText(line, f); qso_text_->moveCursor(QTextCursor::End); qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum());
 }
-void ReceiverPanel::setTransmitting(bool keyed) {
-    if (keyed == tx_on_dial_) return;
-    tx_on_dial_ = keyed; const QString keep = note_; applySettings(); note_ = keep; updateStatus();
+void ReceiverPanel::setTransmitting(bool keyed, double below) {
+    if (keyed == tx_on_dial_ && (!keyed || below == tx_dds_below_)) return;
+    tx_on_dial_ = keyed; tx_dds_below_ = keyed ? below : 0; const QString keep = note_; applySettings(); note_ = keep; updateStatus();
 }
 void ReceiverPanel::peekDecode() { engine_.peek_decoder(); std::string t; if (engine_.take_text(t) > 0) addDecodedText(QString::fromStdString(t)); }
 void ReceiverPanel::clearQso() { if (qso_text_) qso_text_->clear(); qso_partner_.clear(); done_qsos_.clear(); qso_start_block_ = -1; emit qsoCleared(); }
@@ -1096,11 +1099,11 @@ void ReceiverPanel::setTransmitMeters(QWidget* power, QLabel* status, QWidget* a
     tx_meter_ = power; meters_grid_->addWidget(power, 0, 0); power->setVisible(false);
     auto* sr = new QHBoxLayout; sr->setSpacing(8); sr->addWidget(arm); sr->addWidget(status, 1); meters_grid_->addLayout(sr, 1, 0);
     meters_grid_->setColumnStretch(0, 1);
-    tx_meter_hold_ = new QTimer(this); tx_meter_hold_->setSingleShot(true); tx_meter_hold_->setInterval(5000);
+    tx_meter_hold_ = new QTimer(this); tx_meter_hold_->setSingleShot(true); tx_meter_hold_->setInterval(150);
     connect(tx_meter_hold_, &QTimer::timeout, this, [this] { showTxMeter(false); });
 }
 void ReceiverPanel::showTxMeter(bool tx) { if (!tx_meter_) return; meter_->setVisible(!tx); meter_text_->setVisible(!tx); tx_meter_->setVisible(tx); }
-void ReceiverPanel::setMeterTx(bool keyed) {      // called by the transmit card: keyed -> the power meter; after the over it stays 5 s to read the last over
+void ReceiverPanel::setMeterTx(bool keyed) {      // called by the transmit card: keyed -> the power meter; back to the signal meter as the radio unkeys (150 ms, so a quick re-key does not flicker; the over's power is in the status line)
     if (!tx_meter_) return;
     if (keyed) { tx_meter_hold_->stop(); showTxMeter(true); }
     else if (tx_meter_->isVisibleTo(this) && !tx_meter_hold_->isActive()) tx_meter_hold_->start();
@@ -1198,6 +1201,13 @@ void ReceiverPanel::setTransmitParts(QWidget* digi, QWidget* voice) {
     setDecoderIndex(decoderIndex());                               // re-apply the decoder list's sizing
     syncGroup();
 }
+void ReceiverPanel::setTxMute(bool on) { tx_mute_ = on; }
+void ReceiverPanel::setCwPart(QWidget* w) {
+    if (!dec_row_ || cw_card_) return;
+    auto* l = new QVBoxLayout; l->addWidget(w); cw_card_ = theme::makeCard("Send CW", l); cw_card_->setFixedWidth(520);
+    if (auto* h = qobject_cast<QHBoxLayout*>(dec_row_->layout())) h->addWidget(cw_card_, 0);
+    syncGroup();
+}
 int ReceiverPanel::modeGroup() const { return std::max(0, grp_mode_->checkedId()); }
 void ReceiverPanel::applyGroup(int g) {                              // what each group shows; nothing here changes the radio
     if (!grp_mode_) return; { QSignalBlocker b(grp_mode_); if (auto* bt = grp_mode_->button(g)) bt->setChecked(true); }
@@ -1205,6 +1215,7 @@ void ReceiverPanel::applyGroup(int g) {                              // what eac
     if (auto* t = mode_card_->findChild<QLabel*>("cardTitle")) t->setText(g == 0 ? "VOICE MODES" : g == 1 ? "CW" : "DIGITAL MODES");
     if (dec_row_) dec_row_->setVisible(g != 0);                       // the decoder: CW (Morse) and Digital only
     if (send_card_) send_card_->setVisible(g == 2);                   // the FT8 / FT4 message controls: Digital only
+    if (cw_card_) cw_card_->setVisible(g == 1);                       // the CW transmit controls: CW only
     if (voice_card_) voice_card_->setVisible(g == 0);                 // the voice transmit controls: Voice only
 }
 void ReceiverPanel::syncGroup() {                                    // the group the receiver's own state belongs to (a band recall, a memory, a decoder pick)

@@ -1,3 +1,4 @@
+#include <cmath>
 #include "fireside/sim_radio.h"
 #include <chrono>
 #include "fireside/atu.h"
@@ -15,6 +16,8 @@ RadioModel::RadioModel(DiceBus& b) : bus(b) {
     bus.dynamic[op("RDAL_OP_ATU_GET_RESULT")] = [this] { return next(); };
     bus.dynamic[op("RDAL_OP_SET_MOX")] = [this] { keyed = be_word(bus.mem[kPalResult]) == 1; return 0u; };
     bus.dynamic[op("RDAL_OP_READ_PA_ADC")] = [this] { return pa_adc(be_word(bus.mem[kPalResult])); };
+    bus.dynamic[op("RDAL_OP_READ_PTT")] = [this] { return contacts.load() & 0xFu; };
+    bus.event = [this] { return contacts.load() & 0xFu; };
     bus.dynamic[op("RDAL_OP_READ_TRX_EEPROM_UINT32")] = [this] {
         const uint32_t a = be_word(bus.mem[kPalResult]);
         if (a + 4 > eeprom.size()) return 0xFFFFFFFFu;
@@ -54,6 +57,8 @@ uint32_t RadioModel::next() {
     uint32_t w = q.front(); q.pop_front(); return (w & 0x00FFFFFFu) | uint32_t(q.size() > 255 ? 255 : q.size()) << 24;
 }
 uint32_t RadioModel::pa_adc(uint32_t ch) const {
+    if (ch == 2) return uint32_t(std::lround((keyed && !dead_pa ? 13.4 : 13.8) / 27.5 * 4096));   // the supply (sags a little on transmit), PA at 35 C
+    if (ch == 4) return uint32_t(std::lround((301.0 - 35.0) * 2.2 / 1000.0 / 2.5 * 4096));
     if (!keyed || dead_pa) return 0;
     if (!pa_from_level) return uint32_t(ch == 7 ? adc_fwd : ch == 6 ? adc_rev : 0);
     if (!meter.valid) return 0;

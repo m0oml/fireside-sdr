@@ -1,4 +1,6 @@
 #include "TransmitCard.h"
+#include "CwSidetone.h"
+#include "fireside/dxcc.h"
 #include "fireside/siggen.h"
 #include "fireside/preamp.h"
 #include <QCheckBox>
@@ -144,6 +146,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     digi_part_ = part({row({ft_mode_, ft_hz_, ft_clear_, ft_par_}), row({ft_msg_, ft_w_}, false), row({send_, cq_, ft_repeat_, auto_seq_, stop_}, false)});
     voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_})});
     { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
+    buildCw();                                                                        // the CW part (TransmitCardCw.cpp)
     hide();                                                                           // this object only owns the parts: the window places them (Antenna, Transmit, decoder row, voice strip)
     timer_ = new QTimer(this); timer_->setInterval(100); connect(timer_, &QTimer::timeout, this, &TransmitCard::tick); timer_->start();
     loadCheckedCal();
@@ -193,7 +196,7 @@ void TransmitCard::connectTrip() {
     QPointer<TransmitCard> me(this);                                                         // the hook runs on the worker thread: hand the reason to the GUI thread
     tx_->set_trip_hook([me](const std::string& why) { if (me) { me->job_tripped_ = true; const QString q = QString::fromStdString(why); QMetaObject::invokeMethod(me.data(), [me, q] { if (me) emit me->safetyTrip(q); }, Qt::QueuedConnection); } });
 }
-TransmitCard::~TransmitCard() { extCancel(); ext_allowed_ = false; if (tx_) tx_->abort(); if (worker_.joinable()) worker_.join(); }
+TransmitCard::~TransmitCard() { if (cw_keys_) cw_keys_->stop(); extCancel(); ext_allowed_ = false; if (tx_) tx_->abort(); if (worker_.joinable()) worker_.join(); }
 
 // ---- keying by other programs over CAT --------------------------------------------------------------------------------------------------
 struct TransmitCard::ExtPtt : rigctl::PttRequest {
@@ -317,6 +320,7 @@ bool TransmitCard::ask(const QString& title, const QString& text) {
     return QMessageBox::question(this, title, text, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
 }
 void TransmitCard::report(const QString& m) { status_->setText(m); emit message("Transmit: " + m); }
+QString TransmitCard::statusText() const { return status_->text(); }
 
 void TransmitCard::run(const QString& what, bool pauses_receive, std::function<QString(txc::TxControl&)> job) {
     if (worker_running_ || !tx_) return;
@@ -336,11 +340,11 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
             const bool sent_ok = res.endsWith(" #sent");
             // A safety stop ends the sequence and any repeat: nothing is retried by itself. Decided by the core's own trip signal (TxControl::set_trip_hook,
             // from the gate's stop reason) or an exception, never by reading the status text (an S-meter check or ATU restore message may say "failed").
-            const bool safety = !sent_ok && tripped;
+            const bool safety = (!sent_ok && tripped) || rx_hold_;                                  // receive lost: ends like a safety stop (nothing resumes by itself)
             if (safety) {
                 { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } ft_timer_->stop(); ft_pending_.reset();
                 follow_pending_ = false; auto_tried_.clear(); from_cq_ = false; if (seq_) seq_->stop();
-                res += "  Stopped: nothing is retried after a safety stop.";
+                res += rx_hold_ && !tripped ? "  Receive stopped: auto transmit stays off until you press CQ or Send, or double-click a station." : "  Stopped: nothing is retried after a safety stop.";
             }
             if (sent_ok) takeLog();                                                                  // the over that completed a QSO has gone out: log it
             noteSeqEnd(!safety);                                                                     // after a safety stop: announce the end, but never go on to the next caller
@@ -425,9 +429,14 @@ QString TransmitCard::messageText() const { return ft_msg_->text(); }
 double TransmitCard::recentTxPowerW() const { return QDateTime::currentSecsSinceEpoch() - last_tx_t_.load() < 600 ? last_tx_w_.load() : 0.0; }
 void TransmitCard::replyTo(const QString& line) {
     if (!auto_seq_->isChecked()) return;
-    if (!auto_reply_) { auto_tried_.clear(); from_cq_ = false; follow_pending_ = false; }   // the operator's own choice: a fresh start
+    if (!auto_reply_) { auto_tried_.clear(); from_cq_ = false; follow_pending_ = false; rx_hold_ = false; }   // the operator's own choice: a fresh start
     int snr = 0; const std::string text = fireside::logbook::ftx_line_text(line.toStdString(), &snr); const auto h = fireside::seq::parse(text, snr);
     if (!h.ok) { report("That line has nothing to answer."); return; }
+    if (!auto_reply_ && !fireside::decode::callsign_prefix_known(h.from)) {                // the operator's double-click on a callsign no country uses: only on a second click
+        const QString who = QString::fromStdString(h.from); const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (who != odd_call_ || now - odd_call_ms_ > 15000) { odd_call_ = who; odd_call_ms_ = now; report(QString("%1 has a prefix no country uses: most likely a false decode. Double-click it again to answer anyway.").arg(who)); return; }
+        odd_call_.clear();
+    }
     if (!haveStation()) return;
     if (seq_) seq_->stop();
     auto& sq = sequencer();
@@ -471,7 +480,7 @@ void TransmitCard::noteSeqEnd(bool may_continue) {      // the sequence has ende
     if (may_continue) { follow_pending_ = true; QTimer::singleShot(300, this, [this] { autoNext(); }); }
 }
 void TransmitCard::autoNext() {                         // auto mode, a QSO (or a 2-try call) has ended: answer the next station waiting in the callers area
-    if (!follow_pending_ || !auto_seq_->isChecked() || !tx_ || !tx_->armed() || worker_running_ || ft_pending_ || (seq_ && seq_->active())) return;   // (an over still running: the run's end calls this again)
+    if (rx_hold_ || !follow_pending_ || !auto_seq_->isChecked() || !tx_ || !tx_->armed() || worker_running_ || ft_pending_ || (seq_ && seq_->active())) return;   // (an over still running: the run's end calls this again)
     follow_pending_ = false;
     for (;;) {                                                                               // the newest waiting caller that can be answered; a sign-off (73, RR73) is skipped
         const auto c = rx_->nextCaller(auto_tried_);
@@ -479,6 +488,7 @@ void TransmitCard::autoNext() {                         // auto mode, a QSO (or 
         auto_tried_.insert(c.first);
         int snr = 0; const auto h = fireside::seq::parse(fireside::logbook::ftx_line_text(c.second.toStdString(), &snr), snr);
         if (!h.ok || h.seventy3 || h.rr73 || h.rrr) continue;
+        if (!fireside::decode::callsign_prefix_known(h.from)) { report(QString("Not answering %1 by itself: no country uses that prefix (most likely a false decode)").arg(c.first)); continue; }
         auto_reply_ = true; replyTo(c.second); auto_reply_ = false;
         if (seq_ && seq_->active() && QString::fromStdString(seq_->dx()).contains(c.first)) {
             seq_->limit_tries(kCallerTries); report(QString("Answering %1, who called earlier (%2 tries, then the next one): %3").arg(c.first).arg(kCallerTries).arg(ft_msg_->text()));
@@ -652,6 +662,7 @@ void TransmitCard::onTestTone() {
 }
 
 void TransmitCard::onSend() {
+    rx_hold_ = false;                                                                        // the operator's Send / CQ
     if (seq_) seq_->stop();
     if (auto_seq_->isChecked() && ft_msg_->text().trimmed().toUpper().startsWith("CQ ")) { if (!haveStation()) return; sequencer().call_cq(); ft_msg_->setText(QString::fromStdString(seq_->current())); }   // CQ: answers are worked automatically
     queueSend();
@@ -781,13 +792,20 @@ void TransmitCard::onDial(double hz) {
     if (band >= 0 && auto_restore_->isChecked() && tx_ && tx_->armed() && !worker_running_ && tx_->memory().recall(band)) onRestore();
 }
 
+void TransmitCard::onReceiveLost(const QString& why) {
+    const bool automatic = ft_pending_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || extActive();
+    if (!automatic) return;
+    rx_hold_ = true;
+    stopEverything(QString("Receive stopped (%1): auto transmit stopped, nothing queued. It does not start again by itself: check the receive, then press CQ or double-click a station.").arg(why));
+    emit safetyTrip("receive stopped, so auto transmit stopped");
+}
 bool TransmitCard::keyedNow() const { return tx_ && tx_->keyed(); }
 void TransmitCard::tick() {
     const bool keyed = tx_ && tx_->keyed();
     rx_->setMeterTx(keyed);
     stop2_->setEnabled(stop_->isEnabled()); stop3_->setEnabled(stop_->isEnabled());
     if (status_->toolTip() != status_->text()) status_->setToolTip(status_->text());    // the line is clipped: the tooltip has all of it
-    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running());           // duplex: receive follows the DDS onto the dial for the over
+    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running(), cw_over_ ? txc::kCwOffsetHz : 0.0);   // a CW over: the DDS 1 kHz below the dial           // duplex: receive follows the DDS onto the dial for the over
     lamp_->setStyleSheet(keyed ? "background:#c62828;color:white;font-weight:bold;border-radius:4px;padding:2px" : "background:#3a3a3a;color:#888;border-radius:4px;padding:2px");
     txc::Progress p; bool have; { std::lock_guard<std::mutex> l(m_); p = last_; have = have_last_; }
     if (have) pm_->setReading(p.rd.fwd_w, p.rd.rev_w, p.rd.swr ? *p.rd.swr : 0.0, keyed); else pm_->setReading(0, 0, 0, false);

@@ -45,7 +45,7 @@
 
 using namespace fireside;
 namespace {
-void usage() { std::fputs("usage: firesidekey --fw /dev/fwN --backup TRX.bin (mic-test [--freq MHZ] [--seconds S] (no RF: mic level + PTT) | atu-report | atu-relays IND CAP HIZ | bias | key-silent --freq MHZ [--seconds S] [--rate HZ] [--alsa DEV] |\n              ramp --freq MHZ --confirm-clear [--target W (<= 5, default 2)] [--hold S (<= 10, default 0.5)] [--tone HZ (default 1000)] [--no-mirror-q (re-test only: mirrored is right)] [--rate HZ] [--alsa DEV])\n", stderr); }
+void usage() { std::fputs("usage: firesidekey --fw /dev/fwN --backup TRX.bin (key-test [--seconds S] (no RF, read-only: the KEY jack and PTT) | mic-test [--freq MHZ] [--seconds S] (no RF: mic level + PTT) | atu-report | atu-relays IND CAP HIZ | bias | key-silent --freq MHZ [--seconds S] [--rate HZ] [--alsa DEV] |\n              ramp --freq MHZ --confirm-clear [--target W (<= 5, default 2)] [--hold S (<= 10, default 0.5)] [--tone HZ (default 1000)] [--no-mirror-q (re-test only: mirrored is right)] [--rate HZ] [--alsa DEV])\n", stderr); }
 void say(const std::string& s) { std::printf("%s\n", s.c_str()); std::fflush(stdout); }
 std::vector<uint8_t> read_file(const std::string& p) { std::ifstream in(p, std::ios::binary); if (!in) throw std::runtime_error("cannot read " + p); return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()}; }
 void sleep_s(double s) { std::this_thread::sleep_for(std::chrono::duration<double>(s)); }
@@ -80,6 +80,20 @@ int main(int argc, char** argv) {
         if (!mb.verify(10.0)) throw std::runtime_error("firmware revision implausible; nothing written");
         Safety sf; sf.allow_write = true; Flex fx(mb, sf);
 
+        if (cmd == "key-test") {                                      // NO RF, nothing written: the KEY jack and PTT as the EVENT register and READ_PTT report them
+            say("key-test (read-only, nothing is written): press the paddles / key and the PTT. EVENT = the register the app reads for CW; READ_PTT = the command.");
+            const auto t0 = std::chrono::steady_clock::now(); uint32_t le = 0xFFFFFFFF, lp = 0xFFFFFFFF; double ev_s = 0, pt_s = 0; long ne = 0, np = 0, ev_fail = 0;
+            auto el = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
+            while (el() < (seconds > 1 ? seconds : 30)) {
+                double a = el(); uint32_t e = 0; bool eok = true; try { e = mb.read_event().raw & 0xF; } catch (...) { eok = false; ++ev_fail; } ev_s += el() - a; ++ne;
+                if (eok && e != le) { char m[96]; std::snprintf(m, sizeof m, "%8.3f s  EVENT    %X  dot %d dash %d rca_ptt %d mic_ptt %d", el(), e, e & 1, (e >> 1) & 1, (e >> 2) & 1, (e >> 3) & 1); say(m); le = e; }
+                if (ne % 10 == 0) { a = el(); const uint32_t p = uint32_t(fx.get("RDAL_OP_READ_PTT", 0)) & 0xF; pt_s += el() - a; ++np;
+                    if (p != lp) { char m[96]; std::snprintf(m, sizeof m, "%8.3f s  READ_PTT %X  dot %d dash %d rca_ptt %d mic_ptt %d", el(), p, p & 1, (p >> 1) & 1, (p >> 2) & 1, (p >> 3) & 1); say(m); lp = p; } }
+                sleep_s(0.002);
+            }
+            char m[160]; std::snprintf(m, sizeof m, "EVENT: %ld reads, %.2f ms each (%ld failed); READ_PTT: %ld reads, %.2f ms each", ne, ne ? 1000 * ev_s / double(ne) : 0.0, ev_fail, np, np ? 1000 * pt_s / double(np) : 0.0); say(m);
+            return 0;
+        }
         say("reading the EEPROM (read-only) and comparing with " + backup + " ...");
         const auto img = read_image(fx, "TRX", kTrxLen);               // one pass is enough: any misread byte fails the comparison with the backup below
         if (img != want) throw std::runtime_error("the radio's EEPROM differs from the backup: refusing (run eeprom-dump and compare first)");

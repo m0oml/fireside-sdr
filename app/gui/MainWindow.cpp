@@ -35,6 +35,8 @@
 #include "fireside/cli.h"
 #include "fireside/identify.h"
 #include "fireside/link.h"
+#include "fireside/decode.h"
+#include <QStatusBar>
 
 namespace {
 struct SimHandle : fireside::BusHandle { fireside::sim::DiceBus& b; explicit SimHandle(fireside::sim::DiceBus& x) : b(x) {} fireside::IBus& bus() override { return b; } bool is_local() const override { return false; } };
@@ -85,7 +87,9 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
         const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/fireside"; QDir().mkpath(dir);
         QFile f(dir + "/transmit.log"); if (f.open(QIODevice::Append | QIODevice::Text)) f.write((QDateTime::currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss.zzz ") + m + "\n").toUtf8()); });
     tx_card_->setParent(receiver_); tx_card_->hide();                                       // only the owner of the pieces below
-    receiver_->setTransmitParts(tx_card_->digitalPart(), tx_card_->voicePart());              // the message controls beside the decoder (Digital), the voice controls under the waterfall (Voice)
+    receiver_->setTransmitParts(tx_card_->digitalPart(), tx_card_->voicePart());
+    receiver_->setCwPart(tx_card_->cwPart());                                                 // CW: beside the Morse decoder
+    tx_card_->setCwMemorySource([this] { QStringList m; for (int i = 0; i < 10; ++i) m << tx_panel_->memoryText(i); return m; });              // the message controls beside the decoder (Digital), the voice controls under the waterfall (Voice)
     receiver_->setTransmitWidget(tx_panel_);                                                 // the offline TX lab: under the decoder, behind its button
     connect(tx_panel_, &TxPanel::previewRequested, this, [this](const QString& wav, int decoder, int tone) { if (receiver_->loadFile(wav)) { receiver_->setDecoderIndex(decoder); if (tone > 0) receiver_->setDecoderTone(tone); showReceiver(); } });   // look at the rendered file on the waterfall: the receiver only reads it
     connect(receiver_, &ReceiverPanel::decodedCall, log_panel_, &LogPanel::checkWorked); connect(log_panel_, &LogPanel::workedKnown, receiver_, &ReceiverPanel::markWorked);
@@ -93,6 +97,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
     if (tx_card_) {   // click to reply + auto sequence + auto log
         tx_card_->setMyGridSource([this] { return log_panel_->myGrid(); });
         connect(receiver_, &ReceiverPanel::decodedLineActivated, tx_card_, &TransmitCard::replyTo);
+        connect(receiver_, &ReceiverPanel::receiveLost, tx_card_, &TransmitCard::onReceiveLost);     // no receive: auto transmit stops (RF in the shack can stop the stream)
         connect(receiver_, &ReceiverPanel::callerDecoded, tx_card_, &TransmitCard::heardLine);
         connect(tx_card_, &TransmitCard::logQso, log_panel_, &LogPanel::logAuto);
         connect(tx_card_, &TransmitCard::qsoPartner, receiver_, &ReceiverPanel::setQsoPartner);
@@ -162,6 +167,17 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
         vl->addWidget(trip_); vl->addWidget(tabs_, 1); setCentralWidget(wrap);
         if (tx_card_) connect(tx_card_, &TransmitCard::safetyTrip, this, &MainWindow::showTrip);
     }
+    {   // the status bar: the radio's supply and PA temperature (READ_PA_ADC 2 / 4, read-only, as PowerSDR's ZZRV / ZZTS), and the false decodes thrown away
+        auto* sb = new QStatusBar; setStatusBar(sb); sb->setSizeGripEnabled(false);
+        sb->setStyleSheet("QStatusBar { border-top: 1px solid #2a3142; } QStatusBar::item { border: 0; } QStatusBar QLabel { padding: 0 10px; }");
+        false_ = new QLabel; psu_ = new QLabel; pa_temp_ = new QLabel;
+        false_->setToolTip("Weak and a-priori (a1/a2) decodes thrown away because a callsign has a prefix no country uses, or the locator is impossible for the callsign");
+        psu_->setToolTip("The radio's 13.8 V supply, measured by the radio (PA board). On transmit: the lowest reading during the over. Red below 12.5 V or at 15 V and above");
+        pa_temp_->setToolTip("The PA temperature sensor. Amber from 70 C, red from 100 C");
+        sb->addPermanentWidget(false_); sb->addPermanentWidget(psu_); sb->addPermanentWidget(pa_temp_);
+        auto* t = new QTimer(this); t->setInterval(250); connect(t, &QTimer::timeout, this, &MainWindow::pollStatusBar); t->start(); pollStatusBar();
+        if (tx_card_) connect(tx_card_, &TransmitCard::message, this, [sb](const QString& m) { if (m.contains("false decode")) sb->showMessage(QString(m).remove("Transmit: "), 20000); });   // auto mode / a double-click held back for one
+    }
     resize(1400, 860);
     if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) { QSettings q("fireside", "window"); if (q.contains("geometry")) restoreGeometry(q.value("geometry").toByteArray()); tabs_->setCurrentIndex(std::clamp(q.value("tab", 0).toInt(), 0, tabs_->count() - 1)); }
     connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshDevices);
@@ -177,6 +193,28 @@ void MainWindow::refreshDevices() {
 void MainWindow::showTrip(const QString& reason) {
     trip_->setText("TRANSMITTER STOPPED: " + reason); trip_->setVisible(true); trip_->raise(); trip_timer_->start(5000);
     appLog("transmit", "SAFETY STOP shown: " + reason);
+}
+void MainWindow::pollStatusBar() {
+    static int tick = 0; ++tick;
+    const auto fd = fireside::decode::false_decodes_dropped();
+    false_->setText(QString("False decodes dropped: %1").arg(fd.count));
+    if (fd.count) false_->setToolTip("Thrown away because a callsign has a prefix no country uses, or the locator is impossible for it. Last: " + QString::fromStdString(fd.last));
+    const bool keyed = tx_card_ && tx_card_->keyedNow();
+    if (!keyed && !was_keyed_ && tick % 4) return;                                           // once a second on receive, four times a second on transmit
+    auto& s = radio_->session();
+    const auto v = s.read_pa_adc(fireside::txm::kAdcSupply);
+    const auto tc = keyed ? std::nullopt : s.read_pa_adc(fireside::txm::kAdcTemp);           // the temperature changes slowly: read on receive
+    auto colour = [](QLabel* l, const char* c) { l->setStyleSheet(c ? QString("color: %1; font-weight: 600;").arg(c) : QString()); };
+    if (!v) { psu_->setText("Supply: --"); pa_temp_->setText("PA: --"); colour(psu_, nullptr); colour(pa_temp_, nullptr); was_keyed_ = false; return; }
+    const double volts = fireside::txm::supply_volts(int(*v));
+    if (keyed) { tx_low_v_ = was_keyed_ ? std::min(tx_low_v_, volts) : volts; was_keyed_ = true; }
+    else if (was_keyed_) { last_tx_low_v_ = tx_low_v_; was_keyed_ = false; }
+    const double shown = keyed ? tx_low_v_ : volts;
+    QString txt = QString(keyed ? "Supply on TX: %1 V" : "Supply: %1 V").arg(shown, 0, 'f', 1);
+    if (!keyed && last_tx_low_v_ > 0) txt += QString("  (last TX %1 V)").arg(last_tx_low_v_, 0, 'f', 1);
+    psu_->setText(txt);
+    colour(psu_, shown < 12.5 || shown >= 15.0 ? "#ff5252" : shown < 13.0 ? "#ffb454" : nullptr);
+    if (tc) { const double c = fireside::txm::pa_temp_c(int(*tc)); pa_temp_->setText(QString("PA: %1 \u00B0C").arg(c, 0, 'f', 0)); colour(pa_temp_, c >= 100 ? "#ff5252" : c >= 70 ? "#ffb454" : nullptr); }
 }
 MainWindow::~MainWindow() { if (cat_) cat_->setPttRequest(nullptr); }   // the Transmit card may go first: CAT must not reach it then
 

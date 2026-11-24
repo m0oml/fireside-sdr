@@ -19,6 +19,7 @@ struct DiceBus : IBus {
     std::map<uint32_t, uint32_t> answers;                                           // opcode -> result
     std::map<uint32_t, std::function<uint32_t()>> dynamic;                          // per-request behaviour (takes precedence over `answers`)
     std::vector<uint32_t> executed;                                                 // opcodes the "firmware" ran, in order
+    std::function<uint32_t()> event;                                                // the EVENT register's contents (paddles / PTT), if set
     explicit DiceBus(int busy_polls_ = 2, int start_busy = 0, bool stuck_ = false) : busy_polls(busy_polls_), left(start_busy), stuck(stuck_) {
         mem[kPalCmd] = be_words({start_busy ? kPalBusy : 0}); mem[kPalResult] = be_words({0}); mem[kPalEvent] = be_words({0});
         answers[find_opcode(std::string("RDAL_OP_GET_MODEL"))->value] = 0; answers[find_opcode(std::string("RDAL_OP_GET_SERIAL_NUM"))->value] = 0xA1B2C3D4;   // minimal; call set_flex_5000a() for a full radio
@@ -32,6 +33,7 @@ struct DiceBus : IBus {
     std::vector<uint8_t> read(uint64_t off, size_t) override {
         ++reads;
         if (off == kPalCmd && !stuck && left > 0 && --left == 0) execute();
+        if (off == kPalEvent && event) return be_words({event()});
         auto it = mem.find(off); if (it == mem.end()) throw FwError("simulated bus: address error");
         return it->second;
     }

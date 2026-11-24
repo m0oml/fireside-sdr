@@ -183,8 +183,12 @@ The same table for programs: [`opcodes.json`](opcodes.json) and [`opcodes.csv`](
 | 1236 | `PA_POT_GET_RDAC` | r | u32, u32 -> u32 | read | |  |
 | 1237 | `PA_POT_SET_RDAC` | w | u32, u32 | dangerous | yes | |
 | 1268 | `SET_PLL` | w | u32, u32 | dangerous | |  |
+| 1304 | `FLEXWIRE_WRITE_VALUE` | w | i32, i32 | dangerous | |  |
+| 1305 | `FLEXWIRE_WRITE_2_VALUE` | w | u32, u32 | dangerous | |  |
 | 1331 | `SET_TRX_POT` | w | u32, u32 | dangerous | yes | |
 | 1336 | `SET_EEPROM_WC` | ? | u32, u32 | dangerous | | EEPROM write-control line. Never use outside factory calibration. |
+| 1342 | `FLEXWIRE_READ_VALUE` | r | u32, u32 -> u32 | read | |  |
+| 1343 | `FLEXWIRE_READ_2_VALUE` | r | u32, u32 -> u32 | read | |  |
 
 ## PA, fan and power
 
@@ -244,11 +248,7 @@ The same table for programs: [`opcodes.json`](opcodes.json) and [`opcodes.csv`](
 | 1289 | `SET_RTS` | w | u32, u32 | write | |  |
 | 1293 | `SET_INT_LED` | w | u32, u32 | write | |  |
 | 1303 | `SET_RX1OUT` | w | u32, u32 | write | |  |
-| 1304 | `FLEXWIRE_WRITE_VALUE` | w | i32, i32 | write | |  |
-| 1305 | `FLEXWIRE_WRITE_2_VALUE` | w | u32, u32 | write | |  |
 | 1337 | `SET_HIZ` | w | u32, u32 | write | |  |
-| 1342 | `FLEXWIRE_READ_VALUE` | r | u32, u32 -> u32 | read | |  |
-| 1343 | `FLEXWIRE_READ_2_VALUE` | r | u32, u32 -> u32 | read | |  |
 | 1400 | `SET_MANUAL_IO_UPDATE` | w | u32, u32 | write | |  |
 
 ## Opcodes with no documented use

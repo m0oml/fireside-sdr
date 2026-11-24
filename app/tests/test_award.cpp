@@ -18,6 +18,11 @@ TEST(dxcc_entity_counts_calls_as_a_logger_does) {
     CHECK(!ent("G4ABC/MM").ok); CHECK(!ent("G4ABC/AM").ok); CHECK(!ent("<...>").ok); CHECK(!ent("").ok); CHECK(!ent("A/B/C/D").ok);
     CHECK(decode::dxcc_lookup("IT9ABC") && std::string(decode::dxcc_lookup("IT9ABC")->name) == "Sicily");         // the PSK Reporter column keeps cty.dat's own name
 }
+TEST(callsigns_with_a_prefix_no_country_uses_are_spotted) {
+    for (const char* bad : {"0J0BQR", "0J0BQR/P", "EA8/0J0BQR", "1Z1ABC"}) CHECK(!decode::callsign_prefix_known(bad));
+    for (const char* good : {"M0OML", "3X4U", "1A0KM", "4U1ITU", "3D2CCC", "G4ABC/P", "EA8/G4ABC", "KH6ABC/MM", "<...>", "<PJ4/K1ABC>", "CQ", "RR73", "R-09", "+05", "JA35", "73", "CALL1X", "TNX", ""})
+        CHECK(decode::callsign_prefix_known(good));
+}
 TEST(grid4_and_band_normalising) {
     CHECK_EQ(award::grid4("io92ar"), std::string("IO92")); CHECK_EQ(award::grid4("JN58"), std::string("JN58"));
     for (const char* bad : {"", "IO9", "RR73", "SS12", "IOAB", "73"}) CHECK_EQ(award::grid4(bad), std::string(""));

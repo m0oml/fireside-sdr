@@ -547,6 +547,7 @@ int main(int argc, char** argv) {
         { auto p = fireside::decode::synth_psk31("CQ DE M0OML K ", 1000, 48000, 0.6, 3.0); std::vector<std::complex<float>> z(p.size()); for (size_t i = 0; i < p.size(); ++i) z[i] = {p[i], 0.0f}; write(base + "_psk.wav", z); }
         { auto t = fireside::decode::synth_rtty("CQ DE M0OML K ", 2125, 170, 45.45, 48000, 0.6, 1.0); std::vector<std::complex<float>> z(t.size()); for (size_t i = 0; i < t.size(); ++i) z[i] = {t[i], 0.0f}; write(base + "_rtty.wav", z); }
         run(base + "_cw.wav", 1, "CQ DE M0OML K", "CW"); step("CW switched the receiver to CW mode", r->modeIndex() == 3); step("CW status shown", r->status().size() >= 0);
+        for (int i = 2; i + 1 < argc; ++i) if (!std::strcmp(argv[i], "--screenshot-cw")) { w.resize(1500, 900); for (int k = 0; k < 30; ++k) r->advance(4800); QApplication::processEvents(); w.grab().save(QString::fromUtf8(argv[i + 1])); }
         run(base + "_psk.wav", 2, "CQ DE M0OML K", "PSK31"); step("PSK31 switched to USB", r->modeIndex() == 0);
         { std::string shot; for (int i = 2; i + 1 < argc; ++i) if (!std::strcmp(argv[i], "--screenshot")) shot = argv[i + 1]; if (!shot.empty()) { w.resize(1500, 900); for (int i = 0; i < 30; ++i) r->advance(4800); QApplication::processEvents(); w.grab().save(QString::fromStdString(shot)); } }
         run(base + "_rtty.wav", 3, "CQ DE M0OML K", "RTTY");
@@ -632,6 +633,8 @@ int main(int argc, char** argv) {
                 } else {
                     step("transmit ready against the simulated radio carrying the backup's EEPROM", st.startsWith("Transmit ready") && tc->armButton()->isChecked() && !tc->armButton()->isVisible());
                     step("arming wrote exactly the 8 PA bias pots", ops().size() == n + 8 && count(1237) == 8);
+                    w.pollStatusBar(); for (int i = 0; i < 4; ++i) w.pollStatusBar();
+                    step("status bar: supply 13.8 V and PA 35 C from the simulated radio (read-only)", w.supplyLabel()->text() == "Supply: 13.8 V" && w.paTempLabel()->text().startsWith("PA: 35") && ops().size() == n + 8 && w.falseDecodesLabel()->text().startsWith("False decodes dropped: "));
                     rx->setDialHz(14.336e6); pump(5);
                     step("tune usable before a measurement (EEPROM table drive)", tc->tuneButton()->isEnabled() && tc->measureButton()->isEnabled() && tc->testToneButton()->isEnabled());
                     tc->measureButton()->click(); wait_idle(20000);
@@ -669,6 +672,36 @@ int main(int argc, char** argv) {
                                  && tc->statusLabel()->text().contains("nothing is retried"));
                             sim->pa_from_level = pl; sim->adc_fwd = af; sim->adc_rev = ar;
                         }
+                        {   // receive lost (RF in the shack stops the stream): a queued CQ is dropped; a CQ on the air unkeys; nothing starts again by itself
+                            const double now2 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+                            const long long i2 = (long long)std::floor(now2 / 7.5) + ((std::fmod(now2, 7.5) > 5.0) ? 2 : 1); tc->parityBox()->setCurrentIndex(int(i2 % 2));
+                            const size_t m6 = count(1292); tc->cqButton()->click(); pump(2);
+                            const bool queued = tc->sendQueued(); emit rx->receiveLost("test: no data from the radio for 1 s"); pump(5);
+                            step("receive lost: a queued CQ is dropped, nothing keyed, the reason shown", queued && !tc->sendQueued() && !tc->busy() && count(1292) == m6 && !w.simRadio()->keyed
+                                 && tc->statusLabel()->text().startsWith("Receive stopped") && w.tripBox()->isVisible());
+                            pump(500); step("receive lost: still nothing queued or keyed 15 s later", !tc->sendQueued() && count(1292) == m6 && !w.simRadio()->keyed);
+                            const double now3 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+                            const long long i3 = (long long)std::floor(now3 / 7.5) + ((std::fmod(now3, 7.5) > 5.0) ? 2 : 1); tc->parityBox()->setCurrentIndex(int(i3 % 2));
+                            tc->cqButton()->click(); for (int i = 0; i < 900 && !w.simRadio()->keyed; ++i) pump(1);
+                            pump(30); const bool was_keyed = w.simRadio()->keyed; emit rx->receiveLost("test: bus reset"); for (int i = 0; i < 900 && (w.simRadio()->keyed || tc->busy()); ++i) pump(1);
+                            pump(20); step("receive lost during a CQ over: unkeys and nothing is queued", was_keyed && !w.simRadio()->keyed && !tc->busy() && !tc->sendQueued() && tc->statusLabel()->text().contains("Receive stopped"));
+                        }
+                        {   // CW: the paddle on the KEY jack keys an over on the CW screen (semi break-in); a text goes out with Send; the paddle untick stops reading it
+                            auto* sim = w.simRadio(); const int mode0 = rx->modeIndex(); const int dec0 = rx->decoderIndex();
+                            rx->setModeIndex(3); for (int i = 0; i < 40 && !tc->cwWatching(); ++i) pump(1);
+                            step("CW: the paddle is read on the CW screen", tc->cwWatching() && rx->modeGroup() == 1);
+                            const size_t m7 = count(1292); sim->contacts = 1; for (int i = 0; i < 20 && !sim->keyed; ++i) pump(1);
+                            const bool keyed_by_paddle = sim->keyed; pump(7); sim->contacts = 0;
+                            for (int i = 0; i < 200 && (tc->busy() || sim->keyed); ++i) pump(1); pump(5);
+                            step("CW: a paddle press keys one over, which unkeys after the break-in delay", keyed_by_paddle && !sim->keyed && count(1292) == m7 + 2 && tc->statusLabel()->text().startsWith("CW over: CW over finished"));
+                            tc->cwTextBox()->setText("e e"); const size_t m8 = count(1292); tc->cwSendButton()->click(); pump(2);
+                            for (int i = 0; i < 300 && (tc->busy() || sim->keyed); ++i) pump(1); pump(5);
+                            step("CW: Send keys the text once and unkeys", count(1292) == m8 + 2 && !sim->keyed && tc->statusLabel()->text().startsWith("CW over: CW over finished"));
+                            tc->cwPaddleBox()->setChecked(false); pump(5); const size_t m9 = count(1292); sim->contacts = 1; pump(20); sim->contacts = 0; pump(5);
+                            step("CW: with Paddle keys unticked the paddle is not read and keys nothing", !tc->cwWatching() && count(1292) == m9 && !sim->keyed);
+                            tc->cwPaddleBox()->setChecked(true); rx->setModeIndex(mode0); rx->setDecoderIndex(dec0); pump(5);
+                            step("CW: leaving the CW screen stops reading the paddle", !tc->cwWatching());
+                        }
                         const size_t mox2 = count(1292); tc->sendButton()->click(); pump(2);
                         QPushButton* stopb = nullptr; for (auto* b : tc->digitalPart()->findChildren<QPushButton*>()) if (b->text() == "Stop") stopb = b;
                         if (stopb) stopb->click();
@@ -699,6 +732,8 @@ int main(int argc, char** argv) {
                         auto wall = [] { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); };
                         auto label = [](double t) { return QDateTime::fromMSecsSinceEpoch(qint64(std::floor(t / 7.5) * 7500), QTimeZone::UTC).toString("HHmmss"); };
                         const double t0 = wall(); const long long k = (long long)std::floor(t0 / 7.5) - 1;                       // their CQ: the slot that just ended
+                        tc->replyTo(label(k * 7.5) + " -10  0.1 1200 ~  M0OML 0J0BQR JA35 a2"); pump(2);
+                        step("a double-click on a callsign no country uses asks first and sends nothing", !tc->sendQueued() && !tc->busy() && tc->statusText().contains("false decode") && tc->qsoText().isEmpty());
                         const size_t m0 = count(1292); tc->replyTo(label(k * 7.5) + " -10  0.1 1200 ~  CQ DK0ULR JN58"); pump(2);
                         step("click to reply: queued in the other parity with our grid", tc->sendQueued() && tc->parityBox()->currentIndex() == int((k + 1) % 2) && tc->messageText() == "DK0ULR M0OML IO92");
                         auto over = [&](size_t n) { for (int i = 0; i < 1500 && !(count(1292) >= m0 + n && !tc->busy()); ++i) pump(1); pump(30); return count(1292) >= m0 + n; };

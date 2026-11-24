@@ -75,6 +75,16 @@ std::optional<uint32_t> RadioSession::read_ptt() {
     if (state_ != State::Started || !fx_) return std::nullopt;
     try { return uint32_t(fx_->get("RDAL_OP_READ_PTT", 0)) & 0xF; } catch (...) { return std::nullopt; }
 }
+std::optional<uint32_t> RadioSession::read_keys(bool event) {
+    std::lock_guard<std::mutex> l(m_);
+    if (state_ != State::Started || !fx_ || !mb_) return std::nullopt;
+    try { return (event ? mb_->read_event().raw : uint32_t(fx_->get("RDAL_OP_READ_PTT", 0))) & 0xF; } catch (...) { return std::nullopt; }
+}
+std::optional<uint32_t> RadioSession::read_pa_adc(int ch) {
+    std::lock_guard<std::mutex> l(m_);
+    if (state_ != State::Started || !fx_ || ch < 0 || ch > 7) return std::nullopt;
+    try { return uint32_t(fx_->get("RDAL_OP_READ_PA_ADC", uint32_t(ch))); } catch (...) { return std::nullopt; }
+}
 bool RadioSession::pump() {
     std::shared_ptr<Tuner> t; { std::lock_guard<std::mutex> l(m_); if (state_ != State::Started) return false; t = tuner_; }
     return t->pump();
@@ -97,7 +107,7 @@ std::shared_ptr<txc::TxControl> RadioSession::transmit(txc::PcmFactory pcm) {
     if (!tx_ || tx_->retired()) {
         tx_ = std::make_shared<txc::TxControl>(*fx_, std::move(pcm));
         std::weak_ptr<Tuner> wt = tuner_; const double rx_off = opt_.if_offset_hz;
-        tx_->set_key_hook([wt, rx_off](bool keyed) { if (auto t = wt.lock()) t->set_if_offset(keyed ? 0.0 : rx_off); });   // the shared RX1/TX DDS: on the dial for the over, back to the IF shift after
+        tx_->set_key_hook([wt, rx_off](bool keyed, double below) { if (auto t = wt.lock()) t->set_if_offset(keyed ? below : rx_off); });   // the shared RX1/TX DDS: on the dial for the over (a CW over: 1 kHz below it), back to the IF shift after
     }
     return tx_;
 }

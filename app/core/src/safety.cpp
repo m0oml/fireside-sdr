@@ -4,7 +4,7 @@
 namespace fireside {
 bool Safety::matches_dangerous(const std::string& n) {
     static const std::regex re(
-        "EEPROM|REG_SET|WRITE_.*REG|_REG$|I2C_WRITE|FIRESIDEWIRE_WRITE|PA_BIAS|POT|RDAC|"
+        "EEPROM|REG_SET|WRITE_.*REG|_REG$|I2C_WRITE|FLEXWIRE_WRITE|PA_BIAS|POT|RDAC|"
         "RESET|PWRBT|POWER_OFF|POWER_DOWN|INITIALIZE|CLOCK|PLL|DDS_REG|GPIO|FAN|"
         "MOX|ATU_SEND|ENABLE_ATU|SET_TR$|AMP_TX|TX_DAC|FULL_DUPLEX|XVTR|XVTXEN|KEY_2M|PA_FILTER|TX_FILTER");
     return std::regex_search(n, re);

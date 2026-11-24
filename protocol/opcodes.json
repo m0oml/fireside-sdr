@@ -2005,9 +2005,9 @@
    "data1": "i32",
    "data2": "i32",
    "result": null,
-   "safety": "write",
+   "safety": "dangerous",
    "in_use": false,
-   "group": "Other",
+   "group": "EEPROM and registers",
    "note": ""
   },
   {
@@ -2017,9 +2017,9 @@
    "data1": "u32",
    "data2": "u32",
    "result": null,
-   "safety": "write",
+   "safety": "dangerous",
    "in_use": false,
-   "group": "Other",
+   "group": "EEPROM and registers",
    "note": ""
   },
   {
@@ -2427,7 +2427,7 @@
    "result": "u32",
    "safety": "read",
    "in_use": false,
-   "group": "Other",
+   "group": "EEPROM and registers",
    "note": ""
   },
   {
@@ -2439,7 +2439,7 @@
    "result": "u32",
    "safety": "read",
    "in_use": false,
-   "group": "Other",
+   "group": "EEPROM and registers",
    "note": ""
   },
   {

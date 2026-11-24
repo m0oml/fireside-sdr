@@ -25,6 +25,8 @@ struct RadioModel {
     std::atomic<double> level{0}; double k = 11150, rev_frac = 0.02; bool dead_pa = false; int band = 5; txm::PaCal meter;
     double meter_lag_s = 0;                        // the detector answers with the level of this long ago (the real PA meter lags ~one 0.2 s step)
     mutable std::deque<std::pair<double, double>> lag_hist; double lagged_level() const;
+    // The KEY jack and PTT contacts (EVENT register and READ_PTT): bit 0 dot, 1 dash, 2 rear RCA PTT, 3 mic PTT
+    std::atomic<uint32_t> contacts{0};
     // EEPROM (READ_TRX_EEPROM_UINT32 answers from it when not empty)
     std::vector<uint8_t> eeprom;
 

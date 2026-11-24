@@ -197,6 +197,12 @@ TEST(pa_meter_hits_the_calibration_points_and_reads_swr) {
     CHECK_NEAR(*txm::read(c, 5, 966, 966).swr, 25.0, 1e-9);                                           // reflected >= forward: shown as 25
     txm::PaCal bad; CHECK_EQ(txm::watts(bad, 5, 900), 0.0); CHECK(!txm::read(bad, 5, 900, 100).swr);  // no calibration: no meter
 }
+TEST(supply_and_pa_temperature_readings_use_powersdrs_scaling) {
+    CHECK_NEAR(txm::supply_volts(2055), 13.80, 0.01); CHECK_NEAR(txm::supply_volts(4095), 27.49, 0.01); CHECK_EQ(txm::supply_volts(0), 0.0);
+    CHECK_NEAR(txm::pa_temp_c(959), 35.0, 0.2); CHECK_NEAR(txm::pa_temp_c(360), 201.1, 0.2);     // 0.585 V = 35 C; 0.22 V = 201 C (PowerSDR: 301 - mV / 2.2)
+    sim::DiceBus bus; sim::RadioModel r(bus);
+    CHECK_NEAR(txm::supply_volts(int(r.pa_adc(txm::kAdcSupply))), 13.8, 0.01); CHECK_NEAR(txm::pa_temp_c(int(r.pa_adc(txm::kAdcTemp))), 35.0, 0.2);   // the simulated radio, on receive
+}
 TEST(pa_meter_calibration_comes_from_the_eeprom_or_not_at_all) {
     Decoded d; TableResult b; b.name = "PA bridge"; b.pointer_ok = b.checksum_ok = true; TableResult s; s.name = "PA SWR"; s.pointer_ok = s.checksum_ok = true;
     for (int i = 0; i < 11; ++i) { b.values.push_back({0.15, 0.22, 0.37, 0.54, 0.81, 1.78}); s.values.push_back({1.0 + 0.05 * i}); }
@@ -634,7 +640,7 @@ TEST(tx_key_hook_runs_right_before_mox_on_and_right_after_mox_off) {   // the se
     if (backup_image().empty()) return;
     TxRig r; r.tx->arm(backup_image(), backup_image());
     std::vector<std::pair<bool, size_t>> ev;                                        // (keyed?, SET_MOX writes so far)
-    r.tx->set_key_hook([&](bool k) { ev.push_back({k, sent(r, "RDAL_OP_SET_MOX").size()}); });
+    r.tx->set_key_hook([&](bool k, double) { ev.push_back({k, sent(r, "RDAL_OP_SET_MOX").size()}); });
     txc::Options o; auto res = r.tx->ramp(14.10, 2.0, o);
     CHECK(res.reached); CHECK_EQ(ev.size(), size_t(2));
     CHECK(ev[0].first && ev[0].second == 0);                                        // before the key: no MOX yet
@@ -888,4 +894,103 @@ TEST(tx_over_limits_have_absolute_ceilings) {
     CHECK_NEAR(txc::fwd_limit_w(100), 110.0, 1e-9); CHECK_NEAR(txc::hard_fwd_limit_w(100), 130.0, 1e-9);   // 100 W: not 150 / 300
     CHECK_NEAR(txc::fwd_limit_w(50), 75.0, 1e-9); CHECK_NEAR(txc::hard_fwd_limit_w(50), 130.0, 1e-9);
     for (double w = 1; w <= 100; w += 1) CHECK(txc::hard_fwd_limit_w(w) > txc::fwd_limit_w(w));
+}
+
+// ---------------------------------------------------------------- CW (semi break-in)
+namespace {
+struct ScriptKeys : txc::ICwKeys {                                                    // the paddle as a function of time since the over first asked
+    std::function<uint8_t(double)> f; std::chrono::steady_clock::time_point t0{}; bool started = false; int calls = 0;
+    explicit ScriptKeys(std::function<uint8_t(double)> g) : f(std::move(g)) {}
+    uint8_t paddles() override { if (!started) { started = true; t0 = std::chrono::steady_clock::now(); } ++calls;
+        return f(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()); }
+};
+struct CwRig : TxRig {                                                                // keeps every transmitted frame
+    std::vector<std::complex<double>> iq; std::vector<std::pair<double, size_t>> marks; std::vector<std::pair<bool, double>> hook;
+    CwRig() {
+        tx = std::make_unique<txc::TxControl>(fx, [this](double) { return std::unique_ptr<IPcmOut>(new CapPcm(&sim.level, 48000, &iq, &marks, [] { return wall_utc(); })); }, atu::real_clock());
+        tx->set_k(5, 11150); tx->set_key_hook([this](bool k, double off) { hook.push_back({k, off}); });
+    }
+    std::vector<std::pair<size_t, size_t>> marks_on(double thr = 0.5) const {        // [start, end) of each keyed element, at half amplitude
+        double pk = 0; for (auto& z : iq) pk = std::max(pk, std::abs(z));
+        std::vector<std::pair<size_t, size_t>> m; bool on = false; size_t s = 0;
+        for (size_t i = 0; i < iq.size(); ++i) { const bool o = std::abs(iq[i]) > thr * pk; if (o && !on) s = i; if (!o && on) m.push_back({s, i}); on = o; }
+        if (on) m.push_back({s, iq.size()}); return m;
+    }
+};
+}  // namespace
+TEST(cw_paddle_sends_dits_on_the_dial_at_the_set_power_and_unkeys_after_the_hang) {
+    if (backup_image().empty()) return;
+    CwRig r; r.tx->arm(backup_image(), backup_image());
+    ScriptKeys keys([](double t) { return uint8_t(t < 0.25 ? 1 : 0); });             // the dit paddle held for 250 ms
+    txc::CwOptions c; c.power_w = 10; c.keyer.wpm = 20; c.hang_s = 0.3;
+    const auto res = r.tx->cw(14.030, keys, c);
+    CHECK(res.keyed); CHECK(res.stop.find("CW over finished") != std::string::npos); CHECK(!r.sim.keyed); CHECK(!r.tx->keyed());
+    CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(2));                            // one over: key, unkey
+    CHECK(res.max_fwd_w > 7.0 && res.max_fwd_w <= 1.15 * 10);
+    auto modes = sent(r, "RDAL_OP_SET_TX_DSP_MODE"); CHECK(!modes.empty()); CHECK_EQ(modes.back().d1, 4u);   // CWU
+    CHECK_EQ(r.hook.size(), size_t(2)); CHECK(r.hook[0].first); CHECK_NEAR(r.hook[0].second, txc::kCwOffsetHz, 1e-9);   // the DDS 1 kHz below the dial for the over
+    const auto m = r.marks_on(); CHECK(m.size() >= 3 && m.size() <= 5);              // 250 ms of dits at 20 wpm (120 ms each, the last one completes)
+    for (auto& e : m) CHECK_NEAR(double(e.second - e.first) / 48000, 0.060, 0.004);    // one unit = 60 ms at 20 wpm
+    for (size_t i = 1; i < m.size(); ++i) CHECK_NEAR(double(m[i].first - m[i - 1].first) / 48000, 0.120, 0.004);
+    {   // the carrier: 1 kHz above the DDS (= on the dial), nothing at the image
+        std::complex<double> up, dn; const auto& e = m.front();
+        for (size_t i = e.first + 240; i < e.second - 240; ++i) { const auto z = std::conj(r.iq[i]); const auto w = std::polar(1.0, 2 * M_PI * 1000 * double(i) / 48000); up += z * std::conj(w); dn += z * w; }
+        CHECK(20 * std::log10(std::abs(up) / (std::abs(dn) + 1e-30)) > 20);
+    }
+    const size_t last = m.back().second; CHECK(double(r.iq.size() - last) / 48000 > 0.25);   // MOX held through the hang with the carrier at zero
+    CHECK(double(m.front().first) / 48000 > 0.005);                                    // the first element starts after MOX (no hot switching)
+}
+TEST(cw_text_iambic_squeeze_straight_key_and_paddle_breaks_the_text) {
+    if (backup_image().empty()) return;
+    {   // text: "E" = one dit, then the over ends by itself
+        CwRig r; r.tx->arm(backup_image(), backup_image()); ScriptKeys keys([](double) { return uint8_t(0); });
+        txc::CwOptions c; c.text = "E"; c.hang_s = 0.1; const auto res = r.tx->cw(14.030, keys, c);
+        CHECK(res.keyed && res.text_done && !res.text_stopped); CHECK_EQ(r.marks_on().size(), size_t(1));
+    }
+    {   // the paddle during a text stops the text and keys the paddle instead
+        CwRig r; r.tx->arm(backup_image(), backup_image()); ScriptKeys keys([](double t) { return uint8_t(t > 0.3 && t < 0.35 ? 2 : 0); });
+        txc::CwOptions c; c.text = "TEST TEST TEST"; c.hang_s = 0.2; const auto res = r.tx->cw(14.030, keys, c);
+        CHECK(res.text_stopped && !res.text_done); CHECK(res.seconds < 2.0);
+    }
+    {   // a squeeze (both paddles) alternates dah dit; mode B adds one more element after release
+        CwRig r; r.tx->arm(backup_image(), backup_image()); ScriptKeys keys([](double t) { return uint8_t(t < 0.05 ? 2 : t < 0.40 ? 3 : 0); });
+        txc::CwOptions c; c.keyer.wpm = 20; c.hang_s = 0.2; r.tx->cw(14.030, keys, c);
+        const auto m = r.marks_on(); CHECK(m.size() >= 3);
+        CHECK_NEAR(double(m[0].second - m[0].first) / 48000, 0.180, 0.005); CHECK_NEAR(double(m[1].second - m[1].first) / 48000, 0.060, 0.005);   // dah, dit
+    }
+    {   // straight key: the contact itself, any length
+        CwRig r; r.tx->arm(backup_image(), backup_image()); ScriptKeys keys([](double t) { return uint8_t(t < 0.5 ? 1 : 0); });
+        txc::CwOptions c; c.straight = true; c.hang_s = 0.2; r.tx->cw(14.030, keys, c);
+        const auto m = r.marks_on(); CHECK_EQ(m.size(), size_t(1)); if (!m.empty()) CHECK_NEAR(double(m[0].second - m[0].first) / 48000, 0.5, 0.01);
+    }
+}
+TEST(cw_refusals_stuck_key_and_stop_leave_the_radio_unkeyed) {
+    if (backup_image().empty()) return;
+    CwRig r; r.tx->arm(backup_image(), backup_image()); ScriptKeys down([](double) { return uint8_t(1); });
+    txc::CwOptions c; c.power_w = 101; CHECK(!r.tx->cw(14.03, down, c).keyed); c.power_w = 10;
+    CHECK(!r.tx->cw(7.03, down, c).keyed);                                             // no measured drive level on 40 m in this rig
+    CHECK(!r.tx->cw(14.5, down, c).keyed);                                             // outside the band
+    c.text = "CQ {X}"; CHECK(!r.tx->cw(14.03, down, c).keyed); c.text.clear();
+    CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(0));
+    c.straight = true; c.max_keydown_s = 1; const auto s = r.tx->cw(14.03, down, c);   // a stuck key
+    CHECK(s.keyed); CHECK(s.stop.find("stuck") != std::string::npos); CHECK(txc::TxControl::is_safety_stop(s.stop)); CHECK(!r.sim.keyed);
+    c.straight = false; c.max_keydown_s = 15;
+    std::thread k([&] { std::this_thread::sleep_for(std::chrono::milliseconds(400)); r.tx->abort(); });
+    const auto a = r.tx->cw(14.03, down, c); k.join();                                 // the paddle held: dits until Stop
+    CHECK(a.keyed); CHECK(a.stop.find("aborted") != std::string::npos); CHECK(!r.sim.keyed);
+}
+#include "fireside/cw_keys.h"
+TEST(cw_key_watcher_latches_short_taps_and_reports_a_press) {
+    std::atomic<uint32_t> bits{0}; std::atomic<int> presses{0};
+    cwk::KeyWatcher w([&]() -> std::optional<uint32_t> { return bits.load(); }, 0.002);
+    w.set_on_press([&] { ++presses; }); w.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); CHECK_EQ(w.take(), uint8_t(0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));                       // no over reading the input for > 100 ms: a press starts one
+    bits = 1; std::this_thread::sleep_for(std::chrono::milliseconds(10)); bits = 0; std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK_EQ(presses.load(), 1); CHECK_EQ(w.current(), uint8_t(0));
+    CHECK_EQ(w.take(), uint8_t(1)); CHECK_EQ(w.take(), uint8_t(0));                     // the tap was kept until taken, once
+    bits = 2; std::this_thread::sleep_for(std::chrono::milliseconds(10)); CHECK_EQ(presses.load(), 1);   // read recently: an over is running, no new start
+    CHECK_EQ(w.take() & 2, 2); bits = 0;
+    w.stop(); CHECK(w.reads() > 10); CHECK_EQ(w.failures(), uint64_t(0));
+    cwk::KeyWatcher bad([]() -> std::optional<uint32_t> { return std::nullopt; }, 0.002); bad.start(); std::this_thread::sleep_for(std::chrono::milliseconds(20)); bad.stop(); CHECK(bad.failures() > 0);
 }

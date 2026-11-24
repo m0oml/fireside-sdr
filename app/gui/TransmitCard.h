@@ -11,6 +11,7 @@
 #include "fireside/qso_seq.h"
 #include "fireside/rigctl.h"
 #include "fireside/eeprom.h"
+#include "fireside/cw_keys.h"
 #include <functional>
 class QCheckBox; class QComboBox; class QDialog; class QDoubleSpinBox; class QLabel; class QLineEdit; class QProgressBar; class QPushButton; class QSpinBox; class QTimer;
 class RadioPanel; class ReceiverPanel; class PowerMeter; class AudioPanel;
@@ -74,6 +75,16 @@ public:
     QWidget* otherProgramsPart() const { return ext_part_; } QLabel* lampLabel() const { return lamp_; } QDialog* tunerDialog() const { return tuner_dialog_; } QPushButton* tunerButton() const { return tuner_btn_; } QPushButton* stopButton() const { return stop_; }
     QWidget* digitalPart() const { return digi_part_; } QWidget* voicePart() const { return voice_part_; }
     QString qsoText() const;                             // the sequencer's one-line state ("" if idle)
+    QString statusText() const;
+    // CW (semi break-in): the KEY jack's paddle or straight key keys an over while the screen is in CW, transmit is armed and "Paddle keys" is
+    // ticked; typed text (or a memory) goes out with Send. TxControl::cw() does the keying (the gate, limits and clamp); see TransmitCardCw.cpp.
+    QWidget* cwPart() const { return cw_part_; }
+    void setCwMemorySource(std::function<QStringList()> f) { cw_mems_ = std::move(f); }
+    QLineEdit* cwTextBox() const { return cw_text_; } QPushButton* cwSendButton() const { return cw_send_; } QLabel* cwLights() const { return cw_lights_; }
+    QCheckBox* cwPaddleBox() const { return cw_paddle_; } QDoubleSpinBox* cwPowerBox() const { return cw_w_; }
+    bool cwWatching() const;                             // the paddle is being read (CW screen, armed, ticked)
+    bool cwOver() const { return cw_over_; }
+    void onReceiveLost(const QString& why);              // receive stopped by itself: the QSO, CQ, anything queued and a CAT-keyed over stop (a tune or the operator's voice PTT carries on)                          // the card's status line (tests)
     QString messageText() const;                         // newest F5K_*_trx.bin in backupDir() (or the remembered one)
     // Keying by other programs over CAT (Hamlib set_ptt): the ONLY implementation of rigctl::PttRequest. An over is TxControl::voice() with the data
     // chain, the "Fireside TX audio" input and the card's power; it keys only while: "Let other programs key" is ticked (never remembered), transmit
@@ -122,6 +133,13 @@ private:
     void extOverEnded(bool may_restart);                                           // GUI thread, from run()'s completion of the program's over
     bool extActive() const; bool requestExt(int client, bool on); void extHeartbeat(int client);
     std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_; void noteSeqEnd(bool may_continue = true); void autoNext(); QSet<QString> auto_tried_; bool auto_reply_ = false, from_cq_ = false, follow_pending_ = false; QPushButton *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
+    QString odd_call_; qint64 odd_call_ms_ = 0;
+    // CW
+    QWidget* cw_part_ = nullptr; QSpinBox *cw_wpm_ = nullptr, *cw_weight_ = nullptr, *cw_hang_ = nullptr; QComboBox *cw_mode_ = nullptr, *cw_mem_ = nullptr; QCheckBox *cw_rev_ = nullptr, *cw_paddle_ = nullptr, *cw_side_ = nullptr;
+    QDoubleSpinBox* cw_w_ = nullptr; QLineEdit* cw_text_ = nullptr; QPushButton *cw_send_ = nullptr, *cw_stop_ = nullptr; QLabel* cw_lights_ = nullptr; QTimer* cw_timer_ = nullptr;
+    std::unique_ptr<class CwSidetone> cw_tone_; std::shared_ptr<fireside::cwk::KeyWatcher> cw_keys_; bool cw_over_ = false; std::function<QStringList()> cw_mems_;
+    void buildCw(); void cwTick(); void startCw(const QString& text); void saveCw(); void loadCw(); bool cwWanted() const;
+    bool rx_hold_ = false;                                     // receive was lost: nothing automatic sends again until the operator presses Send / CQ or double-clicks a station                // a double-click on a callsign no country uses: asked to confirm (second click within 15 s)
     QCheckBox* auto_seq_ = nullptr; std::unique_ptr<fireside::seq::Sequencer> seq_; std::function<QString()> my_grid_;
     void pauseReceive(); QString resumeReceive();        // receive pauses for an over (the slot so far decoded first) and comes back after it
     fireside::seq::Sequencer& sequencer(); int test_tries_ = 0;

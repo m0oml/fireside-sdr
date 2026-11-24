@@ -38,6 +38,10 @@ public:
     // (READ_PTT, read-only: bit 3 mic PTT, bit 2 rear RCA PTT). Both need a Started session with writes; false / nullopt otherwise or on a fault.
     bool set_mic_gain_db(int db, std::string* error = nullptr);
     std::optional<uint32_t> read_ptt();
+    // The KEY jack and PTT contacts (bit 0 dot, 1 dash, 2 rear RCA PTT, 3 mic PTT), read-only. event=true: the PAL EVENT register (one quadlet read,
+    // no firmware command: fast enough to poll every few ms for CW); false: the READ_PTT command (the same bitmap). Needs a Started session.
+    std::optional<uint32_t> read_keys(bool event = true);
+    std::optional<uint32_t> read_pa_adc(int channel);               // READ_PA_ADC (read-only; txm::kAdcSupply / kAdcTemp): needs a Started session; nullopt otherwise or on a fault
     bool pump();                                                    // sends a coalesced pending retune if due; call from a timer
     PreampResult set_preamp(bool on);                               // receive preamp on/off through RxPreamp (SET_TRX_PREAMP 0/1 only); NotArmed unless Started
     bool preamp_on() const;

@@ -18,6 +18,11 @@ int band_of(double freq_hz);
 int band_from_name(const std::string& name);                      // "20m" -> 5; -1 if unknown
 
 inline constexpr int kAdcFwd = 7, kAdcRev = 6;                    // READ_PA_ADC channels
+// The PA board's other two readings (PowerSDR ZZRV / ZZTS and its FireWire test window; 12-bit ADC, 2.5 V reference): the 13.8 V supply through an
+// 11:1 divider, and the PA temperature sensor (301 - mV / 2.2 degrees C). Read-only.
+inline constexpr int kAdcSupply = 2, kAdcTemp = 4;                // FLEX-5000 (the FLEX-3000's temperature is channel 3)
+inline double supply_volts(int adc) { return adc / 4096.0 * 2.5 * 11.0; }
+inline double pa_temp_c(int adc) { return 301.0 - adc / 4096.0 * 2.5 * 1000.0 / 2.2; }
 
 struct PaCal {
     std::array<std::array<double, 6>, kBands> bridge{};           // volts at the six reference powers

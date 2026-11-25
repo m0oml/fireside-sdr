@@ -580,9 +580,19 @@ void ReceiverPanel::refresh() {
     const auto frames = engine_.take_frames();
     const auto est = engine_.status();
     const float frame_dt = (est.fft_size && spectrum_->spanHz() > 0) ? float(double(est.fft_size / 2) / spectrum_->spanHz()) : 2048.f / 48000.f;   // seconds between spectrum frames (50 % overlap)
+    // The waterfall scrolls at the same speed at every sample rate: one row per (fft/2)/48 kHz seconds, as at 48 kHz. At 96 / 192 kHz the
+    // frames come 2 / 4 times as fast, so they are averaged (in dB) into one row (2026-11-25: it scrolled 4x faster at 192 kHz).
+    const double row_dt = est.fft_size ? double(est.fft_size / 2) / 48000.0 : 2048.0 / 48000.0;
     for (const auto& db : frames) {
         scale_ = scale_tracker_.update(db, frame_dt);        // steady: grows within a second, shrinks over about 20 s, ignores silent frames, never wider than 140 dB
-        waterfall_->pushRow(db, scale_);
+        if (row_acc_.size() != db.size()) { row_acc_.assign(db.size(), 0.0f); row_n_ = 0; row_t_ = 0; }
+        for (size_t i = 0; i < db.size(); ++i) row_acc_[i] += db[i];
+        ++row_n_; row_t_ += frame_dt;
+        if (row_t_ + 1e-6 >= row_dt) {
+            if (row_n_ == 1) waterfall_->pushRow(db, scale_);
+            else { std::vector<float> row(row_acc_.size()); for (size_t i = 0; i < row.size(); ++i) row[i] = row_acc_[i] / float(row_n_); waterfall_->pushRow(row, scale_); }
+            std::fill(row_acc_.begin(), row_acc_.end(), 0.0f); row_n_ = 0; row_t_ -= row_dt; if (row_t_ > row_dt) row_t_ = 0;
+        }
     }
     if (!frames.empty()) { spectrum_->setScale(scale_); spectrum_->setFrame(frames.back()); }
     audio_buf_.clear(); engine_.take_audio(audio_buf_);

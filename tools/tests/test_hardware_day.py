@@ -121,6 +121,21 @@ class Rehearsal(unittest.TestCase):
         g = H.read_dice_global(self.bus); self.assertEqual((g["global_offset"], g["sample_rate"]), (40, 48000))
         self.assertTrue(all(off == pal.CMD for off, _ in self.bus.writes), "only mailbox GETs are ever written")
 
+    def test_a_test_never_opens_the_real_radio(self):
+        # 2026-11-25: midi_factory=None used to mean "find it", so this suite opened the radio's real rawmidi node; snd-dice then started its own
+        # stream and took the receive stream from a running Fireside mid-QSO. None now means no route; discovery stays inside the given trees.
+        import firesidectl.transport as T
+        called = []
+        real = T.list_midi_devices; H.list_midi_devices = lambda *a, **k: called.append(a) or real(*a, **k)
+        try:
+            H.run(self.out, midi_factory=None, bus_factory=None, sysfs="/nonexistent", procfs="/nonexistent", devdir="/nonexistent", skip_eeprom=True)
+            self.assertEqual(called, [])
+            rep = H.run(self.out, sysfs="/nonexistent", procfs="/nonexistent", devdir="/nonexistent", skip_eeprom=True)   # auto: looks only there
+            self.assertEqual(called, [("/nonexistent", "/nonexistent")]); self.assertEqual(rep.facts["midi_works"], "no device")
+        finally:
+            H.list_midi_devices = real
+        self.assertEqual(T.list_midi_devices("/nonexistent", "/nonexistent"), [])
+
     def test_no_routes_still_reports(self):
         rep = H.run(self.out, midi_factory=None, bus_factory=None, sysfs="/nonexistent", procfs="/nonexistent",
                     devdir="/nonexistent", skip_eeprom=True)

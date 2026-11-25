@@ -488,10 +488,12 @@ bool ReceiverPanel::loadLive(const QString& device, double rate) {
     } catch (const std::exception& e) { note_ = QString("Cannot start capture: ") + e.what(); updateStatus(); return false; }
 }
 bool ReceiverPanel::loadLiveDirect(unsigned rate) {
+    if (!wait_retry_) wait_rate_ = 0;                                            // chosen by hand: no longer waiting for the stream
     try {
         forgetLiveDevice();                                                          // the radio-jacks output needs snd-dice, which would take the stream back: PC audio only here
         std::unique_ptr<IPcm> pcm; FwIsoOptions o; o.duplex = !qEnvironmentVariableIsSet("FIRESIDE_NO_DUPLEX"); o.out_ring_seconds = 0.04;   // duplex: transmit on our own stream, receive never pauses
-        try { pcm = open_fw_iso_pcm(rate, o); } catch (const std::exception& e) { if (!o.duplex) throw; o.duplex = false; pcm = open_fw_iso_pcm(rate, o); note_ = QString("Duplex stream refused (%1): receive only; transmit will pause receive.").arg(e.what()); }
+        auto open = [this](unsigned r, const FwIsoOptions& op) { return direct_opener_ ? direct_opener_(r, op) : open_fw_iso_pcm(r, op); };
+        try { pcm = open(rate, o); } catch (const std::exception& e) { if (!o.duplex) throw; o.duplex = false; pcm = open(rate, o); note_ = QString("Duplex stream refused (%1): receive only; transmit will pause receive.").arg(e.what()); }
         adopt(std::make_unique<PcmIqSource>(std::move(pcm), 0, 1, 1024), true, true);
         live_rate_ = rate; direct_rate_ = rate; syncRateButtons(rate);
         if (fw_iso_duplex_running()) {                                                       // the radio's jacks are reachable now: offer them, and restore the last choice
@@ -506,7 +508,7 @@ bool ReceiverPanel::loadLiveDirect(unsigned rate) {
                appLog("receiver", QString("Direct FireWire stream at %1 kHz%2. Audio plays on the PC; the radio-jacks output needs the ALSA capture.").arg(rate / 1000).arg(fw_iso_duplex_running() ? ", duplex: transmit keeps receive running" : "")); }
         { const std::string n = fw_iso_last_open_note(); if (!n.empty()) { note_ += QString(" Note: %1.").arg(QString::fromStdString(n)); appLog("receiver", QString::fromStdString(n)); } }
         updateStatus(); return playing_;
-    } catch (const std::exception& e) { note_ = QString("Cannot start the direct stream: ") + e.what(); appLog("receiver", note_); updateStatus(); return false; }
+    } catch (const std::exception& e) { note_ = QString("Cannot start the direct stream: ") + e.what(); if (!wait_retry_) appLog("receiver", note_); updateStatus(); return false; }
 }
 void ReceiverPanel::syncRateButtons(unsigned rate) {
     static const unsigned k[3] = {48000, 96000, 192000};
@@ -824,9 +826,26 @@ void ReceiverPanel::restartDirect(const QString& why) {
         if (direct_rate_ != rate) return;                                        // closed or changed by hand in the meantime
         closeLive();
         if (loadLiveDirect(rate)) { appLog("receiver", "direct stream restarted"); note_ = QString("Stream restarted by itself (try %1 of %2).").arg(restarts_).arg(kMaxRestarts); updateStatus(); }
+        else if (note_.contains("already streaming")) waitForStream(rate, QDateTime::currentMSecsSinceEpoch() + kWaitMs);
+    });
+}
+void ReceiverPanel::waitForStream(unsigned rate, qint64 until_ms) {
+    if (wait_rate_ != rate) appLog("receiver", QString("another program has the radio's stream: looking again every %1 s for %2 min, and taking it back once it is free").arg(wait_poll_ms_ / 1000.0).arg(kWaitMs / 60000));
+    wait_rate_ = rate;
+    note_ = "Another program has the radio's stream (snd-dice / ALSA?): waiting for it to let go ..."; updateStatus();
+    QTimer::singleShot(int(wait_poll_ms_), this, [this, rate, until_ms] {
+        if (wait_rate_ != rate || engine_.status().live) return;                 // Stop radio, a source chosen by hand, or a pause for transmit: no longer ours to reopen
+        wait_retry_ = true; const bool ok = loadLiveDirect(rate); wait_retry_ = false;
+        if (ok) { wait_rate_ = 0; restarts_ = 0; appLog("receiver", "the radio's stream is free again: direct stream restarted"); note_ = "Stream taken back after another program let go of it."; updateStatus(); return; }
+        if (!note_.contains("already streaming") || QDateTime::currentMSecsSinceEpoch() > until_ms) {
+            wait_rate_ = 0; appLog("receiver", "stopped waiting for the radio's stream: " + note_);
+            note_ = "Stopped: " + note_ + " Press Stop radio, then start it again."; updateStatus(); return;
+        }
+        waitForStream(rate, until_ms);
     });
 }
 bool ReceiverPanel::closeLive() {
+    wait_rate_ = 0;                                                               // Stop radio / a pause for transmit: stop waiting for the stream
     if (!engine_.status().live) return false;
     { engine_.finish_decoder(); std::string t; if (engine_.take_text(t) > 0) addDecodedText(QString::fromStdString(t)); }   // the slot heard so far (e.g. an answer just before we transmit) is decoded, not lost
     setPlaying(false); forgetLiveDevice(); engine_.set_source(nullptr);

@@ -1154,6 +1154,35 @@ int main(int argc, char** argv) {
           r->setSourceIsLive(true); mok = mok && !mb->isChecked();                                   // ...and the live radio remembers that the user turned it off
           mb->setChecked(true); r->setSourceIsLive(false); mok = mok && !mb->isChecked(); r->setSourceIsLive(true); mok = mok && mb->isChecked();
           r->setSourceIsLive(false); if (!mok) { std::puts("receiver smoke FAILED: Mirror I/Q is not remembered per source kind"); return 1; } }
+        {   // the direct stream taken by another program (2026-11-25: snd-dice, started by a test opening the radio's MIDI port): wait, then take it back.
+            // A fake opener stands in for the FireWire stream: no test ever opens the real radio.
+            struct FakeDirect : fireside::IPcm {
+                unsigned r; int fail_after; int n = 0; FakeDirect(unsigned rate, int f) : r(rate), fail_after(f) {}
+                int channels() const override { return 8; } double rate() const override { return r; } std::string describe() const override { return "fake direct stream"; }
+                size_t read(int32_t* x, size_t frames, double t) override {
+                    if (fail_after >= 0 && ++n > fail_after) throw fireside::IoError("direct FireWire stream: no data from the radio for 1 s (stream stopped, or another program took it over)");
+                    QThread::msleep(unsigned(std::min(t, 0.02) * 1000)); const size_t k = std::min<size_t>(frames, r / 50); std::fill_n(x, k * 8, 0); return k; }
+            };
+            int opens = 0, refuse = 0; bool first = true;
+            r->setDirectOpenerForTests([&](unsigned rate, const fireside::FwIsoOptions&) -> std::unique_ptr<fireside::IPcm> {
+                ++opens;
+                if (first) { first = false; return std::make_unique<FakeDirect>(rate, 10); }                // dies after a moment, as the stream did
+                if (refuse > 0) { --refuse; throw fireside::IoError("the radio is already streaming (snd-dice/ALSA or another program has it): close that first"); }
+                return std::make_unique<FakeDirect>(rate, -1); }, 100);
+            auto waitFor = [&](auto cond, int ms) { QEventLoop l; QTimer t; t.setInterval(20); QElapsedTimer e; e.start(); QObject::connect(&t, &QTimer::timeout, [&] { if (cond() || e.elapsed() > ms) l.quit(); }); t.start(); l.exec(); return cond(); };
+            refuse = 6;                                                                                       // the restart and the first 5 looks find it taken
+            bool ok = r->loadLiveDirect(48000);
+            ok = ok && waitFor([&] { return r->status().contains("waiting for it to let go"); }, 4000);
+            ok = ok && waitFor([&] { return r->status().contains("Stream taken back"); }, 4000) && refuse == 0 && r->liveRate() == 48000;
+            const bool taken = ok;
+            first = true; refuse = 1000; const int before = opens;                                            // taken again, then Stop radio: the wait ends
+            ok = r->closeLive() && r->loadLiveDirect(48000) && waitFor([&] { return r->status().contains("waiting for it to let go"); }, 4000);
+            r->closeLive(); const int at_stop = opens; waitFor([&] { return false; }, 500);
+            const bool stopped = ok && opens == at_stop && opens > before;
+            r->closeLive(); r->setDirectOpenerForTests({}, ReceiverPanel::kWaitPollMs); r->loadDemo();
+            if (!taken || !stopped) std::printf("receiver smoke FAILED: a direct stream taken by another program: taken back %d, Stop radio ends the wait %d (%s)\n", int(taken), int(stopped), r->status().toStdString().c_str());
+            if (!taken || !stopped) return 1;
+        }
         int ticks = 0; QTimer heartbeat; heartbeat.setInterval(10); QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++ticks; }); heartbeat.start();
         QTimer::singleShot(1500, &app, &QApplication::quit); app.exec();
         const bool flowing = r->waterfallRows() > 15 && double(r->audioSamples()) > 0.5 * 48000 && r->playing();

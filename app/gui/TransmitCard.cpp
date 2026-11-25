@@ -642,7 +642,7 @@ void TransmitCard::onTune() {
         res = QString("Tune %1 after %2 s (%3). Tuner: ind %4 cap %5 %6, %7, SWR %8. Max %9.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop))
               .arg(s.ind ? *s.ind : -1).arg(s.cap ? *s.cap : -1).arg(s.hiz && *s.hiz ? "Hi-Z" : "Lo-Z").arg(s.fwd_w ? fmt_w(*s.fwd_w) : "?").arg(s.swr ? QString::number(*s.swr, 'f', 2) : "?").arg(fmt_w(r.max_fwd_w));
         if (r.saved) res += " Saved for this band.";
-        if (r.estimated_drive) res += " (Drive from the EEPROM table: press Measure drive now for this band.)";
+        if (r.estimated_drive) res += " (No measured drive on this band yet, so it was estimated: press Measure drive now.)";
         return res;
     });
 }
@@ -874,7 +874,7 @@ void TransmitCard::updateButtons() {
     arm_->setEnabled(started && idle); arm_->setVisible(started && idle && arm_tried_ && !(tx_ && tx_->armed()));   // only to retry a failed check
     const bool on_atu = txAnt() == 1;
     tune_->setEnabled(armed && idle && band >= 0 && on_atu);
-    tune_->setToolTip(band >= 0 && armed && !(tx_->k_for(band) > 0) ? "No measured drive on this band yet: the EEPROM table is used (it errs low; raise the power if the tuner says no RF). Press Measure drive after a good tune."
+    tune_->setToolTip(band >= 0 && armed && !(tx_->k_for(band) > 0) ? "No measured drive on this band yet: Tune borrows the next band's measured level (or the EEPROM table, which errs low). Press Measure drive after a good tune."
                                                                     : "Transmits a carrier (up to 15 s) while the ATU searches. Asks first: listen to the frequency.");
     measure_->setEnabled(armed && idle && band >= 0); test_->setEnabled(armed && idle && band >= 0); test_w_->setEnabled(idle); mirror_->setEnabled(idle);
     send_->setEnabled(armed && idle && band >= 0 && !ft_pending_); cq_->setEnabled(send_->isEnabled()); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_);

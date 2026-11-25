@@ -89,18 +89,20 @@ class RawMidi:
             self.pump(min(left, 0.05))
 
 
-def list_midi_devices():
-    """[(path, card_name)] for every ALSA rawmidi node, with FLEX candidates first."""
+def list_midi_devices(devdir="/dev", procfs="/proc"):
+    """[(path, card_name)] for every ALSA rawmidi node under devdir/snd, with FLEX candidates first.
+    devdir / procfs let a test point this at a fake tree: opening the radio's real rawmidi node makes snd-dice start
+    its own stream on the radio, taking it from a running Fireside (2026-11-25)."""
     names = {}
     try:
-        for line in open("/proc/asound/cards"):
+        for line in open(os.path.join(procfs, "asound", "cards")):
             m = re.match(r"\s*(\d+)\s+\[(\S+)\s*\]:\s*(.*)", line)
             if m:
                 names[int(m.group(1))] = f"{m.group(2)} {m.group(3)}"
     except OSError:
         pass
     out = []
-    for p in sorted(glob.glob("/dev/snd/midiC*D*")):
+    for p in sorted(glob.glob(os.path.join(devdir, "snd", "midiC*D*"))):
         c = int(re.search(r"midiC(\d+)D", p).group(1))
         out.append((p, names.get(c, "?")))
     out.sort(key=lambda t: "flex" not in t[1].lower())

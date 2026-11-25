@@ -178,7 +178,10 @@ def identity_of(fx, rep, tag):
     return idn
 
 
-def run(out_root, *, sysfs="/sys", procfs="/proc", devdir="/dev", midi_factory=None, bus_factory=None, events_seconds=0.0,
+AUTO = object()   # find the radio on this machine (under sysfs / procfs / devdir). None: no such route, never look for one.
+
+
+def run(out_root, *, sysfs="/sys", procfs="/proc", devdir="/dev", midi_factory=AUTO, bus_factory=AUTO, events_seconds=0.0,
         skip_eeprom=False, backups_dir=None, eeprom_prefer="firewire", sleep=time.sleep):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rep = Report(os.path.join(out_root, stamp))
@@ -192,8 +195,8 @@ def run(out_root, *, sysfs="/sys", procfs="/proc", devdir="/dev", midi_factory=N
     ids = {}
     midi = None
     # ---- MIDI route
-    if midi_factory is None:
-        devs = [d for d in list_midi_devices() if "flex" in d[1].lower() or "dice" in d[1].lower()]
+    if midi_factory is AUTO:
+        devs = [d for d in list_midi_devices(devdir, procfs) if "flex" in d[1].lower() or "dice" in d[1].lower()]
         midi_factory = (lambda p=devs[0][0]: RawMidi(p)) if devs else None
     if midi_factory:
         try:
@@ -208,10 +211,12 @@ def run(out_root, *, sysfs="/sys", procfs="/proc", devdir="/dev", midi_factory=N
 
     # ---- FireWire route
     bus = None; fw_fx = None; order = None
-    if bus_factory is None and radio:
-        def bus_factory():
-            from firesidectl.firewire import FwDevice
-            return FwDevice(os.path.join(devdir, radio))
+    if bus_factory is AUTO:
+        bus_factory = None
+        if radio:
+            def bus_factory():
+                from firesidectl.firewire import FwDevice
+                return FwDevice(os.path.join(devdir, radio))
     if bus_factory:
         try:
             bus = bus_factory()

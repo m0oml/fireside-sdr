@@ -23,6 +23,10 @@ REVIEWED_VALUES = {
     "RDAL_OP_INITIALIZE":  lambda d1, d2: d1 == 0 and d2 == 0,
     "RDAL_OP_SET_MOX":     lambda d1, d2: d1 == 0 and d2 == 0,     # un-key only
     "RDAL_OP_SET_PA_BIAS": lambda d1, d2: d1 == 0 and d2 == 0,     # bias off only
+    # the rear TX lines used as band switches (app txlines.h): "do not follow transmit" only
+    "RDAL_OP_SET_AMP_TX1": lambda d1, d2: d1 == 0 and d2 == 0,
+    "RDAL_OP_SET_AMP_TX2": lambda d1, d2: d1 == 0 and d2 == 0,
+    "RDAL_OP_SET_AMP_TX3": lambda d1, d2: d1 == 0 and d2 == 0,
     # tools/firesidectl/restore_flag.py only: put back the "checksums present" flag PowerSDR cleared on 2026-11-18 (0x3F: 0xC5 -> 0xFF). This address and this value only; every other EEPROM write stays refused.
     "RDAL_OP_WRITE_TRX_EEPROM_UINT8": lambda d1, d2: d1 == 0x3F and d2 == 0xC5,
 }

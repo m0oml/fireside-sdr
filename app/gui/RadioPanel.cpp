@@ -100,6 +100,16 @@ void RadioPanel::requestRxAntenna(const QString& name, const QString& why) {
         default: break;                                                          // Unchanged: already on it; NotArmed: not running
     }
 }
+void RadioPanel::setTxLines(const fireside::LineConfig& c) { session_.configure_tx_lines(c); applyTxLines(); }
+void RadioPanel::applyTxLines() {
+    if (session_.state() == RadioSession::State::Started) {
+        switch (session_.apply_tx_lines(rx_->dialHz())) {
+            case fireside::TxLines::Result::Fault: report("A rear TX line could not be set (mailbox fault): transmit is refused until the radio is stopped and started again."); break;
+            default: break;                                                      // Busy: the over in progress set them itself; Unchanged / Sent: fine
+        }
+    }
+    const auto st = session_.tx_lines_state(); emit txLinesState(st[0], st[1], st[2]);
+}
 void RadioPanel::report(const QString& m) { last_error_ = m; emit message(m); }
 QString RadioPanel::statusText() const { return status_->text(); }
 
@@ -154,7 +164,7 @@ bool RadioPanel::startRadio(bool confirmed) {
         if (session_.if_offset_hz() != fireside::dsp::kIfOffsetHz) throw std::logic_error("the session's IF offset does not match the receiver's");   // checked before any write; kRadioIfOffsetHz == dsp::kIfOffsetHz is also a unit test
         session_.start(mhz, ant, [this](const std::string& m) { emit message(QString::fromStdString(m)); });
         rx_->setDialControlsRadio(true); rx_->setPreampControlsRadio(true); rx_->lockIfOffset(true);                      // the DSP must match the DDS: no IF offset while the radio is tuned exactly to the dial
-        emit rxAntennaChanged(QString::fromStdString(ant));
+        emit rxAntennaChanged(QString::fromStdString(ant)); applyTxLines();
         emit message(QString("Radio is up on %1 MHz (%2). The dial box and clicks on the spectrum now tune the radio. Start the I/Q capture next.").arg(mhz, 0, 'f', 6).arg(QString::fromStdString(ant)));
     } catch (const std::exception& e) {                                              // G11: a partial start may have taken the radio out of standby
         ok = false; report(QString("Start stopped: ") + e.what() + (session_.state() == RadioSession::State::Connected && session_.allow_write() ? " (the radio may be partly started: press Stop radio to put it back in standby)" : ""));
@@ -163,7 +173,7 @@ bool RadioPanel::startRadio(bool confirmed) {
 }
 bool RadioPanel::stopRadio() {
     QApplication::setOverrideCursor(Qt::WaitCursor); bool ok = true;
-    try { session_.shutdown([this](const std::string& m) { emit message(QString::fromStdString(m)); }); last_error_.clear(); maybe_started_ = false; rx_->setDialControlsRadio(false); rx_->setPreampControlsRadio(false); rx_->lockIfOffset(false); emit rxAntennaChanged(QString()); const bool closed = rx_->closeLive();   // as PowerSDR: standby, then stop the audio (standby alone keeps receiving)
+    try { session_.shutdown([this](const std::string& m) { emit message(QString::fromStdString(m)); }); last_error_.clear(); maybe_started_ = false; rx_->setDialControlsRadio(false); rx_->setPreampControlsRadio(false); rx_->lockIfOffset(false); emit rxAntennaChanged(QString()); applyTxLines(); const bool closed = rx_->closeLive();   // as PowerSDR: standby, then stop the audio (standby alone keeps receiving)
         emit message(QString("Radio stopped (MOX off, standby, PA bias off).%1 Standby is not power-off: the radio stays powered until you switch it off.").arg(closed ? " Live capture closed." : "")); }
     catch (const std::exception& e) {
         ok = false; report(QString("SHUTDOWN FAILED: ") + e.what() + " (power-cycle the radio if it looks wrong)");
@@ -196,6 +206,7 @@ void RadioPanel::onDial(double hz) {
         case TuneResult::Fault: report(QString("Tuning stopped after a mailbox fault: ") + QString::fromStdString(session_.tuner() ? session_.tuner()->last_error() : "")); break;
         default: break;
     }
+    applyTxLines();                                                                     // the band lines follow the dial (idempotent inside a band)
 }
 void RadioPanel::tick() {
     session_.pump();                                                                   // sends a coalesced pending retune when the rate limit allows

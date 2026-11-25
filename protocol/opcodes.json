@@ -1586,7 +1586,7 @@
    "data2": "u32",
    "result": null,
    "safety": "write",
-   "in_use": false,
+   "in_use": true,
    "group": "Transmit and keying",
    "note": "Rear RCA TX1 key line."
   },
@@ -1598,7 +1598,7 @@
    "data2": "u32",
    "result": null,
    "safety": "write",
-   "in_use": false,
+   "in_use": true,
    "group": "Transmit and keying",
    "note": ""
   },
@@ -1610,7 +1610,7 @@
    "data2": "u32",
    "result": null,
    "safety": "write",
-   "in_use": false,
+   "in_use": true,
    "group": "Transmit and keying",
    "note": ""
   },
@@ -1934,7 +1934,7 @@
    "data2": "u32",
    "result": null,
    "safety": "dangerous",
-   "in_use": false,
+   "in_use": true,
    "group": "Transmit and keying",
    "note": "Keying line AMP RLY TX1 (rear panel) on/off with T/R; also *_DELAY_ENABLE / *_DELAY (ms) for sequencing."
   },
@@ -1946,7 +1946,7 @@
    "data2": "u32",
    "result": null,
    "safety": "dangerous",
-   "in_use": false,
+   "in_use": true,
    "group": "Transmit and keying",
    "note": ""
   },
@@ -1958,7 +1958,7 @@
    "data2": "u32",
    "result": null,
    "safety": "dangerous",
-   "in_use": false,
+   "in_use": true,
    "group": "Transmit and keying",
    "note": ""
   },

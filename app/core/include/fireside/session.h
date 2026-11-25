@@ -14,6 +14,7 @@
 #include "fireside/startup.h"
 #include "fireside/preamp.h"
 #include "fireside/rxant.h"
+#include "fireside/txlines.h"
 #include "fireside/tune.h"
 
 namespace fireside { class IPcmOut; }
@@ -47,6 +48,11 @@ public:
     bool preamp_on() const;
     AntResult set_rx_antenna(RxAnt a);                              // switch the receive antenna through RxAntenna (SET_RX1_ANT 1..4 only); NotArmed unless Started; Unchanged writes nothing
     std::optional<RxAnt> rx_antenna() const;                        // what the radio is set to now (the start-up's choice until changed)
+    // The rear TX lines as band switches (txlines.h). The table is kept across restarts; while Started the lines follow apply_tx_lines(dial) and every
+    // over sets them first. shutdown() switches every used line off; disconnect() writes nothing.
+    void configure_tx_lines(const LineConfig& c);
+    TxLines::Result apply_tx_lines(double dial_hz);                 // NotArmed unless Started
+    std::array<int, kTxLines> tx_lines_state() const;               // -1 unknown, 0 off, 1 on
     // Reviewed shutdown (MOX off, standby, PA bias off, confirmed consumed). Requires allow_write; valid from Connected or Started. On failure the state is kept and the error rethrown.
     void shutdown(const LogFn& log = {});
     void disconnect();                                              // drops everything; does NOT write (call shutdown() first if the radio is started)
@@ -62,7 +68,7 @@ public:
 private:
     Opener open_; std::function<void(double)> sleep_;
     mutable std::mutex m_; State state_ = State::Disconnected; SessionOptions opt_; ByteOrder order_ = ByteOrder::Big;
-    std::unique_ptr<BusHandle> handle_; std::unique_ptr<PalMailbox> mb_; std::unique_ptr<Flex> fx_; std::shared_ptr<Tuner> tuner_; std::shared_ptr<RxPreamp> preamp_; std::shared_ptr<RxAntenna> rxant_; std::shared_ptr<txc::TxControl> tx_;   // a Tuner handed out by tuner() may outlive the session's Flex: disconnect() disarms it first (under the Tuner's own lock, so an in-flight write finishes), and a disarmed Tuner never touches its Flex again
+    std::unique_ptr<BusHandle> handle_; std::unique_ptr<PalMailbox> mb_; std::unique_ptr<Flex> fx_; std::shared_ptr<Tuner> tuner_; std::shared_ptr<RxPreamp> preamp_; std::shared_ptr<RxAntenna> rxant_; std::shared_ptr<TxLines> lines_; LineConfig line_cfg_; std::shared_ptr<txc::TxControl> tx_;   // a Tuner handed out by tuner() may outlive the session's Flex: disconnect() disarms it first (under the Tuner's own lock, so an in-flight write finishes), and a disarmed Tuner never touches its Flex again
     IdentifyOptions ident_opts() const;
 };
 }  // namespace fireside

@@ -13,6 +13,8 @@
 #include "fireside/tx_gate.h"
 #include "fireside/tx_meter.h"
 #include "fireside/tuning.h"
+#include "fireside/rxant.h"
+#include "fireside/txlines.h"
 #include "test_util.h"
 using namespace fireside; using namespace fakedice;
 
@@ -339,6 +341,21 @@ TEST(tx_control_ramp_reaches_the_target_and_measures_the_drive) {
         s2.tx->set_k(5, 11150); s2.tx->arm(backup_image(), backup_image());
         auto sr = s2.tx->ramp(14.336, 2.0, {}); CHECK(!sr.reached); CHECK(sr.stop.find("stream failed") != std::string::npos); CHECK(!s2.sim.keyed);
     }
+}
+TEST(tx_control_tune_on_an_unmeasured_band_borrows_the_next_bands_measured_drive) {
+    if (backup_image().empty()) return;
+    {   TxRig r; r.tx->arm(backup_image(), backup_image());                                            // nothing measured: the EEPROM table (errs low)
+        int from = 7; CHECK_EQ(r.tx->k_estimate(8, &from), 0.0); CHECK_EQ(from, -1);
+        auto t = r.tx->tune(24.915, 3.0, 1.5, {}); CHECK(t.outcome && t.estimated_drive); CHECK(t.max_fwd_w < 2.0); CHECK(!r.sim.keyed); }
+    TxRig r; r.tx->set_k(7, 11150); r.tx->set_k(9, 9000); r.tx->arm(backup_image(), backup_image());   // 15 m and 10 m measured, 12 m not
+    int from = -1; CHECK_EQ(r.tx->k_estimate(8, &from), 11150.0); CHECK_EQ(from, 7);               // the larger k: the lower drive
+    CHECK_EQ(r.tx->k_estimate(7, &from), 11150.0); CHECK_EQ(from, 7);                              // a measured band keeps its own
+    CHECK_EQ(r.tx->k_estimate(3, &from), 0.0); CHECK_EQ(from, -1);                                 // no measured neighbour
+    std::vector<std::string> said; auto t = r.tx->tune(24.915, 3.0, 1.5, {}, {}, [&](const std::string& m) { said.push_back(m); });
+    CHECK(t.outcome && t.estimated_drive); CHECK(t.max_fwd_w > 2.0 && t.max_fwd_w < 5.0); CHECK(!r.sim.keyed);
+    bool named = false; for (auto& m : said) named = named || m.find("using 15m's measured level") != std::string::npos; CHECK(named);
+    CHECK_EQ(r.tx->k_for(8), 0.0);                                                                  // nothing stored for 12 m: Measure drive does that
+    CHECK(!r.tx->tune(24.915, 16, 1.5, {}).outcome);                                               // the 15 W tune limit still holds
 }
 TEST(tx_control_tune_passes_saves_the_band_and_aborts_on_request) {
     if (backup_image().empty()) return;
@@ -769,6 +786,24 @@ TEST(tx_antenna_per_over_and_the_atu_only_on_ant1) {
     const auto ant = sent(r, "RDAL_OP_SET_TX_ANT"); CHECK(!ant.empty()); CHECK_EQ(ant.back().d1, 2u);   // the over went out on ANT2
     CHECK(r.tx->tune(14.10, 3.0, 1.5, o).why_not.find("ATU is on ANT1") != std::string::npos);          // the ATU cannot tune ANT2
     o.tx_ant = 4; CHECK(!r.tx->ramp(14.10, 2.0, o).reached); o.tx_ant = 0; CHECK(!r.tx->ramp(14.10, 2.0, o).reached);   // RX1 IN / nothing: refused
+}
+TEST(band_lines_are_set_and_settled_before_every_key_down_and_a_fault_refuses_the_over) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o;
+    auto lines = std::make_shared<TxLines>(r.fx); LineConfig c; c.role[1] = LineRole::Band; size_t nb = 0; auto* bands = rx_bands(nb);
+    for (size_t i = 0; i < nb; ++i) if (std::string(bands[i].id) == "20m") c.band_mask[1] = 1u << i;
+    lines->configure(c); lines->arm(); r.tx->set_lines(lines);
+    auto res = r.tx->ramp(14.10, 2.0, o); CHECK(res.reached);
+    const auto w = write_ops(r.bus); size_t rca = w.size(), mox = w.size();
+    for (size_t i = 0; i < w.size(); ++i) { if (w[i].op == opv("RDAL_OP_SET_RCA_TX2") && rca == w.size()) rca = i; if (w[i].op == opv("RDAL_OP_SET_MOX") && w[i].d1 == 1 && mox == w.size()) mox = i; }
+    CHECK(rca < w.size()); CHECK(mox < w.size()); CHECK(rca < mox); CHECK_EQ(w[rca].d1, 1u);                // TX2 on (20 m) before the key went down
+    CHECK(sent(r, "RDAL_OP_SET_RCA_TX1").empty() && sent(r, "RDAL_OP_SET_RCA_TX3").empty());               // unused lines untouched
+    CHECK_EQ(sent(r, "RDAL_OP_SET_RCA_TX2").size(), size_t(1));                                            // and nothing switched during or after the over
+    lines->disarm(); const size_t moxes = sent(r, "RDAL_OP_SET_MOX").size();
+    auto no = r.tx->ramp(14.10, 2.0, o); CHECK(!no.reached); CHECK(no.stop.find("rear TX lines") != std::string::npos);
+    auto t = r.tx->tune(14.10, 3.0, 1.5, o); CHECK(t.why_not.find("rear TX lines") != std::string::npos);
+    CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), moxes);                                                    // nothing keyed
+    r.tx->set_lines(nullptr); CHECK(r.tx->ramp(14.10, 2.0, o).reached);                                    // no lines in use: as before
 }
 TEST(test_tone_hold_compares_our_meter_with_the_tuner) {
     if (backup_image().empty()) return;

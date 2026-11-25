@@ -67,6 +67,9 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
     connect(antennas_, &AntennaPanel::antennaWanted, radio_, &RadioPanel::requestRxAntenna);
     connect(radio_, &RadioPanel::runningChanged, antennas_, &AntennaPanel::setRadioRunning);
     connect(radio_, &RadioPanel::rxAntennaChanged, this, [this](const QString& a) { antennas_->setActiveAntenna(a); receiver_->setRxAntennaText(a); });
+    radio_->setTxLines(antennas_->lineConfig());                                              // the rear TX lines as band switches (nothing is sent until the radio runs and a line is used)
+    connect(antennas_, &AntennaPanel::linesChanged, radio_, [this] { radio_->setTxLines(antennas_->lineConfig()); });
+    connect(radio_, &RadioPanel::txLinesState, antennas_, &AntennaPanel::setLineStates);
     antennas_->onDial(receiver_->dialHz());
     connect(receiver_, &ReceiverPanel::rateRequested, this, [this](unsigned rate) { radio_->startAtRate(rate, false); });
     connect(receiver_, &ReceiverPanel::stopRadioRequested, this, [this] { radio_->stopRadio(); });

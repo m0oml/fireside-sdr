@@ -106,9 +106,9 @@ The same table for programs: [`opcodes.json`](opcodes.json) and [`opcodes.csv`](
 | 1252 | `SET_XVEN` | w | u32, u32 | write | |  |
 | 1253 | `SET_XVTXEN` | w | u32, u32 | dangerous | |  |
 | 1266 | `READ_PTT` | r | u32, u32 -> u32 | read | yes | Returns the same bitmap as the EVENT register: bit0 dot, bit1 dash, bit2 RCA PTT, bit3 mic PTT. |
-| 1269 | `SET_RCA_TX1` | w | u32, u32 | write | | Rear RCA TX1 key line. |
-| 1270 | `SET_RCA_TX2` | w | u32, u32 | write | |  |
-| 1271 | `SET_RCA_TX3` | w | u32, u32 | write | |  |
+| 1269 | `SET_RCA_TX1` | w | u32, u32 | write | yes | Rear RCA TX1 key line. |
+| 1270 | `SET_RCA_TX2` | w | u32, u32 | write | yes | |
+| 1271 | `SET_RCA_TX3` | w | u32, u32 | write | yes | |
 | 1276 | `SET_TR` | w | u32, u32 | dangerous | | 0/1 T/R relay. Used only in calibration routines. |
 | 1280 | `SET_TXMON` | w | u32, u32 | write | |  |
 | 1281 | `SET_XVCOM` | w | u32, u32 | write | |  |
@@ -118,9 +118,9 @@ The same table for programs: [`opcodes.json`](opcodes.json) and [`opcodes.csv`](
 | 1292 | `SET_MOX` | w | u32, u32 | dangerous | yes | 0/1 key/unkey the transmitter. DANGEROUS-gated; needs a correct antenna/dummy load. |
 | 1296 | `SET_FULL_DUPLEX` | w | u32, u32 | dangerous | yes | 0/1 full duplex (TX during RX path). On, the transmit DDS (SET_TX_FREQ_TW) runs while receive stays on its own frequency: the built-in generator sits there (page 6). |
 | 1297 | `SET_TX_DAC` | w | u32, u32 | dangerous | |  |
-| 1298 | `SET_AMP_TX1` | w | u32, u32 | dangerous | | Keying line AMP RLY TX1 (rear panel) on/off with T/R; also *_DELAY_ENABLE / *_DELAY (ms) for sequencing. |
-| 1299 | `SET_AMP_TX2` | w | u32, u32 | dangerous | |  |
-| 1300 | `SET_AMP_TX3` | w | u32, u32 | dangerous | |  |
+| 1298 | `SET_AMP_TX1` | w | u32, u32 | dangerous | yes | Keying line AMP RLY TX1 (rear panel) on/off with T/R; also *_DELAY_ENABLE / *_DELAY (ms) for sequencing. |
+| 1299 | `SET_AMP_TX2` | w | u32, u32 | dangerous | yes | |
+| 1300 | `SET_AMP_TX3` | w | u32, u32 | dangerous | yes | |
 | 1301 | `SET_XVTR_ACTIVE` | ? | u32, u32 | dangerous | | Transverter active. |
 | 1302 | `SET_XVTR_SPLIT` | w | u32, u32 | dangerous | | Transverter split. |
 | 1322 | `SET_AMP_TX1_DELAY_ENABLE` | w | u32, u32 | dangerous | |  |

@@ -11,7 +11,8 @@ bool Safety::matches_dangerous(const std::string& n) {
 }
 bool Safety::value_restricted(const std::string& n) {
     return n == "RDAL_OP_INITIALIZE" || n == "RDAL_OP_SET_MOX" || n == "RDAL_OP_SET_PA_BIAS" || n == "RDAL_OP_ATU_SEND_CMD" || n == "RDAL_OP_PA_POT_SET_RDAC" || n == "RDAL_OP_SET_TRX_POT"
-        || n == "RDAL_OP_WRITE_CODEC_REG" || n == "RDAL_OP_SET_FULL_DUPLEX";
+        || n == "RDAL_OP_WRITE_CODEC_REG" || n == "RDAL_OP_SET_FULL_DUPLEX"
+        || n == "RDAL_OP_SET_AMP_TX1" || n == "RDAL_OP_SET_AMP_TX2" || n == "RDAL_OP_SET_AMP_TX3";   // (0, 0) only: the rear TX line does NOT follow transmit (txlines.h)
 }
 bool Safety::calibrated_value(const std::string& n, uint32_t d1, uint32_t d2) const {
     std::lock_guard<std::mutex> l(m_);

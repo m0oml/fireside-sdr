@@ -57,7 +57,8 @@ Identity RadioSession::start(double freq_mhz, const std::string& rx_ant, const L
     auto tuner = std::make_shared<Tuner>(*fx_, tc); tuner->arm(freq_mhz * 1e6);   // last sent = this dial (its DDS went out in the start-up)
     auto preamp = std::make_shared<RxPreamp>(*fx_); preamp->arm();            // start-up has just forced the preamp off
     auto rxant = std::make_shared<RxAntenna>(*fx_); rxant->arm(rx_ant);          // the start-up has just selected rx_ant
-    tuner_ = std::move(tuner); preamp_ = std::move(preamp); rxant_ = std::move(rxant); state_ = State::Started;
+    auto lines = std::make_shared<TxLines>(*fx_); lines->configure(line_cfg_); lines->arm();   // nothing is written until a line is used (apply / an over)
+    tuner_ = std::move(tuner); preamp_ = std::move(preamp); rxant_ = std::move(rxant); lines_ = std::move(lines); state_ = State::Started;
     return idn;
 }
 
@@ -100,6 +101,15 @@ AntResult RadioSession::set_rx_antenna(RxAnt a) {
     return r->request(a);
 }
 std::optional<RxAnt> RadioSession::rx_antenna() const { std::lock_guard<std::mutex> l(m_); return rxant_ ? rxant_->current() : std::nullopt; }
+void RadioSession::configure_tx_lines(const LineConfig& c) {
+    std::shared_ptr<TxLines> t; { std::lock_guard<std::mutex> l(m_); line_cfg_ = c; t = lines_; }
+    if (t) t->configure(c);
+}
+TxLines::Result RadioSession::apply_tx_lines(double dial_hz) {
+    std::shared_ptr<TxLines> t; { std::lock_guard<std::mutex> l(m_); if (state_ != State::Started) return TxLines::Result::NotArmed; t = lines_; }
+    return t ? t->apply(dial_hz) : TxLines::Result::NotArmed;
+}
+std::array<int, kTxLines> RadioSession::tx_lines_state() const { std::lock_guard<std::mutex> l(m_); return lines_ ? lines_->state() : std::array<int, kTxLines>{{-1, -1, -1}}; }
 
 std::shared_ptr<txc::TxControl> RadioSession::transmit(txc::PcmFactory pcm) {
     std::lock_guard<std::mutex> l(m_);
@@ -107,6 +117,8 @@ std::shared_ptr<txc::TxControl> RadioSession::transmit(txc::PcmFactory pcm) {
     if (!tx_ || tx_->retired()) {
         tx_ = std::make_shared<txc::TxControl>(*fx_, std::move(pcm));
         std::weak_ptr<Tuner> wt = tuner_; const double rx_off = opt_.if_offset_hz;
+        tx_->set_lines(lines_);
+        std::weak_ptr<txc::TxControl> wtx = tx_; if (lines_) lines_->set_busy([wtx] { auto t = wtx.lock(); return t && t->busy(); });   // no line changes during an over
         tx_->set_key_hook([wt, rx_off](bool keyed, double below) { if (auto t = wt.lock()) t->set_if_offset(keyed ? below : rx_off); });   // the shared RX1/TX DDS: on the dial for the over (a CW over: 1 kHz below it), back to the IF shift after
     }
     return tx_;
@@ -121,8 +133,9 @@ void RadioSession::shutdown(const LogFn& log) {
     if (tuner_) tuner_->disarm();                                              // no retunes while shutting down
     if (preamp_) { preamp_->request(false); preamp_->disarm(); }               // preamp back off (as at start-up); a fault here is ignored, the shutdown steps follow
     if (rxant_) rxant_->disarm();                                              // no antenna switching while shutting down
+    if (lines_) lines_->release();                                             // every used rear TX line off (off = the external gear's safe position)
     run_steps(*fx_, shutdown_steps(), log);                                    // throws on failure: state kept so the caller can retry
-    tx_.reset(); state_ = State::Connected;
+    tx_.reset(); lines_.reset(); state_ = State::Connected;
 }
 
 void RadioSession::disconnect() {
@@ -132,6 +145,7 @@ void RadioSession::disconnect() {
     if (tuner_) tuner_->disarm();                                              // a Tuner still held elsewhere can no longer write
     if (preamp_) preamp_->disarm();
     if (rxant_) rxant_->disarm();
-    tuner_.reset(); preamp_.reset(); rxant_.reset(); tx_.reset(); fx_.reset(); mb_.reset(); handle_.reset(); state_ = State::Disconnected;
+    if (lines_) lines_->disarm();                                              // no writes here (the Flex is going away)
+    tuner_.reset(); preamp_.reset(); rxant_.reset(); lines_.reset(); tx_.reset(); fx_.reset(); mb_.reset(); handle_.reset(); state_ = State::Disconnected;
 }
 }  // namespace fireside

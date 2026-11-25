@@ -73,6 +73,13 @@ void TxControl::disarm() { armed_ = false; abort_ = true; std::lock_guard<std::m
 void TxControl::retire() { retired_ = true; disarm(); }
 
 double TxControl::k_for(int band) const { auto it = k_.find(band); return it != k_.end() ? it->second : 0.0; }
+double TxControl::k_estimate(int band, int* from) const {
+    if (from) *from = -1;
+    if (k_for(band) > 1000) { if (from) *from = band; return k_for(band); }
+    double best = 0; int b = -1;
+    for (int n : {band - 1, band + 1}) if (n >= 0 && n < txm::kBands && k_for(n) > 1000 && k_for(n) > best) { best = k_for(n); b = n; }
+    if (from) *from = b; return best;
+}
 std::map<int, double> parse_drive_text(const std::string& text) {
     std::map<int, double> m; std::istringstream in(text); std::string line;
     while (std::getline(in, line)) {
@@ -89,6 +96,10 @@ std::string drive_text(const std::map<int, double>& k) {
 }
 void TxControl::set_k(int band, double k) { if (band >= 0 && band < txm::kBands && k > 1000) k_[band] = k; }
 
+std::string TxControl::lines_ready(double mhz) {
+    std::shared_ptr<TxLines> l; { std::lock_guard<std::mutex> g(lines_m_); l = lines_; }
+    return l ? l->for_over(mhz * 1e6) : std::string();
+}
 void TxControl::prepare(double mhz, uint32_t mode, int ant) {
     if (ant < 1 || ant > 3) throw std::invalid_argument("transmit antenna must be ANT1..ANT3");
     fx_.set("RDAL_OP_SET_TX_ANT", uint32_t(ant), 0);
@@ -100,7 +111,7 @@ void TxControl::prepare(double mhz, uint32_t mode, int ant) {
 }
 
 double TxControl::test_cap(int band) const {     // tunes, drive ramps and test tones (15 W at most): the hard clamp stays at 30 W, as during bring-up
-    const double k = k_for(band);
+    const double k = k_estimate(band);
     return std::min(drive_cap(band), k > 1000 ? std::sqrt(30.0 / k) : txs::drive_for_watts(cal_, band, 30.0));
 }
 double TxControl::drive_cap(int band) const {
@@ -120,6 +131,7 @@ RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const 
     if (!(hold_s > 0) || hold_s > 10) { r.stop = "hold must be 0..10 s"; return r; }
     const double d1w = txs::drive_for_watts(cal_, band, 1.0), dcap = test_cap(band);
     if (o.tx_ant < 1 || o.tx_ant > 3) { r.stop = "transmit antenna must be ANT1..ANT3"; return r; }
+    if (auto why = lines_ready(mhz); !why.empty()) { r.stop = why; return r; }
     prepare(mhz, 1, o.tx_ant);
     txo::ToneSource src(o.rate, 8); src.set_cap(dcap); src.set_target(0); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]);
@@ -190,12 +202,14 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     if (!atu::threshold_request(threshold)) { r.why_not = "the tuner only knows thresholds 1.1, 1.3, 1.5, 1.7, 2.0, 2.5, 3.0"; return r; }
     // The drive: this band's measured level if there is one; otherwise the EEPROM power table, which on 20 m gave ~5 dB LESS than the power it names
     // (so a first tune on a new band errs low; the tuner says "no RF" if it is too little). A measurement needs a match, so the first tune comes first.
-    const double k = k_for(band), dcap = test_cap(band);
+    int from = -1; const double k = k_estimate(band, &from), dcap = test_cap(band);
     const double drive = k > 1000 ? std::sqrt(power_w / k) : txs::drive_for_watts(cal_, band, power_w);
-    r.estimated_drive = !(k > 1000);
+    r.estimated_drive = from != band;
     if (!(drive > 0)) { r.why_not = "no drive for this band"; return r; }
-    if (r.estimated_drive) say(log, std::string("no measured drive on ") + txm::band_name(band) + ": using the EEPROM power table (errs low); press Measure drive after a good tune");
+    if (r.estimated_drive && from >= 0) say(log, std::string("no measured drive on ") + txm::band_name(band) + ": using " + txm::band_name(from) + "'s measured level; press Measure drive after a good tune");
+    else if (r.estimated_drive) say(log, std::string("no measured drive on ") + txm::band_name(band) + ": using the EEPROM power table (errs low); press Measure drive after a good tune");
     if (drive > dcap) { r.why_not = "the drive for this power is above the tune ceiling (30 W)"; return r; }
+    if (auto why = lines_ready(mhz); !why.empty()) { r.why_not = why; return r; }
     prepare(mhz, 1, 1);                                           // tune: ANT1 (the ATU's)
     atu_.drain(); atu_.init(); clk_.sleep(1.5); atu_.drain();                  // relays settle (two runs keyed straight after a reset saw an open-like load)
     auto rep = atu_report_locked();
@@ -302,6 +316,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     try { plan = tx::plan_tx(utc_(), mode, parity, off, 2.0, min_lead_s); } catch (const std::exception& e) { return no(e.what()); }
     r.slot_utc = plan.slot.start_utc; r.late_s = plan.skip_s;
     if (o.tx_ant < 1 || o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
+    if (auto why = lines_ready(mhz); !why.empty()) return no(why);
     prepare(mhz, 1, o.tx_ant);                                    // USB, TX DDS on the dial
     drive /= std::sqrt(2.0);                                       // soft start: 3 dB low, the loop below brings it up to the set power within about 0.7 s
     txo::ToneSource src(o.rate, 8); src.set_cap(std::min(dcap, drive_max * 1.1)); src.set_target(drive); src.set_mirror(o.mirror_q);
@@ -370,6 +385,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     tx::TxChainConfig cc = v.chain; cc.mic.sample_rate = 48000; cc.ssb.sideband = v.lsb ? tx::Sideband::LSB : tx::Sideband::USB;
     tx::TxChain chain(cc);
     if (v.o.tx_ant < 1 || v.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
+    if (auto why = lines_ready(mhz); !why.empty()) return no(why);
     prepare(mhz, v.lsb ? 0 : 1, v.o.tx_ant);
     txo::ToneSource src(v.o.rate, 8); src.set_cap(std::min(dcap, drive * ceiling * 1.05)); src.set_target(drive); src.set_mirror(v.o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(v.o.rate * 0.06));
@@ -488,6 +504,7 @@ CwResult TxControl::cw(double mhz, ICwKeys& keys, const CwOptions& c, const Prog
     } catch (const std::exception& e) { return no(e.what()); }
     if (!c.text.empty() && std::find(text_key.begin(), text_key.end(), uint8_t(1)) == text_key.end()) return no("nothing to send in that text");
     if (c.o.tx_ant < 1 || c.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
+    if (auto why = lines_ready(mhz); !why.empty()) return no(why);
     prepare(mhz - kCwOffsetHz / 1e6, 4, c.o.tx_ant);                                   // CWU; the TX DDS 1 kHz below the dial, the tone 1 kHz above it: the carrier on the dial
     txo::ToneSource src(c.o.rate, 8); src.set_cap(std::min(dcap, drive * 1.05)); src.set_target(drive); src.set_mirror(c.o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(c.o.rate * 0.05));

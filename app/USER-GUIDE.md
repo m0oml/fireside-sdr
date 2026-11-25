@@ -54,6 +54,23 @@ Receive never depends on any of this. Transmit needs a radio that has been start
   - Check the KEY jack without transmitting: close the app, then `build/tools/firesidekey --fw /dev/fwN --backup TRX.bin key-test` prints each paddle and PTT change as the radio reports it, and how long each read takes. If the EVENT lines stay silent while the READ_PTT lines follow the paddle, put `key_source=read_ptt` under `[General]` in `~/.config/fireside/cw.conf` (with the app closed) and the app uses the slower command.
 - **PSK Reporter:** a tab shows where you are heard; uploading your decodes is off by default (tick box).
 
+## Rear TX outputs (band switching)
+
+The radio's three rear RCA outputs, **TX1 (red)**, **TX2 (white)** and **TX3 (yellow)**, are open-collector switches to ground (100 V, 500 mA). On the **Antennas** tab, the **Rear TX outputs** card gives each one a role:
+
+- **Unused** (the default): Fireside never touches the line.
+- **Band switch:** a **TX1/TX2/TX3** tick column appears in the band table. The line is **on while the dial is in a ticked band**, on receive and transmit alike, for example a relay that turns the doublet into an 80 m T antenna.
+- **Amplifier keying** and **Transverter:** placeholders, not built yet (shown, not selectable).
+
+The rules are the same for every way of transmitting (Tune, FT8/FT4, CW, voice, CAT):
+- A line changes only while the radio is running, and **never during an over** (the dial is locked then anyway).
+- Before each key-down, Fireside sets the lines for that frequency and waits the **Relay settle time** (default 50 ms) after any change, so the relay never switches with RF on its contacts.
+- If a line cannot be set (a mailbox fault), **nothing transmits** until you stop and start the radio again.
+- The first time a line is used after the radio starts, Fireside tells the radio **not** to make it follow transmit (PowerSDR's default is to follow transmit, which would make a band relay click with every over).
+- **Stop radio** and closing Fireside switch every used line **off**. Build the external gear so that **off is its safe position**.
+
+Nothing here has been tried on the real radio yet: the first check is with a meter or an LED on the jacks, with no RF.
+
 ## Using WSJT-X and other programs
 Fireside SDR can be the radio for WSJT-X, JTDX, JS8Call, fldigi and other programs: they get the receive audio, send their transmit audio, follow and set the frequency, and key the radio.
 - **Once:** run `system/setup-system.sh`. Among other things it adds two virtual sound devices, **Fireside RX audio** and **Fireside TX audio** (a PipeWire file in `~/.config/pipewire`; `--remove` takes it out again).

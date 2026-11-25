@@ -17,6 +17,9 @@ public:
     void identifyRadio();                               // read-only
     void setAntennaProvider(std::function<std::string(double dialHz)> f) { antenna_for_ = std::move(f); }   // the Antennas tab: which RX antenna for this dial (start-up uses it)
     void requestRxAntenna(const QString& name, const QString& why);   // while started: switch the RX antenna through the session (SET_RX1_ANT 1..4 only); silent when already set
+    // The rear TX lines as band switches (the Antennas tab's table): kept across restarts; while started they follow the dial (never during an over: each over sets them itself).
+    void setTxLines(const fireside::LineConfig& c);
+    void applyTxLines();
     void autoStart();
     bool simulated() const { return simulated_; }
     void setBeforeStream(std::function<void(std::function<void()>)> f) { before_stream_ = std::move(f); }   // autoStart: runs (the EEPROM check) between starting the radio and opening the stream                                    // the app opened: start receiving by itself when the box is ticked (not simulated)
@@ -35,6 +38,7 @@ signals:
     void message(const QString& text);
     void runningChanged(bool started);                  // the radio started / stopped (for the Antennas tab)
     void rxAntennaChanged(const QString& name);         // the antenna the radio is using now ("" after a stop)
+    void txLinesState(int tx1, int tx2, int tx3);       // -1 unknown / not driven, 0 off, 1 on (after every change, start and stop)
     void radioStarted();                                // after quickStart succeeded: MainWindow shows the Receiver tab
 private slots:
     void onDial(double hz);

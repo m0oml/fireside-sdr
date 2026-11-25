@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QStandardItemModel>
 #include <chrono>
 #include <cmath>
 #include <sys/resource.h>
@@ -1085,6 +1086,32 @@ int main(int argc, char** argv) {
             step("stop the radio after the antenna checks", rp->stopRadio()); step("status line forgets the antenna", !rx->status().contains("RX ANT"));
             const size_t w1 = ant_writes().size(); rx->setDialHz(14.074e6); step("no antenna writes after stop", ant_writes().size() == w1);
             at->bandBox(i40)->setCurrentIndex(0); at->bandBox(i20)->setCurrentIndex(0); rx->setDialHz(7.1e6);
+        }
+        {   // the rear TX lines as band switches: only SET_AMP_TXn 0 and SET_RCA_TXn 0/1, only while running, following the dial, off at stop
+            auto* at = w.antennas(); size_t nb = 0; const fireside::RxBand* bands = fireside::rx_bands(nb); int i80 = -1; for (size_t i = 0; i < nb; ++i) if (std::string(bands[i].id) == "80m") i80 = int(i);
+            using P = std::pair<uint32_t, uint32_t>;
+            auto lw = [&] { std::vector<P> v; for (auto& wr : bus->writes) { const uint32_t op = fireside::sim::be_word(wr.second, 0) & 0x7FFFFFFFu;
+                                                                            if ((op >= 1269u && op <= 1271u) || (op >= 1298u && op <= 1300u)) v.push_back({op, fireside::sim::be_word(wr.second, 4)}); } return v; };
+            auto* m = qobject_cast<QStandardItemModel*>(at->lineRoleBox(0)->model());
+            step("rear TX outputs: amplifier and transverter are placeholders, not selectable", m && !m->item(2)->isEnabled() && !m->item(3)->isEnabled() && m->item(1)->isEnabled());
+            rp->disconnectRadio(); rx->setDialHz(7.1e6); const size_t r0 = lw().size();
+            step("band columns hidden while no line is a band switch", !at->lineBandBox(i80, 0)->isVisibleTo(at));
+            at->lineRoleBox(0)->setCurrentIndex(1); at->lineBandBox(i80, 0)->setChecked(true);
+            step("a band-switch line shows its column (only that one)", at->lineBandBox(i80, 0)->isVisibleTo(at) && !at->lineBandBox(i80, 1)->isVisibleTo(at));
+            step("the table gives TX1 on 80 m only", at->lineConfig().role[0] == fireside::LineRole::Band && fireside::TxLines::wanted(at->lineConfig(), 3.573e6)[0] && !fireside::TxLines::wanted(at->lineConfig(), 7.074e6)[0]);
+            step("no line writes while the radio is not running", lw().size() == r0);
+            step("quick start with a band line", rp->quickStart(true) && rp->session().state() == fireside::RadioSession::State::Started);
+            { const auto v = lw(); step("start states TX1 off on 40 m, after 'do not follow transmit'", v.size() == r0 + 2 && v[r0] == P{1298u, 0u} && v[r0 + 1] == P{1269u, 0u}); }
+            rx->setDialHz(3.573e6); { const auto v = lw(); step("80 m: TX1 on", v.size() == r0 + 3 && v.back() == P{1269u, 1u}); }
+            step("the tab shows it on", at->lineStatusText().contains("ON now"));
+            rx->setDialHz(3.7e6); step("inside 80 m: no write", lw().size() == r0 + 3);
+            rx->setDialHz(7.074e6); { const auto v = lw(); step("40 m: TX1 off", v.size() == r0 + 4 && v.back() == P{1269u, 0u}); }
+            rx->setDialHz(3.573e6); step("back on 80 m: on again", lw().size() == r0 + 5 && lw().back() == P{1269u, 1u});
+            step("stop the radio with the line on", rp->stopRadio()); step("stopping turned TX1 off", lw().back() == P{1269u, 0u});
+            const size_t r1 = lw().size(); rx->setDialHz(7.074e6); rx->setDialHz(3.573e6); step("no line writes after stop", lw().size() == r1);
+            for (const auto& x : lw()) step("only reviewed line writes (TX lines 0/1, follow-transmit 0)", (x.first >= 1298u ? x.second == 0u : x.second <= 1u));
+            at->lineBandBox(i80, 0)->setChecked(false); at->lineRoleBox(0)->setCurrentIndex(0); rx->setDialHz(7.1e6);
+            step("back to unused: the column hides again", !at->lineBandBox(i80, 0)->isVisibleTo(at));
         }
         {   // the Receiver's Source card: 48 / 96 / 192 buttons show the running stream, Stop radio is only usable while the radio runs
             auto btn = [&](const char* t) { for (auto* b : rx->findChildren<QPushButton*>()) if (b->text() == t) return b; return static_cast<QPushButton*>(nullptr); };

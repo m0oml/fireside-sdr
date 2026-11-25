@@ -1,7 +1,10 @@
 #pragma once
 #include <QWidget>
 #include <QString>
+#include <array>
 #include <vector>
+#include "fireside/txlines.h"
+class QSpinBox;
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -31,9 +34,18 @@ public:
     QComboBox* bandBox(int i) const { return band_box_[size_t(i)]; }       // row i: 0 = Default, 1..4 = ANT1 ANT2 ANT3 RX1 IN
     QComboBox* defaultBox() const { return default_; }
     QCheckBox* autoBox() const { return auto_; }
+    // The rear TX outputs (TX1 red, TX2 white, TX3 yellow). Only "Band switch" is built: such a line is on while the dial is in a band ticked for it
+    // (receive and transmit alike); Amplifier keying and Transverter are placeholders (shown, not selectable).
+    fireside::LineConfig lineConfig() const;
+    void setLineStates(int tx1, int tx2, int tx3);      // display: -1 not driven / unknown, 0 off, 1 on
+    QComboBox* lineRoleBox(int line) const { return line_role_[size_t(line)]; }
+    QCheckBox* lineBandBox(int band, int line) const { return line_band_[size_t(band)][size_t(line)]; }
+    QSpinBox* settleBox() const { return settle_; }
+    QString lineStatusText() const;
 signals:
     void antennaWanted(const QString& antenna, const QString& why);       // why: "40 m"
     void choiceChanged();                                                 // the table / default / active antenna changed (the main selector redraws)
+    void linesChanged();                                                  // a role, a band tick or the settle time changed (already saved)
 private:
     void changed();                                     // table, default or auto changed: save, re-evaluate
     void evaluate(bool force);
@@ -41,5 +53,8 @@ private:
     void load(); void save() const;
     QCheckBox* auto_; QComboBox* default_; QLabel* status_; std::vector<QComboBox*> band_box_; std::vector<QLabel*> band_label_;
     std::vector<QComboBox*> tx_box_; QComboBox* tx_default_ = nullptr;
+    std::array<QComboBox*, fireside::kTxLines> line_role_{}; std::array<QLabel*, fireside::kTxLines> line_hdr_{}, line_state_lbl_{};
+    std::vector<std::array<QCheckBox*, fireside::kTxLines>> line_band_; QSpinBox* settle_ = nullptr; std::array<int, fireside::kTxLines> line_state_{{-1, -1, -1}};
+    void linesEdited(); void updateLineColumns(); void updateLineStatus();
     double dial_hz_ = 7.1e6; QString last_wanted_, active_; bool running_ = false;
 };

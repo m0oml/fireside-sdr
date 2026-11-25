@@ -17,6 +17,7 @@
 #include "fireside/tx_dsp.h"
 #include "fireside/tx_gate.h"
 #include "fireside/tx_setup.h"
+#include "fireside/txlines.h"
 
 namespace fireside::txc {
 using PcmFactory = std::function<std::unique_ptr<IPcmOut>(double rate)>;
@@ -126,6 +127,10 @@ public:
     const txs::TxCal& cal() const { return cal_; }
     // Drive calibration (W per drive^2) per band: 0 until measured (ramp) or loaded (set_k / set_all_k).
     double k_for(int band) const;
+    // For a TUNE on a band never measured: the measured level of the next band up or down (the larger k, i.e. the lower drive), else 0 (then the
+    // EEPROM table). The table reads ~5-7 dB low on this radio, too little RF for the tuner on 12 m (2026-11-24/25: "carrier lost" at 0.2-3 W).
+    // *from gets the band used (-1 if none). The measured level itself when there is one.
+    double k_estimate(int band, int* from = nullptr) const;
     double test_cap(int band) const;                              // tunes, drive ramps and test tones: 30 W by the measured level (the table's 30 W without one)
     double drive_cap(int band) const;                             // the drive ceiling on this band (110 W by the measured level, else the table's 100 W; <= kAbsoluteMaxDrive)
     const std::map<int, double>& all_k() const { return k_; }
@@ -179,6 +184,9 @@ public:
     GenCheck sig_gen_check(double dial_mhz, double tone_hz, const std::function<std::pair<double, double>()>& read, const std::function<bool(bool)>& preamp,
                            bool preamp_was_on, const LogFn& log = {});
     std::optional<atu::Status> atu_report();                      // no RF: the tuner's relays; nullopt while an over or tune runs
+    // The rear TX lines used as band switches (txlines.h): before every key-down (tune, ramp, FT8/FT4, voice, CW) they are set for the over's frequency and
+    // allowed to settle; if they cannot be, nothing keys and the reason is the refusal. Null (the default): not used.
+    void set_lines(std::shared_ptr<TxLines> l) { std::lock_guard<std::mutex> g(lines_m_); lines_ = std::move(l); }
 
 private:
     std::optional<atu::Status> atu_report_locked();               // the same, for callers already holding op_
@@ -186,6 +194,8 @@ private:
     std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool, double)> key_hook_; std::function<void(const std::string&)> trip_hook_;
     void note_stop(const std::string& s) { if (trip_hook_ && is_safety_stop(s)) { try { trip_hook_(s); } catch (...) {} } }
     struct KeyHook { const std::function<void(bool, double)>& h; explicit KeyHook(const std::function<void(bool, double)>& f, double below_hz = 0) : h(f) { if (h) h(true, below_hz); } ~KeyHook() { if (h) try { h(false, 0); } catch (...) {} } };   // declared before the TxGate: its end runs after the unkey
+    std::mutex lines_m_; std::shared_ptr<TxLines> lines_;
+    std::string lines_ready(double freq_mhz);                     // "" or why nothing may key (the band lines could not be set)
     void prepare(double freq_mhz, uint32_t dsp_mode, int tx_ant); // TX antenna (1..3, else std::invalid_argument before any write), mode, DDS, filter, offset, carrier null
     struct Busy { TxControl& c; explicit Busy(TxControl& x) : c(x) { c.busy_ = true; c.abort_ = false; } ~Busy() { c.busy_ = false; c.keyed_ = false; } };
 };

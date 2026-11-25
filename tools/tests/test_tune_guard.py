@@ -40,6 +40,20 @@ class TuningIsOneOpcode(unittest.TestCase):
         h = code("core/include/fireside/rxant.h"); self.assertNotIn(".set(", h); self.assertNotIn("allow_dangerous", h)
         self.assertEqual(re.findall(r"(Ant1|Ant2|Ant3|Rx1In) = (\d)", h), [("Ant1", "1"), ("Ant2", "2"), ("Ant3", "3"), ("Rx1In", "4")])   # no other antenna reachable
 
+    def test_txlines_cpp_writes_only_the_rear_lines_and_never_follow_transmit(self):
+        """The band switch may write exactly SET_RCA_TX1..3 (0 / 1) and SET_AMP_TX1..3 (0, 0: do not follow transmit), from the two name tables."""
+        c = code("core/src/txlines.cpp")
+        self.assertEqual(re.findall(r"\.set\(\s*(\w+)\[k\]", c), ["kAmp", "kRca"]); self.assertEqual(len(re.findall(r"\.set\(", c)), 3)   # amp off, line set, release
+        self.assertIn("fx_.set(kAmp[k], 0, 0)", c); self.assertIn("fx_.set(kRca[k], double(need), 0)", c); self.assertIn("fx_.set(kRca[i], 0, 0)", c)
+        self.assertIn("need = band && want[k] ? 1 : 0", c)                           # the line value is 0 or 1, nothing else
+        self.assertEqual(re.findall(r'"(RDAL_OP_[A-Z0-9_]+)"', code("core/src/txlines.cpp", strip_strings=False)),
+                         ["RDAL_OP_SET_RCA_TX1", "RDAL_OP_SET_RCA_TX2", "RDAL_OP_SET_RCA_TX3", "RDAL_OP_SET_AMP_TX1", "RDAL_OP_SET_AMP_TX2", "RDAL_OP_SET_AMP_TX3"])
+        for bad in ("MOX", "PA_BIAS", "INITIALIZE", "EEPROM", "allow_dangerous", "link()", "FAN", "XVTR", "FLEXWIRE", "set_tx_grant"):
+            self.assertNotIn(bad, c, bad)
+        h = code("core/include/fireside/txlines.h"); self.assertNotIn(".set(", h); self.assertNotIn("allow_dangerous", h)
+        sc = code("core/src/safety.cpp")
+        for n in (1, 2, 3): self.assertIn(f'n == "RDAL_OP_SET_AMP_TX{n}"', sc)            # value-restricted: only (0, 0) passes the gate
+
     def test_tune_header_exposes_no_generic_write(self):
         c = code("core/include/fireside/tune.h")
         self.assertNotIn(".set(", c); self.assertNotIn("allow_dangerous", c)
@@ -248,7 +262,7 @@ class TuningIsOneOpcode(unittest.TestCase):
                     if not f.endswith((".cpp", ".h")): continue
                     p = os.path.relpath(os.path.join(d, f), APP)
                     if p in ("core/src/tune.cpp", "core/src/startup.cpp", "core/src/client.cpp", "core/src/preamp.cpp", "core/src/rxant.cpp",
-                             "core/src/atu.cpp", "core/src/tx_gate.cpp", "core/src/tx_setup.cpp", "tools/firesidekey.cpp", "core/src/tx_control.cpp", "core/src/codec.cpp", "core/src/siggen.cpp"): continue   # each has its own test below
+                             "core/src/atu.cpp", "core/src/tx_gate.cpp", "core/src/tx_setup.cpp", "tools/firesidekey.cpp", "core/src/tx_control.cpp", "core/src/codec.cpp", "core/src/siggen.cpp", "core/src/txlines.cpp"): continue   # each has its own test below
                     if re.search(r"\b(fx|flex|client)\w*(\.|->)set\(", code(p)): offenders.append(p)
         self.assertEqual(offenders, [])
 

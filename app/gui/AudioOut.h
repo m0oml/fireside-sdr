@@ -17,11 +17,18 @@ public:
     // Remembered (QSettings fireside/audio pc_output); changing it reopens those outputs at once.
     static QString pcOutput();
     static void setPcOutput(const QString& description);
+    // pcOutput() == kRadioPhones: those outputs play from the RADIO's headphone jack (channels 2/3 of the duplex FireWire stream, on the audio
+    // ring: the transmit I/Q is on channels 0/1 and is not touched). Every such output is mixed into one writer; nothing plays while the radio
+    // is stopped. Silent (not an error) until the duplex stream runs.
+    static constexpr const char* kRadioPhones = "@radio-headphones";
+    static bool radioPhones() { return pcOutput() == kRadioPhones; }
+    // Tests: the last block mixed for the radio's headphones (peak, 0 if none) and how many blocks were mixed since start.
+    static float radioPhonesPeakForTests(); static long radioPhonesBlocksForTests();
     bool available() const { return available_; }
     void push(const std::vector<float>& audio, float volume);   // volume 0..1
 private:
     void open();
-    QString device_; bool follows_pc_ = false, enabled_ = false;
+    QString device_; bool follows_pc_ = false, enabled_ = false, to_radio_ = false;
     int channels_ = 2; bool available_ = false; QAudioSink* sink_ = nullptr; QIODevice* io_ = nullptr; QTimer* keep_ = nullptr; qint64 last_push_ms_ = 0;
     void keepAlive();   // no audio for a while (receive paused while we transmit): silence, so the sound server never suspends the output (waking it took 2-3 s)
 };

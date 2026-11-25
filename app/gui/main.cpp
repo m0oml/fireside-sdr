@@ -38,6 +38,7 @@
 #include "fireside/nr2.h"
 #include "fireside/dsp.h"
 #include "MainWindow.h"
+#include "AudioOut.h"
 #include <QUdpSocket>
 #include "PskPanel.h"
 #include "CatPanel.h"
@@ -1182,6 +1183,28 @@ int main(int argc, char** argv) {
             r->closeLive(); r->setDirectOpenerForTests({}, ReceiverPanel::kWaitPollMs); r->loadDemo();
             if (!taken || !stopped) std::printf("receiver smoke FAILED: a direct stream taken by another program: taken back %d, Stop radio ends the wait %d (%s)\n", int(taken), int(stopped), r->status().toStdString().c_str());
             if (!taken || !stopped) return 1;
+        }
+        {   // the radio's headphone jack as the output: every source is mixed into one writer; receive's own "Radio jacks" choice is refused meanwhile.
+            // No stream runs here, so nothing reaches any radio: the mix itself is checked.
+            const QByteArray had_ns = qgetenv("FIRESIDE_NO_SETTINGS"); qputenv("FIRESIDE_NO_SETTINGS", "1"); const QString was = AudioOut::pcOutput();
+            AudioOut::setPcOutput(AudioOut::kRadioPhones);
+            bool ok = AudioOut::radioPhones();
+            { AudioOut a(true), b(true); ok = ok && a.available() && b.available();
+              std::vector<float> blk(4800); for (size_t k = 0; k < blk.size(); ++k) blk[k] = 0.25f * float(std::sin(2 * M_PI * 700 * double(k) / 48000.0)) >= 0 ? 0.25f : -0.25f;
+              const long b0 = AudioOut::radioPhonesBlocksForTests(); a.push(blk, 1.0f); b.push(blk, 1.0f);
+              QEventLoop l; QTimer::singleShot(300, &l, &QEventLoop::quit); l.exec();
+              const float pk = AudioOut::radioPhonesPeakForTests(); (void)pk;
+              ok = ok && AudioOut::radioPhonesBlocksForTests() > b0;
+              float most = 0; for (int k = 0; k < 3; ++k) most = std::max(most, AudioOut::radioPhonesPeakForTests());
+              a.push(blk, 1.0f); b.push(blk, 1.0f); float seen = 0; QElapsedTimer e; e.start();
+              while (e.elapsed() < 300) { QApplication::processEvents(); QThread::msleep(5); seen = std::max(seen, AudioOut::radioPhonesPeakForTests()); }
+              ok = ok && seen > 0.45f && seen < 0.55f;                                                       // the two sources summed, not one replacing the other
+              if (!ok) std::printf("receiver smoke FAILED: radio headphones mix (peak %.2f)\n", seen); }
+            const bool live = r->loadLive("null", 48000);                                                    // ALSA's null device stands in for the radio's card
+            const bool refused = live && !r->setAudioOutput(1, 2, true) && r->audioOutputTarget() == 0 && r->status().contains("headphone jack");
+            r->closeLive(); r->loadDemo();
+            AudioOut::setPcOutput(was); if (had_ns.isNull()) qunsetenv("FIRESIDE_NO_SETTINGS"); else qputenv("FIRESIDE_NO_SETTINGS", had_ns);
+            if (!ok || !refused) { if (!refused) std::printf("receiver smoke FAILED: radio jacks not refused while the headphones are the output (%s)\n", r->status().toStdString().c_str()); return 1; }
         }
         int ticks = 0; QTimer heartbeat; heartbeat.setInterval(10); QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++ticks; }); heartbeat.start();
         QTimer::singleShot(1500, &app, &QApplication::quit); app.exec();

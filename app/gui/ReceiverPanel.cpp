@@ -876,6 +876,8 @@ bool ReceiverPanel::setAudioOutput(int target, int pair, bool confirmed) {
     { QSignalBlocker a(out_target_), b(out_pair_); out_target_->setCurrentIndex(target == 1 && (duplex || !live_device_.isEmpty()) ? 1 : 0); out_pair_->setCurrentIndex(pair); }
     out_pair_->setEnabled(out_target_->currentIndex() == 1);
     if (out_target_->currentIndex() != 1) { if (target == 1) note_ = "Open a Live capture first: it names the radio's card."; updateStatus(); return target != 1; }
+    if (AudioOut::radioPhones()) { note_ = "Everything already plays on the radio's headphone jack (Audio tab output): choose a PC output there to use the radio's jacks here.";
+                                   QSignalBlocker a(out_target_); out_target_->setCurrentIndex(0); out_pair_->setEnabled(false); updateStatus(); return false; }
     if (duplex) {
         if (pair == 1) { note_ = "Channels 0/1 carry the transmit I/Q: choose 4/5 (external speaker), 2/3 (headphones) or 6/7."; QSignalBlocker b(out_pair_); out_pair_->setCurrentIndex(0); updateStatus(); return false; }
         if (pair == 0) { note_ = "Radio output selected: choose the channel pair (4/5 = external speaker)."; updateStatus(); return false; }

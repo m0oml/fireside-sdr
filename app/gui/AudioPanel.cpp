@@ -66,12 +66,17 @@ AudioPanel::AudioPanel(RadioPanel* radio, QWidget* parent) : QWidget(parent), ra
     // receive output
     { auto* l = new QVBoxLayout; rx_box_ = l; auto* n = new QLabel("Where the receive audio plays. The radio's outputs need the direct stream (48 / 96 / 192)."); n->setObjectName("muted"); n->setWordWrap(true); l->addWidget(n);
       auto* pc = new QComboBox; pc->addItem("PC output: system default", QString());
+      pc->addItem("Radio headphones (front jack)", QString(AudioOut::kRadioPhones));   // the radio's headphone jack over the direct stream
 #ifdef FIRESIDE_QT_AUDIO
       for (const auto& d : QMediaDevices::audioOutputs()) if (!d.description().startsWith("Fireside ")) pc->addItem("PC output: " + d.description(), d.description());   // not our virtual devices
 #endif
       { const int i = pc->findData(AudioOut::pcOutput()); if (i >= 0) pc->setCurrentIndex(i); else if (!AudioOut::pcOutput().isEmpty()) pc->addItem("PC output: " + AudioOut::pcOutput() + " (not plugged in)", AudioOut::pcOutput()), pc->setCurrentIndex(pc->count() - 1); }
-      pc->setToolTip("The computer output for receive audio ('PC speakers'), the transmit monitor, the feedback test and the CW sidetone: a USB headset, for example. Remembered.");
-      connect(pc, &QComboBox::activated, this, [pc] { AudioOut::setPcOutput(pc->currentData().toString()); });
+      pc->setToolTip("Where receive audio ('PC speakers'), the transmit monitor, the feedback test and the CW sidetone play: a PC output (a USB headset, for example), "
+                     "or the radio's front headphone jack (needs the radio started on the direct stream 48 / 96 / 192). Remembered.");
+      connect(pc, &QComboBox::activated, this, [this, pc] {
+          const QString v = pc->currentData().toString();
+          if (v == AudioOut::kRadioPhones && rx_) rx_->setAudioOutput(0, 0, true);      // one writer for the radio's jacks: receive's own "Radio jacks" choice goes back to PC sound
+          AudioOut::setPcOutput(v); });
       l->addWidget(pc); l->addStretch(1);
       top->addWidget(theme::makeCard("Receive audio", l), 2); }
     // transmit input

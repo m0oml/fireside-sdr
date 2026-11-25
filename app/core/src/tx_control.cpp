@@ -390,7 +390,8 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     txo::ToneSource src(v.o.rate, 8); src.set_cap(std::min(dcap, drive * ceiling * 1.05)); src.set_target(drive); src.set_mirror(v.o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(v.o.rate * 0.06));
     // the producer: audio -> chain -> I/Q 48 kHz -> stream rate -> the live ring (keeps ~40 ms queued)
-    std::atomic<bool> stop{false}; std::atomic<bool> failed{false}; std::string prod_err;
+    std::atomic<bool> stop{false}; std::atomic<bool> failed{false}; std::string prod_err; std::atomic<float> iq_peak{0.0f}; std::atomic<bool> keyed_now{false};
+    r.drive_start = drive;
     std::thread prod([&] {
         try {
             std::unique_ptr<dsp::RationalResampler> rs; if (v.o.rate != 48000) rs = std::make_unique<dsp::RationalResampler>(48000.0, v.o.rate);
@@ -398,6 +399,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
             while (!stop) {
                 const size_t n = in.read(a.data(), a.size(), 0.05); if (n == 0) continue;
                 iq.clear(); chain.process(a.data(), n, iq);
+                if (keyed_now) { float pk = iq_peak.load(); for (auto& z : iq) pk = std::max(pk, std::abs(z)); iq_peak = pk; }   // what the transmitter is given while keyed
                 if (v.monitor) { mon.resize(iq.size()); for (size_t i = 0; i < iq.size(); ++i) mon[i] = iq[i].real(); try { v.monitor(mon.data(), mon.size()); } catch (...) {} }   // what a receiver hears
                 const std::complex<float>* src_p; size_t m;
                 if (rs) { up.clear(); rs->process(iq.data(), iq.size(), up); src_p = up.data(); m = up.size(); } else { out.assign(iq.begin(), iq.end()); src_p = out.data(); m = out.size(); }
@@ -416,7 +418,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
     if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
-    keyed_ = true; r.keyed = true; src.set_keyed(true); const double t0 = clk_.now(); double last_trim = t0;
+    keyed_ = true; r.keyed = true; src.set_keyed(true); keyed_now = true; const double t0 = clk_.now(); double last_trim = t0;
     while (gate.keyed()) {
         if (abort_) { gate.unkey("aborted"); break; }
         if (!ptt()) { gate.unkey("PTT released"); break; }
@@ -427,10 +429,11 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
         catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
         r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (p) p({clk_.now() - t0, src.level(), rd});
         gate.report(rd); gate.tick(); if (!gate.keyed()) break;
-        if (rd.fwd_w > 1.1 * peak_w && clk_.now() - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = clk_.now(); }   // ALC: only ever down
+        if (rd.fwd_w > 1.1 * peak_w && clk_.now() - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = clk_.now(); ++r.trims; }   // ALC: only ever down
         clk_.sleep(0.02);
     }
     src.set_keyed(false); gate.ensure_unkeyed(2.0); keyed_ = false;
+    keyed_now = false; { const float pk = iq_peak.load(); r.iq_peak_db = pk > 0 && ceiling > 0 ? 20.0 * std::log10(double(pk) / ceiling) : -200.0; }
     r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns(); note_stop(r.stop);
     char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, peak_w); say(log, m);
     return r;

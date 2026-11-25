@@ -39,6 +39,10 @@
 #include "fireside/dsp.h"
 #include "MainWindow.h"
 #include "AudioOut.h"
+#include "TransmitCard.h"
+#ifdef FIRESIDE_QTEST
+#include <QTest>
+#endif
 #include <QUdpSocket>
 #include "PskPanel.h"
 #include "CatPanel.h"
@@ -1206,6 +1210,27 @@ int main(int argc, char** argv) {
             AudioOut::setPcOutput(was); if (had_ns.isNull()) qunsetenv("FIRESIDE_NO_SETTINGS"); else qputenv("FIRESIDE_NO_SETTINGS", had_ns);
             if (!ok || !refused) { if (!refused) std::printf("receiver smoke FAILED: radio jacks not refused while the headphones are the output (%s)\n", r->status().toStdString().c_str()); return 1; }
         }
+#ifdef FIRESIDE_QTEST
+        {   // Space bar PTT: a real key press goes through Qt's shortcut handling, where the receiver's Space (play/pause) used to take it first
+            auto* tc = w.transmitCard(); QCheckBox* sp = nullptr;
+            for (auto* c : w.findChildren<QCheckBox*>()) if (c->text() == "Space bar") sp = c;          // the voice controls sit under the waterfall
+            bool ok = tc && sp; w.activateWindow(); QApplication::processEvents();
+            if (ok) {
+                const bool was = r->playing();
+                sp->setChecked(true);
+                QTest::keyPress(w.windowHandle(), Qt::Key_Space); QApplication::processEvents();
+                const bool down = tc->pttHeldForTests(), still = r->playing() == was;
+                QTest::keyRelease(w.windowHandle(), Qt::Key_Space); QApplication::processEvents();
+                const bool up = !tc->pttHeldForTests();
+                sp->setChecked(false);
+                QTest::keyClick(w.windowHandle(), Qt::Key_Space); QApplication::processEvents();          // unticked: Space is the receiver's play/pause again
+                const bool toggled = r->playing() != was; if (toggled) { QTest::keyClick(w.windowHandle(), Qt::Key_Space); QApplication::processEvents(); }
+                ok = down && still && up && toggled && !tc->pttHeldForTests();
+                if (!ok) std::printf("receiver smoke FAILED: Space bar PTT down=%d receiver-untouched=%d up=%d unticked-plays=%d\n", down, still, up, toggled);
+            } else std::printf("receiver smoke FAILED: no Space bar tick found\n");
+            if (!ok) return 1;
+        }
+#endif
         int ticks = 0; QTimer heartbeat; heartbeat.setInterval(10); QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++ticks; }); heartbeat.start();
         QTimer::singleShot(1500, &app, &QApplication::quit); app.exec();
         const bool flowing = r->waterfallRows() > 15 && double(r->audioSamples()) > 0.5 * 48000 && r->playing();

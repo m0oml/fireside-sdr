@@ -63,7 +63,8 @@ struct VoiceOptions {
     // Monitor: called on the producer thread with what a receiver would hear of the over (the processed, SSB-filtered audio, 48 kHz). Must not block.
     std::function<void(const float* audio, size_t n)> monitor;
 };
-struct VoiceResult { bool keyed = false, unkey_failed = false; std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0, limited_to_w = 0; uint64_t underruns = 0; };
+struct VoiceResult { bool keyed = false, unkey_failed = false; std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0, limited_to_w = 0; uint64_t underruns = 0;
+                     int trims = 0; double drive_start = 0, iq_peak_db = -200; };   // diagnostics: ALC trims (10 % each), the starting drive, the processed I/Q peak vs the ceiling (0 dB = the set power)
 
 // CW: a keyed carrier exactly ON the dial (where the receiver's CW mode listens; it makes the beat note itself). As PowerSDR does in CWU, the DDS
 // sits below the dial for the over (kCwOffsetHz) and the keyed tone is generated that far above it, through the same live ToneSource (mirror,

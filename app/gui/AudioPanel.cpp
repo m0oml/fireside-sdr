@@ -99,7 +99,7 @@ AudioPanel::AudioPanel(RadioPanel* radio, QWidget* parent) : QWidget(parent), ra
       out_level_ = new QProgressBar; out_level_->setRange(0, 600); out_level_->setValue(0); out_level_->setFormat("processed -");
       out_level_->setStyleSheet("QProgressBar{background:#151b24;border:1px solid #2a3442;border-radius:4px;color:#d8dee8;text-align:center;min-height:18px}"
                                 "QProgressBar::chunk{background:#1e6fb8;border-radius:3px}");
-      out_level_->setToolTip("The processed audio's peak: about -1 to -6 dBFS while you talk means the processing reaches the set power (PEP)");
+      out_level_->setToolTip("The processed audio's peak: 0 dBFS is the set power (PEP), and power goes with the square: -3 dBFS is half, -6 dBFS a quarter. Aim for about -1 to -2 dBFS on normal speech");
       in_note_ = new QLabel(" "); in_note_->setObjectName("muted"); in_note_->setWordWrap(true);
       int r = 0;
       g->addWidget(new QLabel("Source"), r, 0); g->addWidget(source_, r++, 1, 1, 2);

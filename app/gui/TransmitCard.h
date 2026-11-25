@@ -34,7 +34,8 @@ public:
     bool sendQueued() const { return ft_pending_ != nullptr; }
     QPushButton* restoreButton() const { return restore_; } QPushButton* testToneButton() const { return test_; } QDoubleSpinBox* powerBox() const { return power_; } QLabel* statusLabel() const { return status_; }
     QLabel* memoryLabel() const { return mem_; }
-    void setConfirmForTests(bool yes) { auto_confirm_ = yes ? 1 : 0; }   // skip the questions (tests): 1 = answer yes
+    void setConfirmForTests(bool yes) { auto_confirm_ = yes ? 1 : 0; }
+    bool pttHeldForTests() const { return pttActive(); }               // any PTT source held (button, Space bar, mic)   // skip the questions (tests): 1 = answer yes
     bool busy() const { return worker_running_.load(); }
     bool keyedNow() const;                               // the transmitter is keyed right now (CAT get_ptt)
     void setSimulatedRadio(fireside::sim::RadioModel* m);

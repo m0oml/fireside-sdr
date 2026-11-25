@@ -779,10 +779,14 @@ void TransmitCard::armThen(std::function<void()> done) {
     if (!worker_running_ && after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }   // the check could not start (no backup ...): receive anyway
 }
 bool TransmitCard::eventFilter(QObject* o, QEvent* e) {
-    if ((e->type() == QEvent::KeyPress || e->type() == QEvent::KeyRelease) && space_ptt_ && space_ptt_->isChecked()) {
+    const auto t = e->type();
+    if ((t == QEvent::KeyPress || t == QEvent::KeyRelease || t == QEvent::ShortcutOverride) && space_ptt_ && space_ptt_->isChecked()) {
         auto* k = static_cast<QKeyEvent*>(e);
         QWidget* f = QApplication::focusWidget();
         const bool typing = f && (qobject_cast<QLineEdit*>(f) || qobject_cast<QAbstractSpinBox*>(f) || qobject_cast<QPlainTextEdit*>(f));
+        // A window shortcut on Space (the receiver's play/pause) would take the key before any KeyPress: claim it in the override, so it
+        // arrives here as a key press (2026-11-25: Space paused the waterfall and never keyed).
+        if (t == QEvent::ShortcutOverride) { if (k->key() == Qt::Key_Space && k->modifiers() == Qt::NoModifier && !typing && window()->isActiveWindow()) { e->accept(); return true; } return QFrame::eventFilter(o, e); }
         if (k->key() == Qt::Key_Space && !k->isAutoRepeat() && !typing && window()->isActiveWindow()) {
             const bool down = e->type() == QEvent::KeyPress; if (down != ptt_key_) { ptt_key_ = down; onPttChanged(); }
             return true;
@@ -823,7 +827,9 @@ void TransmitCard::startVoice() {
             if (!r.keyed) return QString("Voice not keyed: ") + QString::fromStdString(r.why_not.empty() ? r.stop : r.why_not);
             if (r.max_fwd_w > 0.1) { last_tx_w_ = r.max_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }
             return QString("Voice over: %1, %2 s, peak %3 W (set %4 W PEP)%5").arg(QString::fromStdString(r.stop)).arg(r.seconds, 0, 'f', 1).arg(r.max_fwd_w, 0, 'f', 1).arg(v.peak_w, 0, 'f', 0)
-                   .arg(r.underruns > 4800 ? QString(", audio gaps %1").arg(r.underruns) : QString());
+                   .arg(r.underruns > 4800 ? QString(", audio gaps %1").arg(r.underruns) : QString())
+                   + QString(". Audio peak %1 dB (0 = set power), power trims %2%3").arg(r.iq_peak_db, 0, 'f', 1).arg(r.trims)
+                       .arg(r.trims ? QString(" (drive %1 % of start)").arg(r.drive_start > 0 ? 100.0 * r.drive / r.drive_start : 0.0, 0, 'f', 0) : QString());
         });
 }
 int TransmitCard::txAnt() const { const int a = tx_ant_ ? tx_ant_(rx_->dialHz()) : 1; return a >= 1 && a <= 3 ? a : 1; }

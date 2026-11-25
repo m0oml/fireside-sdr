@@ -718,6 +718,7 @@ TEST(voice_usb_and_lsb_on_their_sideband_at_the_set_peak_and_ptt_unkeys) {
         auto res = r.tx->voice(14.20, mic, [&] { return std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(2500); }, v);
         CHECK(res.keyed); CHECK(res.stop.find("PTT released") != std::string::npos); CHECK(!r.sim.keyed); CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(2));
         CHECK(res.max_fwd_w > 7.0 && res.max_fwd_w <= 1.15 * 10.0);                     // peaks at the set power (the ALC only trims down)
+        CHECK(res.iq_peak_db > -3.0 && res.iq_peak_db <= 0.5); CHECK(res.drive_start > 0); CHECK(res.trims >= 0 && res.drive <= res.drive_start);   // the diagnostics in the over's log line
         const double sb = sideband_ratio_db(iq, 48000, true);                          // undo the mirror: USB above the carrier
         // > 20 dB: the right sideband. (On the simulated, perfect radio the EEPROM's TX image correction for this radio itself makes an image
         // ~36 dB down; on the real radio it cancels the radio's own imbalance. ~27 dB seen here.)

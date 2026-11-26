@@ -43,7 +43,7 @@ void RadioModel::on_send(uint32_t d1) {
 }
 void RadioModel::report(bool after_tune) {
     std::vector<uint32_t> r = {res(atu::R_IND, uint8_t(ind)), res(atu::R_CAP, uint8_t(cap)), res(atu::R_HILOZ, uint8_t(hiz)), res(atu::R_ANTENNA, 0)};
-    if (after_tune) { r.push_back(res(atu::R_SWRTHRESH, uint8_t(thr))); r.push_back(res(atu::R_FWDPWR, 0x04, 0x24)); r.push_back(res(atu::R_REVPWR, 0, 0)); r.push_back(res(atu::R_SWR, 0, uint8_t(pass_swr_b3))); }
+    if (after_tune) { r.push_back(res(atu::R_SWRTHRESH, uint8_t(thr))); r.push_back(res(atu::R_FWDPWR, uint8_t(pass_fwd_cw >> 8), uint8_t(pass_fwd_cw))); r.push_back(res(atu::R_REVPWR, 0, 0)); r.push_back(res(atu::R_SWR, 0, uint8_t(pass_swr_b3))); }
     for (auto w : r) q.push_back(w);
 }
 uint32_t RadioModel::next() {

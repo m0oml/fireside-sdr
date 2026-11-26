@@ -236,6 +236,9 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     if (r.outcome && r.outcome->result == atu::Atu::TuneResult::Pass) {
         const auto& s = r.outcome->status;
         if (r.stop != "tune finished") r.pass_rejected = "the tuner reported a pass only after the carrier was cut (" + r.stop + "): not a match, nothing saved";
+        else if ((!s.fwd_w || *s.fwd_w < 0.5) && !(r.last_fwd_w > 0.5 && r.last_swr && *r.last_swr <= threshold + 0.5)) {   // the tuner's SWR read without power: our own PA meter decides
+            char b[200]; std::snprintf(b, sizeof b, "the tuner reported a pass with %.2f W forward and our meter read %s: not a match, nothing saved", s.fwd_w ? *s.fwd_w : 0.0,
+                                       r.last_swr ? ("SWR " + std::to_string(*r.last_swr).substr(0, 4)).c_str() : "no power"); r.pass_rejected = b; }   // seen 2026-11-25 on 60 m: "SWR 1.00" at 0.00 W overwrote a good setting; 2026-11-26 on 15 m a quick real pass also read 0.00 W
         else if (s.swr && *s.swr > 3.0) { char b[120]; std::snprintf(b, sizeof b, "the tuner reported a pass at SWR %.1f: not a match, nothing saved", *s.swr); r.pass_rejected = b; }
         if (!r.pass_rejected.empty()) { r.outcome->result = atu::Atu::TuneResult::Timeout; say(log, "tune: " + r.pass_rejected); }
     }
@@ -262,7 +265,10 @@ bool TxControl::restore_relays(int band, const LogFn& log) {
     if (!armed_) { say(log, "transmit is not armed"); return false; }
     auto s = mem_.recall(band); if (!s) { say(log, std::string("nothing stored for ") + txm::band_name(band)); return false; }
     const bool ok = atu_.set_relays(s->ind, s->cap, s->hiz);
-    char m[120]; std::snprintf(m, sizeof m, "ATU %s: ind %d cap %d %s %s", txm::band_name(band), s->ind, s->cap, s->hiz ? "Hi-Z" : "Lo-Z", ok ? "restored (no RF)" : "NOT confirmed by the tuner"); say(log, m);
+    char m[200]; std::snprintf(m, sizeof m, "ATU %s: ind %d cap %d %s %s", txm::band_name(band), s->ind, s->cap, s->hiz ? "Hi-Z" : "Lo-Z", ok ? "restored (no RF)" : "NOT confirmed by the tuner");
+    std::string msg = m;
+    if (!ok) { const auto& st = atu_.status(); char b[120]; std::snprintf(b, sizeof b, " (it reports ind %s cap %s %s)", st.ind ? std::to_string(*st.ind).c_str() : "?", st.cap ? std::to_string(*st.cap).c_str() : "?", st.hiz ? (*st.hiz ? "Hi-Z" : "Lo-Z") : "?"); msg += b; }
+    say(log, msg);
     return ok;
 }
 }  // namespace fireside::txc

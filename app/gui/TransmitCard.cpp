@@ -613,13 +613,16 @@ void TransmitCard::onArm(bool on) {
     QFile f(bpath); std::vector<uint8_t> backup; if (f.open(QIODevice::ReadOnly)) { const QByteArray a = f.readAll(); backup.assign(a.begin(), a.end()); }
     tx_ = s.transmit(pcmFactory()); connectTrip();
     if (!tx_) { QSignalBlocker b(arm_); arm_->setChecked(false); report("The radio is not started."); return; }
-    run("Arming (reading the EEPROM)", false, [this, backup](txc::TxControl& t) {
+    const int band_now = txm::band_of(rx_->dialHz()); const bool restore_now = band_now >= 0 && auto_restore_->isChecked() && txAnt() == 1;
+    run("Arming (reading the EEPROM)", false, [this, backup, band_now, restore_now](txc::TxControl& t) {
         // once per app run: the EEPROM is read and compared at start-up only (later arms rely on that check)
         if (eeprom_verified_) t.arm(backup, backup);
         else { t.arm_from_radio(backup, [this](const std::string& m) { const QString s = QString::fromStdString(m); QMetaObject::invokeMethod(this, [this, s] { emit message("Transmit: " + s); }, Qt::QueuedConnection); }); eeprom_verified_ = true; }
         { const auto cal = rx_level_cal(decode_eeprom(backup, "TRX")); QMetaObject::invokeMethod(this, [this, cal] { applyRxCal(cal); }, Qt::QueuedConnection); }   // the S-meter's factory table, from the image just verified
         loadState();
-        return QString("Transmit ready: the EEPROM matches the backup, PA bias set.");
+        QString atu;                                                                       // this band's stored ATU relays (no RF): band changes restore them, so arming does too
+        if (restore_now && t.memory().recall(band_now)) { std::string msg; t.restore_relays(band_now, [&](const std::string& m) { msg = m; }); atu = " " + QString::fromStdString(msg) + "."; }
+        return QString("Transmit ready: the EEPROM matches the backup, PA bias set.") + atu;
     });
 }
 
@@ -641,6 +644,7 @@ void TransmitCard::onTune() {
                    + (r.pass_rejected.empty() ? QString() : " " + QString::fromStdString(r.pass_rejected) + ".");
         res = QString("Tune %1 after %2 s (%3). Tuner: ind %4 cap %5 %6, %7, SWR %8. Max %9.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop))
               .arg(s.ind ? *s.ind : -1).arg(s.cap ? *s.cap : -1).arg(s.hiz && *s.hiz ? "Hi-Z" : "Lo-Z").arg(s.fwd_w ? fmt_w(*s.fwd_w) : "?").arg(s.swr ? QString::number(*s.swr, 'f', 2) : "?").arg(fmt_w(r.max_fwd_w));
+        if (r.last_fwd_w > 0.5 && r.last_swr) res += QString(" Our meter: %1, SWR %2.").arg(fmt_w(r.last_fwd_w)).arg(*r.last_swr, 0, 'f', 2);
         if (r.saved) res += " Saved for this band.";
         if (r.estimated_drive) res += " (No measured drive on this band yet, so it was estimated: press Measure drive now.)";
         return res;

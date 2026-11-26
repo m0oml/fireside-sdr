@@ -75,10 +75,22 @@ void Atu::request_update() {                                      // the relays 
 }
 bool Atu::set_relays(int ind, int cap, bool hiz) {
     if (ind < 0 || ind > 127 || cap < 0 || cap > 127) throw std::invalid_argument("inductor and capacitor values are 0..127");
-    send(SET_IND, uint8_t(ind | (hiz ? 0x80 : 0))); drain();     // "set inductor (and HiLoZ)": bit 7 = Hi-Z (on the radio 2026-11-19: SET_IND 30 cleared Hi-Z,
-    send(SET_CAP, uint8_t(cap)); drain();                         //  and a separate HIZ request after it did not set it again)
-    request_update();
-    return st_.ind && *st_.ind == ind && st_.cap && *st_.cap == cap && st_.hiz && (*st_.hiz != 0) == hiz;
+    auto matches = [&] { return st_.ind && *st_.ind == ind && st_.cap && *st_.cap == cap && st_.hiz && (*st_.hiz != 0) == hiz; };
+    for (int attempt = 0; attempt < 2; ++attempt) {                // a second try with the same two settings if the tuner did not take them
+        send(SET_IND, uint8_t(ind | (hiz ? 0x80 : 0))); drain();  // "set inductor (and HiLoZ)": bit 7 = Hi-Z (on the radio 2026-11-19: SET_IND 30 cleared Hi-Z,
+        send(SET_CAP, uint8_t(cap)); drain();                     //  and a separate HIZ request after it did not set it again)
+        // Read back. Reports already queued (from before the change) can arrive first: later reports overwrite them, and ALL_UPDATE is asked again
+        // every 0.5 s, for up to 2.5 s. Seen on the radio 2026-11-25: restores "NOT confirmed" in 0.4 s (the first three reports were old ones).
+        st_.ind.reset(); st_.cap.reset(); st_.hiz.reset();
+        const double t0 = clk_.now(); double asked = -1;
+        while (clk_.now() - t0 < 2.5) {
+            if (asked < 0 || clk_.now() - asked >= 0.5) { send(ALL_UPDATE); asked = clk_.now(); }
+            auto m = poll(100);
+            if (matches() && (!m || m->remaining == 0)) { drain(); return true; }
+            if (!m) clk_.sleep(0.02);
+        }
+    }
+    return false;
 }
 Atu::TuneOutcome Atu::tune(bool full, double threshold, const std::function<bool()>& keyed, double timeout_s) {
     TuneOutcome o; const double t0 = clk_.now();

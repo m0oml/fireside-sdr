@@ -71,6 +71,13 @@ TEST(atu_saved_relays_go_back_without_transmitting) {
     AtuSim& s = r.sim; s.bus.dynamic[opv("RDAL_OP_ATU_SEND_CMD")] = [&s] { const uint32_t d1 = be32(s.bus.mem[kPalResult]); if ((d1 >> 8) != atu::SET_CAP) s.on_send(d1); return 0u; };
     CHECK(!a.set_relays(31, 9, false));                                                               // a tuner that ignores one setting is noticed
 }
+// Reports already queued before a restore (the old relays) must not make it "NOT confirmed": seen on the radio 2026-11-25 on 80, 30 and 20 m.
+TEST(atu_restore_is_confirmed_past_old_queued_reports) {
+    Rig r; atu::Atu a(r.fx, r.clk.clock());
+    r.sim.ind = 50; r.sim.cap = 16; r.sim.hiz = 1;
+    for (int k = 0; k < 4; ++k) { r.sim.q.push_back(res(atu::R_IND, 50)); r.sim.q.push_back(res(atu::R_CAP, 16)); r.sim.q.push_back(res(atu::R_HILOZ, 1)); r.sim.q.push_back(res(atu::R_FWDPWR, 0, 0)); }
+    CHECK(a.set_relays(4, 39, true)); CHECK_EQ(*a.status().ind, 4); CHECK_EQ(*a.status().cap, 39); CHECK_EQ(r.sim.ind, 4);
+}
 TEST(safety_gate_allows_tuner_settings_but_never_a_tune_erase_or_key_without_the_gate) {
     Rig r; Safety& s = r.fx.safety(); s.permit("RDAL_OP_ATU_SEND_CMD"); s.permit("RDAL_OP_SET_MOX");
     for (uint8_t req : {uint8_t(atu::FULL_TUNE), uint8_t(atu::MEM_TUNE), uint8_t(42), uint8_t(43), uint8_t(57), uint8_t(11), uint8_t(68), uint8_t(67), uint8_t(200)})
@@ -904,6 +911,17 @@ TEST(tx_control_tune_rejects_a_pass_without_a_match) {
     r.sim.best_swr = 1.0; r.sim.pass_regardless = false; r.sim.pass_swr_b3 = 0;                      // a real match still passes and is saved
     auto ok = r.tx->tune(14.336, 3.0, 1.5, {});
     CHECK(ok.outcome && ok.outcome->result == atu::Atu::TuneResult::Pass); CHECK(ok.saved); CHECK(ok.pass_rejected.empty());
+}
+// A pass whose SWR was read with no forward power (0.00 W) is not a match: seen on 60 m 2026-11-25, it overwrote a good setting.
+TEST(tx_control_tune_rejects_a_pass_read_without_power) {
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); r.sim.tune_time_polls = 30; r.sim.pass_fwd_cw = 0; r.sim.adc_rev = r.sim.adc_fwd; r.sim.rev_frac = 0.5;   // our meter: a poor match
+    auto t = r.tx->tune(14.336, 3.0, 1.5, {});
+    CHECK(t.outcome); CHECK(t.outcome->result != atu::Atu::TuneResult::Pass); CHECK(!t.saved); CHECK(!r.tx->memory().recall(5));
+    CHECK(t.pass_rejected.find("0.00 W forward") != std::string::npos); CHECK(!r.sim.keyed);
+    r.sim.adc_rev = 0; r.sim.rev_frac = 0.01;                                                         // a quick real pass (2026-11-26, 15 m): the tuner reads 0 W, our meter a good SWR
+    auto ok = r.tx->tune(14.336, 3.0, 1.5, {});
+    CHECK(ok.outcome && ok.outcome->result == atu::Atu::TuneResult::Pass); CHECK(ok.saved); CHECK(ok.pass_rejected.empty()); CHECK(ok.last_swr && *ok.last_swr <= 2.0);
 }
 
 // disarm() while an over runs and another is queued behind it: the queued one must not key (its start clears abort_, but it finds itself disarmed).

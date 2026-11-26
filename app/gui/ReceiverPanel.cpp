@@ -925,13 +925,19 @@ bool is_me(const std::string& to, const QString& me) {
 }  // namespace
 void ReceiverPanel::addDecodedText(const QString& t0) {
     QString t = t0;
+    QString me = myCall(); if (const int sl = me.indexOf('/'); sl >= 0) { const QStringList p = me.split('/'); me = *std::max_element(p.begin(), p.end(), [](const QString& a, const QString& b) { return a.size() < b.size(); }); }   // the base call of M0OML/P
     if (decoderIndex() >= 4) {                                                  // FT8 / FT4: fixed columns (message | tag | callbook), filled in later in place
-        QStringList out; for (const QString& l : t0.split('\n')) out << (fireside::logbook::ftx_line_text(l.toStdString()).empty() || l.contains(kInfoSep) ? l : l.leftJustified(kMsgCols) + kInfoSep + QString(kTagCols, ' '));
+        QStringList out;
+        for (const QString& l : t0.split('\n')) {
+            const std::string txt = fireside::logbook::ftx_line_text(l.toStdString());
+            if (!txt.empty()) { const auto m = fireside::logbook::parse_ftx_message(txt); if (m.ok && is_me(m.from, me)) continue; }   // our own over, decoded off the radio's leakage: not shown (it is in the QSO pane already), not spotted (user 2026-11-25)
+            out << (txt.empty() || l.contains(kInfoSep) ? l : l.leftJustified(kMsgCols) + kInfoSep + QString(kTagCols, ' '));
+        }
         t = out.join('\n');
+        if (t.trimmed().isEmpty()) return;
     }
     dec_text_->moveCursor(QTextCursor::End); dec_text_->insertPlainText(t); dec_text_->moveCursor(QTextCursor::End);
     if (decoderIndex() < 4) return;
-    QString me = myCall(); if (const int sl = me.indexOf('/'); sl >= 0) { const QStringList p = me.split('/'); me = *std::max_element(p.begin(), p.end(), [](const QString& a, const QString& b) { return a.size() < b.size(); }); }   // the base call of M0OML/P
     const QStringList lines = t.split('\n', Qt::SkipEmptyParts);
     QTextCharFormat hf; hf.setBackground(QColor("#7a1f2b")); hf.setForeground(QColor("#ffffff")); hf.setFontWeight(QFont::Bold);
     QTextBlockFormat hb; hb.setBackground(QColor("#7a1f2b"));
@@ -1038,7 +1044,7 @@ void ReceiverPanel::setQsoPartner(const QString& call) {
     if (b == qso_partner_) return;
     qso_partner_ = b; removeCaller(b); pushFocus();                            // replying to a caller answers them; the partner's frequency goes first
     if (!b.isEmpty() && qso_text_) { qso_text_->moveCursor(QTextCursor::End); QTextCursor c = qso_text_->textCursor(); if (!qso_text_->document()->isEmpty()) c.insertBlock();
-        QTextCharFormat f; f.setForeground(QColor("#8b93a7")); c.setBlockFormat(QTextBlockFormat()); c.insertText(QString::fromUtf8("\u2500\u2500 QSO with %1 \u2500\u2500").arg(b), f); qso_start_block_ = qso_text_->document()->blockCount() - 1; qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
+        QTextCharFormat f; f.setForeground(QColor("#8b93a7")); c.setBlockFormat(QTextBlockFormat()); c.insertText(QString::fromUtf8("\u2500\u2500 QSO with %1 \u2500\u2500").arg(b), f); if (info_by_call_.contains(b)) c.insertText("  " + info_by_call_.value(b), f); qso_start_block_ = qso_text_->document()->blockCount() - 1; qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum()); }
 }
 void ReceiverPanel::endQso(const QString& call, bool done) {               // the sequence finished: a closing line, and the pane takes callers again
     const QString b = QString::fromStdString(fireside::qrz::base_call(call.toStdString()));
@@ -1193,7 +1199,11 @@ void ReceiverPanel::showCallInfo(const QString& call, const QString& text) {
     if (text.isEmpty()) return;
     { const QString b = QString::fromStdString(fireside::qrz::base_call(call.toStdString())); if (info_by_call_.size() > 500) info_by_call_.clear(); info_by_call_[b] = text;
       for (auto& c : caller_list_) if (c.call == b) c.info = text;                                    // the callers area shows the same callbook line
-      renderCallers(); }
+      renderCallers();
+      if (b == qso_partner_ && qso_text_ && qso_start_block_ >= 0) {                                   // the QSO pane's "── QSO with CALL ──" line gets it too
+          const QTextBlock hb = qso_text_->document()->findBlockByNumber(qso_start_block_); const QString head = QString::fromUtf8("\u2500\u2500 QSO with %1 \u2500\u2500").arg(b);
+          if (hb.isValid() && hb.text() == head) { QTextCursor c(hb); c.movePosition(QTextCursor::EndOfBlock); QTextCharFormat f; f.setForeground(QColor("#8b93a7")); c.insertText("  " + text, f); }
+      } }
     QTextCharFormat fmt; fmt.setForeground(QColor("#8b93a7")); fmt.setFontWeight(QFont::Normal); fmt.setBackground(Qt::transparent); int n = 0;
     for (QTextBlock b = dec_text_->document()->lastBlock(); b.isValid() && n < 80; b = b.previous(), ++n) {
         const QString line = b.text(); const int sep = line.indexOf(kInfoSep);

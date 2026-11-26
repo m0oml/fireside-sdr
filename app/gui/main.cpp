@@ -152,6 +152,7 @@ int main(int argc, char** argv) {
             qint64 clk = 1000000; r->setCallersClockForTests([&clk] { return clk; });
             r->setDecoderIndex(4); r->myCallBox()->setText("M0OML"); r->clearDecoded();
             r->addDecodedText("093300  -3  0.2 1200 ~  CQ DL2AL JO31\n093300  -8  0.1  800 ~  SP9ABC DL2AL -05\n093315  -6  0.1 2576 ~  M0OML DK0ULR JN58\n");
+            r->addDecodedText("093315  -2  0.0 1500 ~  CQ M0OML IO91\n093315  -1  0.0 1500 ~  DK0ULR M0OML/P -05\n"); step("our own overs are not shown in the decoder window", !r->decodedText().contains("CQ M0OML") && !r->decodedText().contains("DK0ULR M0OML") && r->decodedText().contains("CQ DL2AL"));
             step("callers: someone calling me is listed; CQs and other traffic are not", r->callersText().contains("DK0ULR") && !r->callersText().contains("DL2AL") && !r->callersText().contains("SP9ABC"));
             r->showCallInfo("DK0ULR", "Klaus, Ulm, Germany, 770 km"); r->markWorked("DK0ULR", 0);
             step("callers: the callbook info and the NEW tag show in the callers area", r->callersText().contains("Klaus, Ulm, Germany, 770 km") && r->callersText().contains("NEW"));
@@ -172,6 +173,10 @@ int main(int argc, char** argv) {
             r->clearDecoded();
             {   // the QSO pane during a QSO: only the partner (and our overs); anyone else calling waits in the callers area; the end is marked
                 r->setDecoderIndex(4); r->clearQso(); r->setQsoPartner("DK0ULR");
+                step("QSO pane: the header carries the lookup details", r->qsoPaneText().contains("QSO with DK0ULR") && r->qsoPaneText().contains("Klaus, Ulm"));
+                r->clearQso(); r->setQsoPartner("SP9NEW"); r->showCallInfo("SP9NEW", "Jan, Krakow, Poland"); step("QSO pane: details arriving later are added to the header once", r->qsoPaneText().count("Jan, Krakow, Poland") == 1);
+                r->showCallInfo("SP9NEW", "Jan, Krakow, Poland"); step("QSO pane: not twice", r->qsoPaneText().count("Jan, Krakow") == 1);
+                r->clearQso(); r->setQsoPartner("DK0ULR");
                 r->addDecodedText("093800  -7  0.1 1500 ~  M0OML DK0ULR -10\n093800  -9  0.1 1800 ~  M0OML OK1XYZ JO70\n");
                 step("QSO pane: the partner's line is there, another caller is not (he waits in the callers area)",
                      r->qsoPaneText().contains("DK0ULR -10") && !r->qsoPaneText().contains("OK1XYZ") && r->callersText().contains("OK1XYZ"));

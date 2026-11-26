@@ -906,13 +906,43 @@ int main(int argc, char** argv) {
                         tc->setPttForTests(true); for (int i = 0; i < 300 && !w.simRadio()->keyed; ++i) pump(1);
                         step("PTT keys a voice over", w.simRadio()->keyed && tc->statusLabel()->text().startsWith("Voice USB on 14.2000 MHz"));
                         for (int i = 0; i < 80; ++i) pump(1);
-                        step("the power meter shows the voice over", tc->powerMeter()->text().startsWith("fwd"));
+                        step("the power meter shows the voice over", tc->powerMeter()->text().startsWith("PEP ") && tc->powerMeter()->text().contains(" fwd "));
+                        {   // the transmit picture: while keyed the spectrum shows what is sent, in dBm (10 W PEP = 40 dBm; speech sits below its peak)
+                            const auto& f = rx->lastTxFrameForTests(); float pk = -200; for (float d : f) pk = std::max(pk, d);
+                            step("keyed: the spectrum shows the transmitted signal in dBm", rx->txViewOn() && !f.empty() && pk > 20 && pk < 47);
+                            if (!(pk > 20 && pk < 47)) std::printf("  (transmit picture peak %.1f dBm, %zu bins)\n", double(pk), f.size());
+                        }
                         tc->setPttForTests(false); for (int i = 0; i < 300 && (tc->busy() || w.simRadio()->keyed); ++i) pump(1);
                         step("releasing PTT unkeys", !w.simRadio()->keyed && count(1292) == m0 + 2 && tc->statusLabel()->text().contains("PTT released"));
+                        for (int i = 0; i < 20 && rx->txViewOn(); ++i) pump(1);
+                        step("unkeyed: the receive picture is back", !rx->txViewOn());
+                        {   // the CW key jack as voice PTT: only when ticked, only in the voice modes (in CW it is the Morse key)
+                            QCheckBox* kj = nullptr; for (auto* c : w.findChildren<QCheckBox*>()) if (c->text() == "Key jack") kj = c;
+                            auto& kc = w.simRadio()->contacts; rx->setModeGroup(0); pump(2);
+                            if (kj) kj->setChecked(false);
+                            kc = 0x1; pump(15);
+                            step("key jack: unticked, a closed key does not key", kj && !w.simRadio()->keyed && !tc->pttHeldForTests());
+                            if (kj) kj->setChecked(true);
+                            for (int i = 0; i < 300 && !w.simRadio()->keyed; ++i) pump(1);
+                            step("key jack: ticked, closing the key keys a voice over", w.simRadio()->keyed && tc->statusLabel()->text().startsWith("Voice USB on 14.2000 MHz"));
+                            kc = 0x0; for (int i = 0; i < 300 && (tc->busy() || w.simRadio()->keyed); ++i) pump(1);
+                            step("key jack: opening the key unkeys", !w.simRadio()->keyed && tc->statusLabel()->text().contains("PTT released"));
+                            rx->setModeGroup(1); pump(2); kc = 0x2; pump(15);
+                            step("key jack: in CW the key is not voice PTT", !tc->pttHeldForTests() && !tc->statusLabel()->text().startsWith("Voice"));
+                            kc = 0x0; for (int i = 0; i < 300 && (tc->busy() || w.simRadio()->keyed); ++i) pump(1);
+                            if (kj) kj->setChecked(false); rx->setModeGroup(0); pump(2);
+                        }
                         {   // the feedback test (no RF): the processed voice plays on the PC, nothing is written to the radio; VOX waits for it to stop
                             rx->setDecoderIndex(0); rx->setModeIndex(0); pump(2);                              // the Voice screen (USB)
                             auto* ap = w.audioPanel(); const size_t n0 = ops().size(); ap->hearBox()->setChecked(true); ap->testButton()->setChecked(true); pump(20);
                             step("feedback test: the processed voice is heard and nothing goes to the radio", ap->feedbackRunning() && ap->feedbackOutDbfs() > -20 && ops().size() == n0 && !w.simRadio()->keyed);
+                            {   // the Audio tab's picture: the processed voice as the over would look (dB, 0 = the set power), strongest in the voice band
+                                for (int i = 0; i < 10; ++i) pump(1);
+                                const auto& f = ap->pictureFrameForTests(); size_t pk = 0; for (size_t i = 0; i < f.size(); ++i) if (f[i] > f[pk]) pk = i;
+                                const double hz = f.empty() ? 0 : (double(pk) - double(f.size()) / 2) * 48000.0 / double(f.size());
+                                step("Audio tab picture: the processed voice, near the set power, in the voice band", !f.empty() && f[pk] > -25 && f[pk] < 3 && hz > 150 && hz < 3000 && ops().size() == n0);
+                                if (f.empty() || !(f[pk] > -25 && f[pk] < 3 && hz > 150 && hz < 3000)) std::printf("  (picture peak %.1f dB at %.0f Hz, %zu bins)\n", f.empty() ? -999.0 : double(f[pk]), hz, f.size());
+                            }
                             tc->voxBox()->setChecked(true); pump(2);
                             step("VOX refused while the input test runs", !tc->voxListening() && !tc->voxBox()->isChecked() && tc->statusLabel()->text().contains("input test"));
                             ap->testButton()->setChecked(false); pump(2); step("feedback test stops", !ap->feedbackRunning());

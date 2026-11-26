@@ -133,7 +133,7 @@ RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const 
     if (o.tx_ant < 1 || o.tx_ant > 3) { r.stop = "transmit antenna must be ANT1..ANT3"; return r; }
     if (auto why = lines_ready(mhz); !why.empty()) { r.stop = why; return r; }
     prepare(mhz, 1, o.tx_ant);
-    txo::ToneSource src(o.rate, 8); src.set_cap(dcap); src.set_target(0); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
+    txo::ToneSource src(o.rate, 8); src.set_tap(iq_tap()); src.set_cap(dcap); src.set_target(0); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]);
     txo::Stream st(pcm_(o.rate), src); clk_.sleep(0.3);
     if (st.failed()) { r.stop = "the I/Q stream failed to start"; return r; }
@@ -214,7 +214,7 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     atu_.drain(); atu_.init(); clk_.sleep(1.5); atu_.drain();                  // relays settle (two runs keyed straight after a reset saw an open-like load)
     auto rep = atu_report_locked();
     if (!rep || !rep->ind || !rep->cap || !rep->hiz) { r.why_not = "the tuner did not report its relays: not keying"; return r; }
-    txo::ToneSource src(o.rate, 8); src.set_cap(std::min(dcap, drive * 1.25)); src.set_target(drive); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
+    txo::ToneSource src(o.rate, 8); src.set_tap(iq_tap()); src.set_cap(std::min(dcap, drive * 1.25)); src.set_target(drive); src.set_tone_hz(o.tone_hz); src.set_mirror(o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]);
     txo::Stream st(pcm_(o.rate), src); clk_.sleep(0.3);
     if (st.failed()) { r.why_not = "the I/Q stream failed to start"; return r; }
@@ -325,7 +325,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     if (auto why = lines_ready(mhz); !why.empty()) return no(why);
     prepare(mhz, 1, o.tx_ant);                                    // USB, TX DDS on the dial
     drive /= std::sqrt(2.0);                                       // soft start: 3 dB low, the loop below brings it up to the set power within about 0.7 s
-    txo::ToneSource src(o.rate, 8); src.set_cap(std::min(dcap, drive_max * 1.1)); src.set_target(drive); src.set_mirror(o.mirror_q);
+    txo::ToneSource src(o.rate, 8); src.set_tap(iq_tap()); src.set_cap(std::min(dcap, drive_max * 1.1)); src.set_target(drive); src.set_mirror(o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_buffer(std::move(buf));
     txo::Stream st(pcm_(o.rate), src);
     const double latency_s = st.latency_s();                      // what the playback device holds before a sample is sent
@@ -393,7 +393,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     if (v.o.tx_ant < 1 || v.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
     if (auto why = lines_ready(mhz); !why.empty()) return no(why);
     prepare(mhz, v.lsb ? 0 : 1, v.o.tx_ant);
-    txo::ToneSource src(v.o.rate, 8); src.set_cap(std::min(dcap, drive * ceiling * 1.05)); src.set_target(drive); src.set_mirror(v.o.mirror_q);
+    txo::ToneSource src(v.o.rate, 8); src.set_tap(iq_tap()); src.set_cap(std::min(dcap, drive * ceiling * 1.05)); src.set_target(drive); src.set_mirror(v.o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(v.o.rate * 0.06));
     // the producer: audio -> chain -> I/Q 48 kHz -> stream rate -> the live ring (keeps ~40 ms queued)
     std::atomic<bool> stop{false}; std::atomic<bool> failed{false}; std::string prod_err; std::atomic<float> iq_peak{0.0f}; std::atomic<bool> keyed_now{false};
@@ -425,6 +425,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
     if (!gate.key(v.lsb ? "voice LSB" : "voice USB", gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
     keyed_ = true; r.keyed = true; src.set_keyed(true); keyed_now = true; const double t0 = clk_.now(); double last_trim = t0;
+    double sum_w = 0, sum_talk_w = 0; int n_w = 0, n_talk = 0;
     while (gate.keyed()) {
         if (abort_) { gate.unkey("aborted"); break; }
         if (!ptt()) { gate.unkey("PTT released"); break; }
@@ -433,7 +434,8 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
         txm::Reading rd;
         try { rd = txm::read(cal_.meter, band, int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcFwd)), int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcRev))); }
         catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
-        r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (p) p({clk_.now() - t0, src.level(), rd});
+        r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); sum_w += rd.fwd_w; ++n_w; if (rd.fwd_w > 0.05 * peak_w) { sum_talk_w += rd.fwd_w; ++n_talk; }
+        if (p) p({clk_.now() - t0, src.level(), rd});
         gate.report(rd); gate.tick(); if (!gate.keyed()) break;
         if (rd.fwd_w > 1.1 * peak_w && clk_.now() - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = clk_.now(); ++r.trims; }   // ALC: only ever down
         clk_.sleep(0.02);
@@ -441,6 +443,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     src.set_keyed(false); gate.ensure_unkeyed(2.0); keyed_ = false;
     keyed_now = false; { const float pk = iq_peak.load(); r.iq_peak_db = pk > 0 && ceiling > 0 ? 20.0 * std::log10(double(pk) / ceiling) : -200.0; }
     r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns(); note_stop(r.stop);
+    r.mean_fwd_w = n_w ? sum_w / n_w : 0; r.talk_fwd_w = n_talk ? sum_talk_w / n_talk : 0;
     char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, peak_w); say(log, m);
     return r;
 }
@@ -515,7 +518,7 @@ CwResult TxControl::cw(double mhz, ICwKeys& keys, const CwOptions& c, const Prog
     if (c.o.tx_ant < 1 || c.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
     if (auto why = lines_ready(mhz); !why.empty()) return no(why);
     prepare(mhz - kCwOffsetHz / 1e6, 4, c.o.tx_ant);                                   // CWU; the TX DDS 1 kHz below the dial, the tone 1 kHz above it: the carrier on the dial
-    txo::ToneSource src(c.o.rate, 8); src.set_cap(std::min(dcap, drive * 1.05)); src.set_target(drive); src.set_mirror(c.o.mirror_q);
+    txo::ToneSource src(c.o.rate, 8); src.set_tap(iq_tap()); src.set_cap(std::min(dcap, drive * 1.05)); src.set_target(drive); src.set_mirror(c.o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(c.o.rate * 0.05));
     // The generator: ~1 ms blocks, keeping only kLead of them queued ahead of the stream (the shorter, the sooner a paddle press is heard on the air).
     const size_t blk = std::max<size_t>(8, size_t(std::lround(c.o.rate / 1000))), lead = blk * 6;

@@ -90,8 +90,10 @@ void AudioOut::open() {
     if (!want.isEmpty()) for (const auto& d : QMediaDevices::audioOutputs()) if (d.description() == want || (!follows_pc_ && d.description().contains(want, Qt::CaseInsensitive))) { dev = d; break; }
     if (dev.isNull() && follows_pc_) dev = QMediaDevices::defaultAudioOutput();               // the chosen output is unplugged: the system default
     if (dev.isNull()) return;
-    QAudioFormat fmt; fmt.setSampleRate(48000); fmt.setChannelCount(2); fmt.setSampleFormat(QAudioFormat::Int16);      // stereo: the same audio on left and right, so it does not depend on the sound server upmixing mono
-    if (!dev.isFormatSupported(fmt)) { fmt.setChannelCount(1); if (!dev.isFormatSupported(fmt)) return; }          // a device that only does mono: the server handles it
+    // Stereo, the same audio on left and right. The channel POSITIONS must be given: with only a count, Qt hands PipeWire "aux0, aux1" (no position)
+    // and it plays them on the left only (2026-11-26, the AB13X headset). Front-left / front-right is what every output maps properly.
+    QAudioFormat fmt; fmt.setSampleRate(48000); fmt.setChannelConfig(QAudioFormat::ChannelConfigStereo); fmt.setSampleFormat(QAudioFormat::Int16);
+    if (!dev.isFormatSupported(fmt)) { fmt.setChannelConfig(QAudioFormat::ChannelConfigMono); if (!dev.isFormatSupported(fmt)) return; }   // a device that only does mono
     channels_ = fmt.channelCount();
     sink_ = new QAudioSink(dev, fmt, this); sink_->setBufferSize(48000 * 2 * channels_ / 4);   // 250 ms
     io_ = sink_->start(); available_ = io_ != nullptr;

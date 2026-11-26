@@ -577,7 +577,10 @@ void ReceiverPanel::setPlaying(bool on) {
 void ReceiverPanel::advance(size_t n) { engine_.advance(n); refresh(); }
 
 void ReceiverPanel::refresh() {
-    const auto frames = engine_.take_frames();
+    auto frames = engine_.take_frames();
+    if (!frames.empty()) rx_bins_ = frames.back().size();
+    if (tx_tap_) { tx_buf_.clear(); double rate = 0; tx_tap_->read(tx_buf_, &rate); if (tx_view_ && rate > 0 && !tx_buf_.empty()) drawTx(rate); }   // drained always: no stale over on the next key-down
+    if (tx_view_) frames.clear();                    // keyed: the receiver hears only the radio's own leakage (no sensible level); the transmit picture is drawn instead
     const auto est = engine_.status();
     const float frame_dt = (est.fft_size && spectrum_->spanHz() > 0) ? float(double(est.fft_size / 2) / spectrum_->spanHz()) : 2048.f / 48000.f;   // seconds between spectrum frames (50 % overlap)
     // The waterfall scrolls at the same speed at every sample rate: one row per (fft/2)/48 kHz seconds, as at 48 kHz. At 96 / 192 kHz the
@@ -597,13 +600,16 @@ void ReceiverPanel::refresh() {
     if (!frames.empty()) { spectrum_->setScale(scale_); spectrum_->setFrame(frames.back()); }
     audio_buf_.clear(); engine_.take_audio(audio_buf_);
     if (data_out_ && !audio_buf_.empty()) data_out_->push(audio_buf_, data_gain_);                     // other programs: fixed level, not muted
+    // The speaker gain: receive audio peaks around -12 dBFS, so the slider gets 10 dB of make-up (100 % = +10 dB; 32 % = unity). Before this,
+    // headphones on a PC output were almost silent (2026-11-26: -35 dBFS peaks measured at the output). Clipping is clamped in the output.
+    const double spk_gain = volume_->value() / 100.0 * 3.1623;
     {   // anti-VOX: how loud the speaker is now
         double pk = 0; if (!mute_->isChecked() && !tx_mute_) for (float v : audio_buf_) pk = std::max(pk, double(std::fabs(v)));
-        if (!audio_buf_.empty()) speaker_db_ = 20 * std::log10(pk * volume_->value() / 100.0 + 1e-10);
+        if (!audio_buf_.empty()) speaker_db_ = 20 * std::log10(pk * spk_gain + 1e-10);
     }
     if (!mute_->isChecked() && !tx_mute_ && !audio_buf_.empty()) {
-        if (radio_out_) { radio_out_->set_volume(float(volume_->value()) / 100.0f); try { radio_out_->push(audio_buf_.data(), audio_buf_.size()); } catch (const std::exception& e) { note_ = QString("Radio audio stopped: ") + e.what(); radio_out_.reset(); QSignalBlocker b(out_target_); out_target_->setCurrentIndex(0); out_pair_->setEnabled(false); } }
-        else audioOut_->push(audio_buf_, float(volume_->value()) / 100.0f);
+        if (radio_out_) { radio_out_->set_volume(float(std::min(1.0, spk_gain))); try { radio_out_->push(audio_buf_.data(), audio_buf_.size()); } catch (const std::exception& e) { note_ = QString("Radio audio stopped: ") + e.what(); radio_out_.reset(); QSignalBlocker b(out_target_); out_target_->setCurrentIndex(0); out_pair_->setEnabled(false); } }
+        else audioOut_->push(audio_buf_, float(spk_gain));
     }
     const RxStatus st = engine_.status();
     peak_hz_ = st.peak_hz; peak_db_ = st.peak_db; signal_dbfs_ = st.signal_dbfs; chk_dbfs_ = st.signal_dbfs; chk_peak_hz_ = st.peak_hz; audio_total_ = size_t(st.audio_samples);
@@ -1032,6 +1038,38 @@ void ReceiverPanel::addQsoLine(const QString& line, int kind) {       // kind 1 
     else if (kind == 2) { f.setForeground(QColor("#ffb454")); bf.setBackground(QColor("#2b2414")); }
     else f.setForeground(QColor("#c9d1dc"));
     c.setBlockFormat(bf); c.insertText(line, f); qso_text_->moveCursor(QTextCursor::End); qso_text_->verticalScrollBar()->setValue(qso_text_->verticalScrollBar()->maximum());
+}
+void ReceiverPanel::setTxView(bool keyed, double below, double k) {
+    tx_k_ = k; tx_view_below_ = below;
+    if (keyed == tx_view_) return;
+    tx_view_ = keyed; tx_row_t_ = 0; tx_pending_.clear();
+    spectrum_->setAveraging(spectrum_->averaging());                  // a fresh average: the transmit and receive pictures never mix
+    spectrum_->setUnit(keyed && k > 0 ? "dBm TX" : keyed ? "dBFS TX" : "dBFS");
+    if (!keyed) spectrum_->setScale(scale_);
+}
+void ReceiverPanel::drawTx(double rate) {
+    namespace dsp = fireside::dsp;
+    const size_t nrx = rx_bins_ ? rx_bins_ : 4096; const double span = spectrum_->spanHz() > 0 ? spectrum_->spanHz() : rate;
+    size_t n = 256; while (n < 65536 && double(n) < double(nrx) * rate / span) n *= 2;   // about the receive picture's bin width
+    if (!tx_an_ || tx_an_rate_ != rate || tx_an_->size() != n) {
+        tx_an_ = std::make_unique<dsp::SpectrumAnalyzer>(rate, n); tx_an_rate_ = rate;
+        tx_an_->on_frame = [this](const std::vector<float>& db) { if (tx_pending_.size() < 64) tx_pending_.push_back(db); };
+    }
+    tx_an_->push(tx_buf_.data(), tx_buf_.size());
+    const float add = tx_k_ > 0 ? float(10.0 * std::log10(tx_k_) + 30.0) : 0.0f;   // dBFS of drive -> dBm at the antenna: P = k |x|^2
+    const fireside::display::Scale sc = tx_k_ > 0 ? fireside::display::Scale{-20.f, 56.f} : fireside::display::Scale{-120.f, 0.f};   // fixed while keyed: 56 dBm = 400 W, so 100 W (50 dBm) sits near the top
+    const double row_dt = double(nrx / 2) / 48000.0, hop = double(n / 2) / rate, bw = rate / double(n);
+    for (const auto& db : tx_pending_) {
+        std::vector<float> row(nrx, -200.f);
+        for (size_t i = 0; i < nrx; ++i) {
+            const double f = (double(i) - double(nrx) / 2.0) * span / double(nrx) + tx_view_below_;   // offset from the dial -> offset from the TX DDS
+            const long k = std::lround(f / bw) + long(n / 2); if (k >= 0 && k < long(n)) row[i] = db[size_t(k)] + add;
+        }
+        tx_row_t_ += hop; if (tx_row_t_ + 1e-6 >= row_dt) { waterfall_->pushRow(row, sc); tx_row_t_ -= row_dt; if (tx_row_t_ > row_dt) tx_row_t_ = 0; }
+        tx_last_ = std::move(row);
+    }
+    if (!tx_pending_.empty()) { spectrum_->setScale(sc); spectrum_->setFrame(tx_last_); }
+    tx_pending_.clear();
 }
 void ReceiverPanel::setTransmitting(bool keyed, double below) {
     if (keyed == tx_on_dial_ && (!keyed || below == tx_dds_below_)) return;

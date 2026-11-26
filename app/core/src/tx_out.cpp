@@ -16,11 +16,22 @@ size_t ToneSource::push_live(const std::complex<float>* x, size_t n) {
 }
 size_t ToneSource::live_queued() const { std::lock_guard<std::mutex> l(live_m_); return live_count_; }
 
+void IqTap::write(const std::complex<float>* x, size_t n, double rate) noexcept {
+    std::unique_lock<std::mutex> l(m_, std::try_to_lock); if (!l.owns_lock()) { dropped_ += n; return; }
+    rate_ = rate; const size_t cap = ring_.size();
+    for (size_t i = 0; i < n; ++i) { if (count_ == cap) { ++dropped_; continue; } ring_[(head_ + count_) % cap] = x[i]; ++count_; }
+}
+size_t IqTap::read(std::vector<std::complex<float>>& out, double* rate) {
+    std::lock_guard<std::mutex> l(m_); const size_t n = count_, cap = ring_.size();
+    for (size_t i = 0; i < n; ++i) out.push_back(ring_[(head_ + i) % cap]);
+    head_ = (head_ + n) % cap; count_ = 0; if (rate) *rate = rate_; return n;
+}
 void ToneSource::fill(int32_t* out, size_t frames) {
     const bool keyed = keyed_.load(); const double target = keyed ? target_.load() : 0.0, cap = cap_.load(), w = 2 * M_PI * tone_.load() / rate_;
     const double g = corr_gain_.load(), ph = corr_phase_.load();
     const double qs = mirror_.load() ? -1.0 : 1.0, step = 1.0 / (0.005 * rate_) * std::max(target, level_);   // full swing in ~5 ms
     if (const long long sk = seek_.exchange(kNoSeek); sk != kNoSeek) pos_ = sk;
+    const bool tap = tap_ && keyed; if (tap && tap_buf_.size() < frames) tap_buf_.resize(frames);
     for (size_t f = 0; f < frames; ++f) {
         if (level_ < target) level_ = std::min(target, level_ + step); else if (level_ > target) level_ = std::max(target, level_ - step);
         if (!keyed) level_ = 0;                                   // unkeyed: exactly zero at once (the gate has already dropped MOX)
@@ -35,6 +46,7 @@ void ToneSource::fill(int32_t* out, size_t frames) {
             if (keyed) ++pos_;
             i = level_ * double(x.real()); q = qs * level_ * double(x.imag());
         } else { i = level_ * std::cos(phase_); q = qs * level_ * std::sin(phase_); }
+        if (tap) tap_buf_[f] = std::complex<float>(float(i), float(qs * q));   // the display's copy: before the mirror, correction and clamp
         q += ph * i; i *= g;                                      // TX image correction (DttSP correctIQ, isTX)
         phase_ += w; if (phase_ > 2 * M_PI) phase_ -= 2 * M_PI;
         i = std::clamp(i, -cap, cap); q = std::clamp(q, -cap, cap); // the hard clamp, last
@@ -42,6 +54,7 @@ void ToneSource::fill(int32_t* out, size_t frames) {
         std::fill(o, o + ch_, 0);
         o[0] = int32_t(std::lround(i * 2147483647.0)); o[1] = int32_t(std::lround(q * 2147483647.0));
     }
+    if (tap) tap_->write(tap_buf_.data(), frames, rate_);
     level_pub_.store(level_); pos_pub_.store(pos_);
 }
 

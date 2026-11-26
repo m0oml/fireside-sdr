@@ -19,6 +19,7 @@
 #include "fireside/tx_setup.h"
 #include "fireside/txlines.h"
 
+namespace fireside::txo { class IqTap; }
 namespace fireside::txc {
 using PcmFactory = std::function<std::unique_ptr<IPcmOut>(double rate)>;
 // Gate limits for FT8/FT4, voice and other programs: forward > fwd_limit_w for 0.15 s, or > hard_fwd_limit_w at once, unkeys.
@@ -64,7 +65,8 @@ struct VoiceOptions {
     std::function<void(const float* audio, size_t n)> monitor;
 };
 struct VoiceResult { bool keyed = false, unkey_failed = false; std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0, limited_to_w = 0; uint64_t underruns = 0;
-                     int trims = 0; double drive_start = 0, iq_peak_db = -200; };   // diagnostics: ALC trims (10 % each), the starting drive, the processed I/Q peak vs the ceiling (0 dB = the set power)
+                     int trims = 0; double drive_start = 0, iq_peak_db = -200;
+                     double mean_fwd_w = 0, talk_fwd_w = 0; };   // the PA meter's average over the whole over, and over the readings above 5 % of the set PEP (speech, not the pauses)   // diagnostics: ALC trims (10 % each), the starting drive, the processed I/Q peak vs the ceiling (0 dB = the set power)
 
 // CW: a keyed carrier exactly ON the dial (where the receiver's CW mode listens; it makes the beat note itself). As PowerSDR does in CWU, the DDS
 // sits below the dial for the over (kCwOffsetHz) and the keyed tone is generated that far above it, through the same live ToneSource (mirror,
@@ -161,6 +163,8 @@ public:
     // the dial for the over and back to the receive IF shift afterwards, as PowerSDR does). dds_below_dial_hz: where the DDS goes for the over
     // (0 = on the dial; a CW over: kCwOffsetHz below it). Must not throw.
     void set_key_hook(std::function<void(bool keyed, double dds_below_dial_hz)> h) { key_hook_ = std::move(h); }
+    void set_iq_tap(std::shared_ptr<txo::IqTap> t) { std::lock_guard<std::mutex> l(tap_m_); tap_ = std::move(t); }   // every over's I/Q is copied to it (the transmit display); display only
+    std::shared_ptr<txo::IqTap> iq_tap() const { std::lock_guard<std::mutex> l(tap_m_); return tap_; }
     // A safety stop is not a normal end of an over: a power / SWR / reflected limit, the key-down time limit, a meter, stream or audio failure, no power at the
     // 1 W point, the radio refusing the key, or an unkey that did not get through. The hook is called (on the worker thread) with the reason right after
     // any operation that ended that way, so the GUI can show it where it cannot be missed. Normal ends (finished, PTT released, Stop) never call it.
@@ -192,7 +196,7 @@ public:
 private:
     std::optional<atu::Status> atu_report_locked();               // the same, for callers already holding op_
     Flex& fx_; PcmFactory pcm_; atu::Clock clk_; std::function<double()> utc_; txs::TxCal cal_; atu::Atu atu_; atu::Memory mem_; std::map<int, double> k_;
-    std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool, double)> key_hook_; std::function<void(const std::string&)> trip_hook_;
+    std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool, double)> key_hook_; std::function<void(const std::string&)> trip_hook_; mutable std::mutex tap_m_; std::shared_ptr<txo::IqTap> tap_;
     void note_stop(const std::string& s) { if (trip_hook_ && is_safety_stop(s)) { try { trip_hook_(s); } catch (...) {} } }
     struct KeyHook { const std::function<void(bool, double)>& h; explicit KeyHook(const std::function<void(bool, double)>& f, double below_hz = 0) : h(f) { if (h) h(true, below_hz); } ~KeyHook() { if (h) try { h(false, 0); } catch (...) {} } };   // declared before the TxGate: its end runs after the unkey
     std::mutex lines_m_; std::shared_ptr<TxLines> lines_;

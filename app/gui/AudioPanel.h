@@ -9,7 +9,8 @@
 #include "fireside/tx_control.h"
 #include "fireside/tx_dsp.h"
 #include "fireside/vox.h"
-class QCheckBox; class QGridLayout; class QComboBox; class QDoubleSpinBox; class QLabel; class QProgressBar; class QPushButton; class QSlider; class QSpinBox; class QTimer;
+#include "fireside/dsp.h"
+class SpectrumWidget; class WaterfallWidget; class QCheckBox; class QGridLayout; class QComboBox; class QDoubleSpinBox; class QLabel; class QProgressBar; class QPushButton; class QSlider; class QSpinBox; class QTimer;
 class RadioPanel; class ReceiverPanel;
 
 class AudioPanel : public QWidget {
@@ -26,6 +27,7 @@ public:
     // The feedback test (no RF): "Test input" with "Hear it processed" ticked plays the mic through the transmit processing on the PC's speakers.
     QPushButton* testButton() const { return test_; } QCheckBox* hearBox() const { return hear_; } bool feedbackRunning() const { return loop_ != nullptr; }
     void setPcAudioEnabled(bool on) { pc_audio_ = on; }    // false (smoke tests): the feedback test never opens a sound device
+    const std::vector<float>& pictureFrameForTests() const { return pic_last_; }   // the Audio tab's picture: the last spectrum frame (dB, 0 = the set PEP)
     double feedbackOutDbfs() const { return loop_ ? loop_->out_dbfs() : -200; }
     bool testInputOpen() const { return test_in_ != nullptr || loop_ != nullptr; }
     void setInputFactoryForTests(std::function<std::unique_ptr<fireside::txc::IAudioIn>()> f) { test_factory_ = std::move(f); }
@@ -46,6 +48,8 @@ private:
     QComboBox* source_; QSlider* mic_gain_; QLabel* mic_gain_lbl_; QSpinBox* pc_gain_; QProgressBar* level_; QPushButton* test_; QLabel* in_note_;
     QSpinBox *hp_, *lp_; QCheckBox *exp_on_, *lev_on_, *comp_on_, *eq_on_; QDoubleSpinBox *exp_thr_, *exp_ratio_, *lev_target_, *lev_max_, *comp_thr_, *comp_ratio_, *comp_makeup_;
     QSlider* eq_[10]; QLabel* eq_val_[10]; QLayout* rx_box_ = nullptr;
+    std::shared_ptr<fireside::txo::IqTap> pic_tap_ = std::make_shared<fireside::txo::IqTap>(); std::unique_ptr<fireside::dsp::SpectrumAnalyzer> pic_an_; std::vector<std::vector<float>> pic_frames_;
+    std::vector<float> pic_last_; std::vector<std::complex<float>> pic_buf_; QCheckBox* hum_on_ = nullptr; QComboBox* hum_hz_ = nullptr; QLabel* pic_peak_ = nullptr; float pic_pk_ = 0; QSlider* test_vol_ = nullptr; SpectrumWidget* pic_spec_ = nullptr; WaterfallWidget* pic_wf_ = nullptr; void drawPicture(); void setPicturePassband();
     std::unique_ptr<fireside::txc::IAudioIn> test_in_; QTimer* timer_; float test_peak_ = 0;
     QCheckBox* hear_ = nullptr; QProgressBar* out_level_ = nullptr; std::unique_ptr<fireside::vox::MicLoop> loop_; class PcAudioFeed* feed_ = nullptr; QTimer* restart_ = nullptr; bool pc_audio_ = true;
     bool loading_ = false; std::function<std::unique_ptr<fireside::txc::IAudioIn>()> test_factory_, ext_factory_;

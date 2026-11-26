@@ -22,6 +22,7 @@ public:
     void setScale(fireside::display::Scale s) { scale_ = s; update(); }
     void setNotchOffsets(const std::vector<double>& rfOffsetsHz) { notches_ = rfOffsetsHz; update(); }   // where the manual notches sit on the spectrum (offsets from the dial)
     void setBandPlan(bool on) { bandplan_ = on; update(); }
+    void setUnit(const QString& u) { unit_ = u; update(); }   // the readout's unit ("dBFS"; "dBm TX" while the transmit picture is shown)
     bool bandPlan() const { return bandplan_; }
     QSize minimumSizeHint() const override { return {320, 140}; }
 signals:
@@ -40,6 +41,7 @@ protected:
     void wheelEvent(QWheelEvent*) override;
     void leaveEvent(QEvent*) override { hover_x_ = -1; update(); }
 private:
+    QString unit_ = "dBFS";
     std::vector<float> db_, avg_; float alpha_ = 0.5f; double view_lo_ = 0, view_hi_ = 1; double span_hz_ = 48000, dial_hz_ = 7100000, pb_lo_ = 200, pb_hi_ = 2800; fireside::display::Scale scale_; int hover_x_ = -1, hover_y_ = -1, wheel_acc_ = 0, drag_edge_ = 0, drag_notch_ = -1; bool drag_shift_ = false; double shift_last_hz_ = 0; std::vector<double> notches_; bool bandplan_ = true;
     int notchAt(int x) const;   // drag_edge_: 1 = low edge, 2 = high edge
     double offLo() const { return (view_lo_ - 0.5) * span_hz_; }        // offsets from the dial at the plot's left / right edges

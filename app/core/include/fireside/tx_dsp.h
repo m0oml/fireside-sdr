@@ -45,7 +45,7 @@ std::vector<cf> ssb_modulate(const std::vector<float>& audio, const SsbConfig& c
 // RBJ cookbook biquad, transposed direct form II with double state.
 class Biquad {
 public:
-    enum class Type { HighPass, LowPass, Peak, LowShelf, HighShelf };
+    enum class Type { HighPass, LowPass, Peak, LowShelf, HighShelf, Notch };
     Biquad(Type t, double sample_rate, double hz, double q = 0.7071, double gain_db = 0);   // throws std::invalid_argument
     float process(float x);
     double response_db(double hz) const;    // magnitude response, for tests and UI
@@ -133,6 +133,10 @@ struct MicChainConfig {
     double sample_rate = 48000, mic_gain_db = 0;
     double highpass_hz = 100, lowpass_hz = 3000;     // 0 = off
     std::vector<EqBand> eq;
+    // Hum filter: narrow notches at every harmonic of the mains frequency (50 or 60 Hz; 0 = off) up to hum_max_hz, right after the input gain
+    // and the high-pass, before the expander / leveler / compressor, so they never turn the buzz up. Each notch is about 6 Hz + 0.6 % wide
+    // (the mains drifts ~0.1 Hz: n x that at the n-th harmonic).
+    double hum_hz = 0, hum_max_hz = 1250;
     bool gate = false; GateConfig gate_cfg;
     bool expander = false; ExpanderConfig exp_cfg;
     bool leveler = false; LevelerConfig lev_cfg;

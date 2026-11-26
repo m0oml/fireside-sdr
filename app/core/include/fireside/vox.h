@@ -13,6 +13,7 @@
 #include <vector>
 #include "fireside/tx_control.h"
 #include "fireside/tx_dsp.h"
+#include "fireside/tx_out.h"
 
 namespace fireside::vox {
 // Speech detector on the mic (after the input gain): on as soon as the peak envelope stays above threshold_dbfs for attack_ms; off hang_s after it
@@ -53,12 +54,13 @@ private:
 // would hear) and handed to `out` (the PC's speakers). Levels for the meters. Never touches the radio.
 class MicLoop {
 public:
-    MicLoop(std::unique_ptr<txc::IAudioIn> in, const tx::TxChainConfig& chain, std::function<void(const float* audio, size_t n)> out);
+    // `out` may be empty (no sound); `picture`, if set, gets the processed SSB I/Q (48 kHz, the over's units: the chain's ceiling = the set PEP) for the Audio tab's picture.
+    MicLoop(std::unique_ptr<txc::IAudioIn> in, const tx::TxChainConfig& chain, std::function<void(const float* audio, size_t n)> out, std::shared_ptr<txo::IqTap> picture = nullptr);
     ~MicLoop();
     double in_dbfs() const { return in_db_.load(); } double out_dbfs() const { return out_db_.load(); }
     bool failed() const { return failed_.load(); } std::string error() const { std::lock_guard<std::mutex> l(m_); return err_; }
 private:
-    std::unique_ptr<txc::IAudioIn> in_; tx::TxChain chain_; std::function<void(const float*, size_t)> out_;
+    std::unique_ptr<txc::IAudioIn> in_; tx::TxChain chain_; std::function<void(const float*, size_t)> out_; std::shared_ptr<txo::IqTap> pic_;
     std::thread th_; std::atomic<bool> stop_{false}, failed_{false}; std::atomic<double> in_db_{-200}, out_db_{-200}; mutable std::mutex m_; std::string err_;
 };
 // What a receiver hears from our SSB I/Q (complex baseband, audio on the chosen side): its real part.

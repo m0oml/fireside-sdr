@@ -131,6 +131,6 @@ void SpectrumWidget::paintEvent(QPaintEvent*) {
         const size_t bin = size_t(std::min(std::max(std::lround((off / span_hz_ + 0.5) * double(db_.size() - 1)), 0L), long(db_.size() - 1)));
         p.setPen(QColor(255, 200, 80)); p.drawLine(hover_x_, top, hover_x_, top + ph);
         const std::string seg = bandplan_ ? fireside::bandplan::describe(dial_hz_ + off) : std::string();
-        p.drawText(QRect(left + 6, top + ph - 16, pw - 12, 14), Qt::AlignLeft, QString("%1  %2 dBFS%3").arg(QString::fromStdString(format_mhz(dial_hz_ + off))).arg(double(db_[bin]), 0, 'f', 1).arg(seg.empty() ? QString() : "  " + QString::fromStdString(seg)));
+        p.drawText(QRect(left + 6, top + ph - 16, pw - 12, 14), Qt::AlignLeft, QString("%1  %2 %4%3").arg(QString::fromStdString(format_mhz(dial_hz_ + off))).arg(double(db_[bin]), 0, 'f', 1).arg(seg.empty() ? QString() : "  " + QString::fromStdString(seg)).arg(unit_));
     }
 }

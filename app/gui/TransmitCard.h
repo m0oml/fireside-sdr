@@ -124,9 +124,10 @@ private:
     bool ask(const QString& title, const QString& text);
     std::atomic<double> last_tx_w_{0}, unkeyed_utc_{0}, job_end_utc_{0}; std::atomic<qint64> last_tx_t_{0};
     std::function<int(double)> tx_ant_; int txAnt() const;
-    AudioPanel* audio_ = nullptr; QComboBox* voice_mode_ = nullptr; QDoubleSpinBox* voice_w_ = nullptr; QPushButton* ptt_ = nullptr; QCheckBox *space_ptt_ = nullptr, *mic_ptt_ = nullptr; QTimer* ptt_poll_ = nullptr;
-    std::atomic<bool> ptt_btn_{false}, ptt_key_{false}, ptt_mic_{false}; std::unique_ptr<fireside::txc::IAudioIn> voice_in_;
-    bool pttActive() const { return ptt_btn_ || ptt_key_ || ptt_mic_; }
+    AudioPanel* audio_ = nullptr; QComboBox* voice_mode_ = nullptr; QDoubleSpinBox* voice_w_ = nullptr; QPushButton* ptt_ = nullptr; QCheckBox *space_ptt_ = nullptr, *mic_ptt_ = nullptr, *key_ptt_ = nullptr; QTimer* ptt_poll_ = nullptr;
+    std::atomic<bool> ptt_btn_{false}, ptt_key_{false}, ptt_mic_{false}, ptt_jack_{false}; std::unique_ptr<fireside::txc::IAudioIn> voice_in_;   // ptt_key_: the space bar; ptt_jack_: the CW key jack
+    std::shared_ptr<fireside::txo::IqTap> tx_tap_ = std::make_shared<fireside::txo::IqTap>();   // the transmitted I/Q for the receiver's transmit picture (display only)
+    bool pttActive() const { return ptt_btn_ || ptt_key_ || ptt_mic_ || ptt_jack_; }
     void onPttChanged(); void startVoice(); void connectTrip();
     struct ExtPtt; std::unique_ptr<ExtPtt> ext_; QCheckBox* ext_allow_ = nullptr; QDoubleSpinBox* ext_w_ = nullptr;
     std::atomic<int> ext_owner_{-1}; std::atomic<bool> ext_ptt_{false}, ext_allowed_{false}, ext_over_{false}; std::atomic<qint64> ext_beat_ms_{0};

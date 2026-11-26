@@ -1,8 +1,8 @@
 #pragma once
 #include <QWidget>
 
-// Transmit power meter in the S-meter's style: two segmented bars, forward (accent) and reflected (amber), on a square-root watts scale 0..30 W with
-// peak hold, and a text line under them (fwd / ref / SWR while keyed; the last over's figures afterwards). Fed by the Transmit card from the PA meter.
+// Transmit power meter in the S-meter's style: two segmented bars, forward (accent) and reflected (amber), on a square-root watts scale 0..100 W with
+// a PEP hold (2 s; shown as text too, and the over's highest reading afterwards), and a text line under them (fwd / ref / SWR while keyed; the last over's figures afterwards). Fed by the Transmit card from the PA meter.
 class PowerMeter : public QWidget {
     Q_OBJECT
 public:
@@ -13,5 +13,5 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override;
 private:
-    double fwd_ = 0, ref_ = 0, pk_ = 0, last_fwd_ = 0, last_ref_ = 0, last_swr_ = 0; qint64 pk_t_ = 0; bool keyed_ = false; QString text_;
+    double fwd_ = 0, ref_ = 0, pk_ = 0, last_fwd_ = 0, last_ref_ = 0, last_swr_ = 0; double over_pk_ = 0; qint64 pk_t_ = 0; bool keyed_ = false, was_keyed_ = false; QString text_;
 };

@@ -74,6 +74,7 @@ QString fmt_w(double w) { return QString::number(w, 'f', w < 10 ? 2 : 1) + " W";
 }  // namespace
 
 TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated, QWidget* parent) : QFrame(parent), radio_(radio), rx_(rx), simulated_(simulated) {
+    rx_->setTxIqTap(tx_tap_);
     auto* g = new QGridLayout; g->setHorizontalSpacing(10); g->setVerticalSpacing(6);
     arm_ = new QPushButton("Retry transmit check"); arm_->setCheckable(true); arm_->setVisible(false); auto_arm_ = !simulated_;
     arm_->setToolTip("Reads the radio's calibration EEPROM (read-only, ~16 s), compares it with your backup byte for byte, then sets the PA bias from it. Nothing transmits.");
@@ -116,6 +117,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     ptt_ = new QPushButton("PTT (hold)"); ptt_->setToolTip("Hold to talk: an SSB over with the Audio tab's input and processing (time-out 3 min)");
     space_ptt_ = new QCheckBox("Space bar"); space_ptt_->setToolTip("Hold the space bar to talk (not while typing in a box)"); space_ptt_->setChecked(false);
     mic_ptt_ = new QCheckBox("Mic / RCA PTT"); mic_ptt_->setChecked(true); mic_ptt_->setToolTip("The mic's PTT (front socket) or the rear RCA PTT keys an over");
+    key_ptt_ = new QCheckBox("Key jack"); key_ptt_->setChecked(false); key_ptt_->setToolTip("The CW key jack keys a voice over while it is closed (either contact: a straight key, a paddle or a foot switch). Voice modes only: in CW the key sends Morse as usual");
     ext_allow_ = new QCheckBox("Let other programs key (CAT)"); ext_allow_->setChecked(false);
     ext_allow_->setToolTip("WSJT-X, JS8Call, fldigi ... may key the radio over the CAT server (PTT: CAT), sending what they play into \"Fireside TX audio\". "
                            "Off in every new window. Needs the direct stream, a measured drive level for the band; at most 2 minutes per over; unkeys if the program goes quiet for 15 s.");
@@ -152,7 +154,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
         atu_part_ = part({row({tune_, tuner_btn_}, false)}); }
     ext_part_ = part({row({ext_allow_, ext_w_})});                                      // goes on the Audio tab
     digi_part_ = part({row({ft_mode_, ft_hz_, ft_clear_, ft_par_}), row({ft_msg_, ft_w_}, false), row({send_, cq_, ft_repeat_, auto_seq_, stop_}, false)});
-    voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_})});
+    voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_, key_ptt_})});
     { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
     if (stop3_) stop3_->setObjectName("txstop");                                            // the transmit Stops: a muted red, easy to find
     buildCw();                                                                        // the CW part (TransmitCardCw.cpp)
@@ -175,9 +177,10 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     qApp->installEventFilter(this);
     ptt_poll_ = new QTimer(this); ptt_poll_->setInterval(50);
     connect(ptt_poll_, &QTimer::timeout, this, [this] {
-        if (!mic_ptt_->isChecked() || !tx_ || !tx_->armed()) { if (ptt_mic_) { ptt_mic_ = false; onPttChanged(); } return; }
-        const auto bits = radio_->session().read_ptt(); const bool down = bits && (*bits & 0xC);   // bit 3 mic PTT, bit 2 rear RCA PTT
-        if (down != ptt_mic_) { ptt_mic_ = down; onPttChanged(); }
+        const bool mic = mic_ptt_->isChecked(), jack = key_ptt_->isChecked() && rx_->modeGroup() == 0 && !cw_over_;   // the key jack: voice modes only (in CW it is the Morse key)
+        std::optional<uint32_t> bits; if ((mic || jack) && tx_ && tx_->armed()) bits = radio_->session().read_ptt();   // read-only; one read for both
+        const bool mic_down = mic && bits && (*bits & 0xC), jack_down = jack && bits && (*bits & 0x3);   // bit 3 mic PTT, bit 2 rear RCA PTT; bit 0 dot, bit 1 dash
+        if (mic_down != ptt_mic_ || jack_down != ptt_jack_) { ptt_mic_ = mic_down; ptt_jack_ = jack_down; onPttChanged(); }
     });
     ptt_poll_->start();
     connect(cq_, &QPushButton::clicked, this, [this] {
@@ -194,7 +197,9 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     connect(rx_, &ReceiverPanel::dialChanged, this, &TransmitCard::onDial);
     if (!no_settings()) { QSettings q("fireside", "transmit"); power_->setValue(q.value("tune_w", 3).toDouble()); thr_->setCurrentIndex(std::clamp(q.value("thr", 2).toInt(), 0, 6)); auto_restore_->setChecked(q.value("auto_restore", true).toBool()); mirror_->setChecked(q.value("mirror_q", true).toBool());
                            ft_msg_->setText(q.value("ft_msg", ft_msg_->text()).toString()); ft_hz_->setValue(q.value("ft_hz", 1500).toInt()); ft_w_->setValue(q.value("ft_w", 5).toDouble());
-                           ft_mode_->setCurrentIndex(q.value("ft_mode", 0).toInt()); ft_par_->setCurrentIndex(q.value("ft_par", 0).toInt()); auto_seq_->setChecked(q.value("auto_seq", true).toBool()); ft_clear_->setChecked(q.value("ft_clear", true).toBool()); }
+                           ft_mode_->setCurrentIndex(q.value("ft_mode", 0).toInt()); ft_par_->setCurrentIndex(q.value("ft_par", 0).toInt()); auto_seq_->setChecked(q.value("auto_seq", true).toBool()); ft_clear_->setChecked(q.value("ft_clear", true).toBool()); 
+                           space_ptt_->setChecked(q.value("space_ptt", false).toBool()); mic_ptt_->setChecked(q.value("mic_ptt", true).toBool()); key_ptt_->setChecked(q.value("key_ptt", false).toBool()); }
+    for (auto* c : {space_ptt_, mic_ptt_, key_ptt_}) connect(c, &QCheckBox::toggled, this, [this] { saveState(); });   // after loading: remembered
     connect(auto_seq_, &QCheckBox::toggled, this, [this](bool on) { if (!on && seq_) seq_->stop(); saveState(); });
     connect(power_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this] { saveState(); }); connect(thr_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { saveState(); });
     connect(auto_restore_, &QCheckBox::toggled, this, [this] { saveState(); });
@@ -537,7 +542,7 @@ void TransmitCard::offerBackup() {
              "It takes about half a minute (the EEPROM is read twice and both reads must match). It is read-only: nothing is written to the radio's EEPROM. Receive carries on.")) {
         report("No EEPROM backup was saved, so transmit stays off. Press Retry transmit check later to be asked again."); { QSignalBlocker b(arm_); arm_->setChecked(false); } return;
     }
-    tx_ = s.transmit(pcmFactory()); connectTrip();
+    tx_ = s.transmit(pcmFactory()); connectTrip(); tx_->set_iq_tap(tx_tap_);
     if (!tx_) { report("The radio is not started."); return; }
     run("Reading the EEPROM twice and saving a backup", false, [this, dir](txc::TxControl& t) {
         const auto log = [this](const std::string& m) { const QString q = QString::fromStdString(m); QMetaObject::invokeMethod(this, [this, q] { emit message("Transmit: " + q); }, Qt::QueuedConnection); };
@@ -611,7 +616,7 @@ void TransmitCard::onArm(bool on) {
         return;
     }
     QFile f(bpath); std::vector<uint8_t> backup; if (f.open(QIODevice::ReadOnly)) { const QByteArray a = f.readAll(); backup.assign(a.begin(), a.end()); }
-    tx_ = s.transmit(pcmFactory()); connectTrip();
+    tx_ = s.transmit(pcmFactory()); connectTrip(); tx_->set_iq_tap(tx_tap_);
     if (!tx_) { QSignalBlocker b(arm_); arm_->setChecked(false); report("The radio is not started."); return; }
     const int band_now = txm::band_of(rx_->dialHz()); const bool restore_now = band_now >= 0 && auto_restore_->isChecked() && txAnt() == 1;
     run("Arming (reading the EEPROM)", false, [this, backup, band_now, restore_now](txc::TxControl& t) {
@@ -799,7 +804,7 @@ bool TransmitCard::eventFilter(QObject* o, QEvent* e) {
     return QFrame::eventFilter(o, e);
 }
 void TransmitCard::onPttChanged() {
-    ptt_->setDown(ptt_btn_ || ptt_key_ || ptt_mic_);
+    ptt_->setDown(pttActive());
     if (pttActive() && !worker_running_ && tx_ && tx_->armed() && !ft_pending_) startVoice();   // released: the over's loop sees it and unkeys
 }
 void TransmitCard::startVoice() {
@@ -830,8 +835,8 @@ void TransmitCard::startVoice() {
             if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
             if (!r.keyed) return QString("Voice not keyed: ") + QString::fromStdString(r.why_not.empty() ? r.stop : r.why_not);
             if (r.max_fwd_w > 0.1) { last_tx_w_ = r.max_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }
-            return QString("Voice over: %1, %2 s, peak %3 W (set %4 W PEP)%5").arg(QString::fromStdString(r.stop)).arg(r.seconds, 0, 'f', 1).arg(r.max_fwd_w, 0, 'f', 1).arg(v.peak_w, 0, 'f', 0)
-                   .arg(r.underruns > 4800 ? QString(", audio gaps %1").arg(r.underruns) : QString())
+            return QString("Voice over: %1, %2 s, peak %3 W (set %4 W PEP), average %6 W (%7 W while talking)%5").arg(QString::fromStdString(r.stop)).arg(r.seconds, 0, 'f', 1).arg(r.max_fwd_w, 0, 'f', 1).arg(v.peak_w, 0, 'f', 0)
+                   .arg(r.underruns > 4800 ? QString(", audio gaps %1").arg(r.underruns) : QString()).arg(r.mean_fwd_w, 0, 'f', 1).arg(r.talk_fwd_w, 0, 'f', 1)
                    + QString(". Audio peak %1 dB (0 = set power), power trims %2%3").arg(r.iq_peak_db, 0, 'f', 1).arg(r.trims)
                        .arg(r.trims ? QString(" (drive %1 % of start)").arg(r.drive_start > 0 ? 100.0 * r.drive / r.drive_start : 0.0, 0, 'f', 0) : QString());
         });
@@ -870,7 +875,8 @@ void TransmitCard::tick() {
     rx_->setMeterTx(keyed);
     stop2_->setEnabled(stop_->isEnabled()); stop3_->setEnabled(stop_->isEnabled());
     if (status_->toolTip() != status_->text()) status_->setToolTip(status_->text());    // the line is clipped: the tooltip has all of it
-    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running(), cw_over_ ? txc::kCwOffsetHz : 0.0);   // a CW over: the DDS 1 kHz below the dial
+    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running(), cw_over_ ? txc::kCwOffsetHz : 0.0);
+    { const int b = txm::band_of(rx_->dialHz()); rx_->setTxView(keyed, cw_over_ ? txc::kCwOffsetHz : 0.0, keyed && tx_ && b >= 0 ? tx_->k_for(b) : 0.0); }   // the transmit picture: what is sent, in dBm   // a CW over: the DDS 1 kHz below the dial
     rx_->setTxMute(keyed || cw_over_);                                                  // receive audio off while keyed (our own signal; it would also feed back into the mic)           // duplex: receive follows the DDS onto the dial for the over
     lamp_->setStyleSheet(keyed ? "background:#c62828;color:white;font-weight:bold;border-radius:4px;padding:2px" : "background:#3a3a3a;color:#888;border-radius:4px;padding:2px");
     txc::Progress p; bool have; { std::lock_guard<std::mutex> l(m_); p = last_; have = have_last_; }
@@ -912,7 +918,7 @@ void TransmitCard::loadState() {                         // worker thread, right
 void TransmitCard::saveState() {
     if (no_settings()) return;
     QSettings q("fireside", "transmit"); q.setValue("tune_w", power_->value()); q.setValue("thr", thr_->currentIndex()); q.setValue("auto_restore", auto_restore_->isChecked()); q.setValue("mirror_q", mirror_->isChecked());
-    q.setValue("auto_seq", auto_seq_->isChecked()); q.setValue("ft_msg", ft_msg_->text()); q.setValue("ft_hz", ft_hz_->value()); q.setValue("ft_clear", ft_clear_->isChecked()); q.setValue("ft_w", ft_w_->value()); q.setValue("ft_mode", ft_mode_->currentIndex()); q.setValue("ft_par", ft_par_->currentIndex());
+    q.setValue("auto_seq", auto_seq_->isChecked()); q.setValue("ft_msg", ft_msg_->text()); q.setValue("ft_hz", ft_hz_->value()); q.setValue("ft_clear", ft_clear_->isChecked()); q.setValue("ft_w", ft_w_->value()); q.setValue("ft_mode", ft_mode_->currentIndex()); q.setValue("ft_par", ft_par_->currentIndex()); q.setValue("space_ptt", space_ptt_->isChecked()); q.setValue("mic_ptt", mic_ptt_->isChecked()); q.setValue("key_ptt", key_ptt_->isChecked());
     if (!tx_ || worker_running_) return;
     QDir().mkpath(cfg_dir());
     std::ofstream(mem_path().toStdString()) << tx_->memory().to_text();

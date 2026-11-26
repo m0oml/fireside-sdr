@@ -1,4 +1,6 @@
 #include "AudioPanel.h"
+#include "SpectrumWidget.h"
+#include "WaterfallWidget.h"
 #include "ReceiverPanel.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -107,6 +109,10 @@ AudioPanel::AudioPanel(RadioPanel* radio, QWidget* parent) : QWidget(parent), ra
       g->addWidget(new QLabel("Input gain"), r, 0); g->addWidget(pc_gain_, r++, 1);
       g->addWidget(test_, r, 0); g->addWidget(level_, r++, 1, 1, 2);
       g->addWidget(hear_, r, 0); g->addWidget(out_level_, r++, 1, 1, 2);
+      test_vol_ = new QSlider(Qt::Horizontal); test_vol_->setRange(0, 100); test_vol_->setValue(50); test_vol_->setToolTip("Playback volume of the feedback test on the selected PC output (not the transmit level)");
+      g->addWidget(new QLabel("Test volume"), r, 0); g->addWidget(test_vol_, r++, 1, 1, 2);
+      connect(test_vol_, &QSlider::valueChanged, this, [this](int v) { if (feed_) feed_->setVolume(float(v) / 100.f); });
+      connect(test_vol_, &QSlider::sliderReleased, this, [this] { if (!loading_ && !no_settings()) QSettings("fireside", "audio").setValue("test_volume", test_vol_->value()); });
       g->addWidget(in_note_, r++, 0, 1, 3); g->setColumnStretch(1, 1);
       top->addWidget(theme::makeCard("Transmit input", g), 3); }
     outer->addLayout(top);
@@ -126,6 +132,11 @@ AudioPanel::AudioPanel(RadioPanel* radio, QWidget* parent) : QWidget(parent), ra
     { auto* g = new QGridLayout; g->setHorizontalSpacing(10); g->setVerticalSpacing(6); int r = 0;
       hp_ = new QSpinBox; hp_->setRange(50, 400); hp_->setSuffix(" Hz"); lp_ = new QSpinBox; lp_->setRange(2000, 4000); lp_->setSingleStep(100); lp_->setSuffix(" Hz");
       g->addWidget(new QLabel("High-pass"), r, 0); g->addWidget(hp_, r, 1); g->addWidget(new QLabel("Low-pass"), r, 2); g->addWidget(lp_, r++, 3);
+      hum_on_ = new QCheckBox("Hum filter"); hum_hz_ = new QComboBox; hum_hz_->addItems({"50 Hz mains", "60 Hz mains"});
+      hum_on_->setToolTip("Narrow notches at every mains harmonic up to 1.25 kHz, before the expander, leveler and compressor: removes a mains buzz on the mic "
+                          "(it is not turned up between words any more). The voice between the notches is untouched. Transmit only.");
+      g->addWidget(hum_on_, r, 0); g->addWidget(hum_hz_, r++, 1);
+      connect(hum_on_, &QCheckBox::toggled, this, [this] { save(); }); connect(hum_hz_, &QComboBox::activated, this, [this] { save(); });
       exp_on_ = new QCheckBox("Downward expander"); exp_thr_ = dspin(-70, -20, -45, 1, " dBFS"); exp_ratio_ = dspin(1, 10, 2.5, 0.5, " : 1", 1);
       exp_on_->setToolTip("Below the threshold the level falls by (ratio - 1) dB per dB: room noise and hum drop away between words, speech is untouched");
       g->addWidget(exp_on_, r, 0); g->addWidget(exp_thr_, r, 1); g->addWidget(new QLabel("ratio"), r, 2); g->addWidget(exp_ratio_, r++, 3);
@@ -151,7 +162,18 @@ AudioPanel::AudioPanel(RadioPanel* radio, QWidget* parent) : QWidget(parent), ra
       v->addLayout(h); auto* flat = new QPushButton("Flat"); v->addWidget(flat, 0, Qt::AlignLeft);
       connect(flat, &QPushButton::clicked, this, [this] { for (auto* s : eq_) s->setValue(0); });
       mid->addWidget(theme::makeCard("10-band equaliser (transmit)", v), 4); }
-    outer->addLayout(mid); outer->addStretch(1);
+    outer->addLayout(mid);
+    // the picture: the processed audio as the over would look on the transmit spectrum and waterfall (Test input; nothing transmits)
+    { auto* v = new QVBoxLayout; v->setSpacing(4);
+      auto* n = new QLabel("While Test input runs: your voice through the processing above, as the over would look on the spectrum and waterfall (shown as USB, "
+                           "kHz from the carrier; 0 dB = the set power). Nothing transmits."); n->setObjectName("muted"); n->setWordWrap(true); v->addWidget(n);
+      pic_peak_ = new QLabel("Envelope peak: -"); v->addWidget(pic_peak_);
+      pic_spec_ = new SpectrumWidget; pic_spec_->setMinimumHeight(120); pic_spec_->setSpan(48000); pic_spec_->setDial(0); pic_spec_->setBandPlan(false); pic_spec_->setAveraging(0.3f); pic_spec_->setUnit("dB PEP");
+      pic_wf_ = new WaterfallWidget; pic_wf_->setMinimumHeight(80); pic_wf_->setSpan(48000);
+      const double lo = 0.5 - 500.0 / 48000.0, hi = 0.5 + 4000.0 / 48000.0; pic_spec_->setView(lo, hi); pic_wf_->setView(lo, hi);   // -0.5 .. 4 kHz: the voice
+      v->addWidget(pic_spec_, 3); v->addWidget(pic_wf_, 2); setPicturePassband();
+      outer->addWidget(theme::makeCard("Transmit picture (simulated)", v), 1); }
+    outer->addStretch(0);
     timer_ = new QTimer(this); timer_->setInterval(100); connect(timer_, &QTimer::timeout, this, &AudioPanel::tick); timer_->start();
     connect(test_, &QPushButton::toggled, this, &AudioPanel::onTestInput);
     connect(mic_gain_, &QSlider::valueChanged, this, [this](int v) { mic_gain_lbl_->setText(QString("%1 dB").arg(v)); });
@@ -177,6 +199,7 @@ void AudioPanel::resetProcessing() {
 tx::TxChainConfig AudioPanel::chainConfig() const {
     auto c = tx::voice_chain_defaults(); auto& m = c.mic;
     m.mic_gain_db = double(pc_gain_->value());                         // the input gain, applied once: in the chain
+    m.hum_hz = hum_on_->isChecked() ? (hum_hz_->currentIndex() == 1 ? 60.0 : 50.0) : 0.0;
     m.highpass_hz = hp_->value(); m.lowpass_hz = lp_->value();
     m.expander = exp_on_->isChecked(); m.exp_cfg.threshold_dbfs = exp_thr_->value(); m.exp_cfg.ratio = exp_ratio_->value();
     m.leveler = lev_on_->isChecked(); m.lev_cfg.target_dbfs = lev_target_->value(); m.lev_cfg.max_gain_db = lev_max_->value();
@@ -237,18 +260,37 @@ void AudioPanel::onTestInput(bool on) {
     QString err; auto in = openInput(&err);
     if (!in) { in_note_->setText("Cannot open the input: " + err); QSignalBlocker b(test_); test_->setChecked(false); return; }
     const QString name = QString::fromStdString(in->describe());
-    if (hear_->isChecked()) {                                           // the feedback test: the processed voice on the PC's speakers
-        if (!feed_) feed_ = new PcAudioFeed(pc_audio_, this);
-        PcAudioFeed* f = feed_;
-        try { loop_ = std::make_unique<vox::MicLoop>(std::move(in), chainConfig(), [f](const float* a, size_t n) { f->push(a, n); }); }
-        catch (const std::exception& e) { in_note_->setText(QString("Cannot start the feedback test: ") + e.what()); QSignalBlocker b(test_); test_->setChecked(false); return; }
-        in_note_->setText(QString("Feedback test on %1: you hear yourself as transmitted (use headphones). Nothing transmits.%2").arg(name, f->available() ? QString() : QString(" (No PC audio output found.)")));
-        return;
+    // Always through the transmit processing, so the picture below shows the over as it would look; "Hear it processed" adds the sound.
+    const bool hear = hear_->isChecked(); std::function<void(const float*, size_t)> out;
+    if (hear) { if (!feed_) feed_ = new PcAudioFeed(pc_audio_, this); feed_->setVolume(float(test_vol_->value()) / 100.f); PcAudioFeed* f = feed_; out = [f](const float* a, size_t n) { f->push(a, n); }; }
+    try { loop_ = std::make_unique<vox::MicLoop>(std::move(in), chainConfig(), out, pic_tap_); }
+    catch (const std::exception& e) { in_note_->setText(QString("Cannot start the input test: ") + e.what()); QSignalBlocker b(test_); test_->setChecked(false); return; }
+    setPicturePassband();
+    if (hear) in_note_->setText(QString("Feedback test on %1: you hear yourself as transmitted (use headphones). The picture below shows the over as it would look. Nothing transmits.%2").arg(name, feed_->available() ? QString() : QString(" (No PC audio output found.)")));
+    else in_note_->setText(QString("Testing %1: the picture below shows the over as it would look (nothing transmits)").arg(name));
+}
+void AudioPanel::setPicturePassband() {
+    if (!pic_spec_) return; const auto c = chainConfig(); pic_spec_->setPassband(c.ssb.lo_hz, c.ssb.hi_hz); pic_wf_->setPassband(c.ssb.lo_hz, c.ssb.hi_hz);
+}
+void AudioPanel::drawPicture() {
+    pic_buf_.clear(); pic_tap_->read(pic_buf_);
+    if (!loop_ || pic_buf_.empty() || !pic_spec_) return;
+    if (!pic_an_) { pic_an_ = std::make_unique<fireside::dsp::SpectrumAnalyzer>(48000.0, 4096); pic_an_->on_frame = [this](const std::vector<float>& db) { if (pic_frames_.size() < 64) pic_frames_.push_back(db); }; }
+    pic_an_->push(pic_buf_.data(), pic_buf_.size());
+    {   // the envelope peak against the set power: the number to aim for (each spectrum bin holds only part of the speech's power, so the trace sits well below it)
+        float pk = 0; for (const auto& z : pic_buf_) pk = std::max(pk, std::abs(z));
+        pic_pk_ = std::max(pk, pic_pk_ * 0.85f); const double ceil = chainConfig().iq_limiter.ceiling;
+        const double db = pic_pk_ > 0 ? 20.0 * std::log10(double(pic_pk_) / ceil) : -200.0;
+        pic_peak_->setText(QString("Envelope peak: %1 dB PEP (0 = full set power). The trace sits lower: each bin holds only part of the speech's power.").arg(db > -99 ? QString::number(db, 'f', 1) : QString("-")));
     }
-    test_in_ = std::move(in);
-    in_note_->setText(QString("Listening to %1 (nothing transmits)").arg(name));
+    const float add = float(-20.0 * std::log10(chainConfig().iq_limiter.ceiling));   // 0 dB = the chain's ceiling = the set power (PEP)
+    const fireside::display::Scale sc{-90.f, 5.f};
+    for (auto& db : pic_frames_) { for (auto& d : db) d += add; pic_wf_->pushRow(db, sc); pic_last_ = db; }
+    if (!pic_frames_.empty()) { pic_spec_->setScale(sc); pic_spec_->setFrame(pic_last_); }
+    pic_frames_.clear();
 }
 void AudioPanel::tick() {
+    drawPicture();
     if (loop_) {                                                        // the feedback test: both meters from the loop
         if (loop_->failed()) { in_note_->setText(QString::fromStdString("Input stopped: " + loop_->error())); loop_.reset(); QSignalBlocker bl(test_); test_->setChecked(false); return; }
         const double a = loop_->in_dbfs(), b = loop_->out_dbfs();
@@ -273,11 +315,14 @@ void AudioPanel::load() {
     exp_on_->setChecked(q.value("exp_on", exp_on_->isChecked()).toBool()); exp_thr_->setValue(q.value("exp_thr", exp_thr_->value()).toDouble()); exp_ratio_->setValue(q.value("exp_ratio", exp_ratio_->value()).toDouble());
     lev_on_->setChecked(q.value("lev_on", lev_on_->isChecked()).toBool()); lev_target_->setValue(q.value("lev_target", lev_target_->value()).toDouble()); lev_max_->setValue(q.value("lev_max", lev_max_->value()).toDouble());
     comp_on_->setChecked(q.value("comp_on", comp_on_->isChecked()).toBool()); comp_thr_->setValue(q.value("comp_thr", comp_thr_->value()).toDouble()); comp_ratio_->setValue(q.value("comp_ratio", comp_ratio_->value()).toDouble()); comp_makeup_->setValue(q.value("comp_makeup", comp_makeup_->value()).toDouble());
+    hum_on_->setChecked(q.value("hum_on", false).toBool()); hum_hz_->setCurrentIndex(q.value("hum_hz", 50).toInt() == 60 ? 1 : 0);
     eq_on_->setChecked(q.value("eq_on", false).toBool()); for (int i = 0; i < 10; ++i) eq_[i]->setValue(q.value(QString("eq%1").arg(i), 0).toInt());
+    test_vol_->setValue(q.value("test_volume", 50).toInt());
     data_out_->setChecked(q.value("data_out", false).toBool()); data_level_->setValue(q.value("data_level_db", -12).toInt());
     loading_ = false;
 }
 void AudioPanel::save() {
+    setPicturePassband();
     if (loop_ && !loading_) {                                           // the feedback test hears a processing change at once (debounced while a slider moves)
         if (!restart_) { restart_ = new QTimer(this); restart_->setSingleShot(true); restart_->setInterval(300); connect(restart_, &QTimer::timeout, this, [this] { if (loop_) onTestInput(true); }); }
         restart_->start();
@@ -289,6 +334,7 @@ void AudioPanel::save() {
     q.setValue("exp_on", exp_on_->isChecked()); q.setValue("exp_thr", exp_thr_->value()); q.setValue("exp_ratio", exp_ratio_->value());
     q.setValue("lev_on", lev_on_->isChecked()); q.setValue("lev_target", lev_target_->value()); q.setValue("lev_max", lev_max_->value());
     q.setValue("comp_on", comp_on_->isChecked()); q.setValue("comp_thr", comp_thr_->value()); q.setValue("comp_ratio", comp_ratio_->value()); q.setValue("comp_makeup", comp_makeup_->value());
+    q.setValue("hum_on", hum_on_->isChecked()); q.setValue("hum_hz", hum_hz_->currentIndex() == 1 ? 60 : 50);
     q.setValue("eq_on", eq_on_->isChecked()); for (int i = 0; i < 10; ++i) q.setValue(QString("eq%1").arg(i), eq_[i]->value());
     q.setValue("data_out", data_out_->isChecked()); q.setValue("data_level_db", data_level_->value());
 }

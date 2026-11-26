@@ -61,8 +61,8 @@ size_t VoxInput::read(float* x, size_t n, double timeout_s) {
 
 void ssb_to_audio(const std::vector<tx::cf>& iq, std::vector<float>& out) { out.resize(iq.size()); for (size_t i = 0; i < iq.size(); ++i) out[i] = iq[i].real(); }
 
-MicLoop::MicLoop(std::unique_ptr<txc::IAudioIn> in, const tx::TxChainConfig& chain, std::function<void(const float*, size_t)> out)
-    : in_(std::move(in)), chain_([&] { tx::TxChainConfig c = chain; c.mic.sample_rate = 48000; c.ssb.sample_rate = 48000; return c; }()), out_(std::move(out)) {
+MicLoop::MicLoop(std::unique_ptr<txc::IAudioIn> in, const tx::TxChainConfig& chain, std::function<void(const float*, size_t)> out, std::shared_ptr<txo::IqTap> picture)
+    : in_(std::move(in)), chain_([&] { tx::TxChainConfig c = chain; c.mic.sample_rate = 48000; c.ssb.sample_rate = 48000; return c; }()), out_(std::move(out)), pic_(std::move(picture)) {
     if (!in_) throw std::invalid_argument("feedback test: no input");
     th_ = std::thread([this, chain] {
         std::vector<float> a(480), o; std::vector<tx::cf> iq; double pin = 0, pout = 0; const double gain = std::pow(10.0, chain.mic.mic_gain_db / 20);
@@ -72,6 +72,7 @@ MicLoop::MicLoop(std::unique_ptr<txc::IAudioIn> in, const tx::TxChainConfig& cha
             catch (const std::exception& e) { { std::lock_guard<std::mutex> l(m_); err_ = e.what(); } failed_ = true; return; }
             if (!n) continue;
             iq.clear(); chain_.process(a.data(), n, iq); ssb_to_audio(iq, o);
+            if (pic_ && !iq.empty()) pic_->write(iq.data(), iq.size(), 48000);
             double pi = 0, po = 0; for (size_t i = 0; i < n; ++i) pi = std::max(pi, double(std::fabs(a[i])) * gain);   // as the chain sees it (after the input gain)
             for (float v : o) po = std::max(po, double(std::fabs(v)));
             pin = std::max(pi, pin * 0.9); pout = std::max(po, pout * 0.9);   // peak hold that falls ~1 dB per 10 ms block

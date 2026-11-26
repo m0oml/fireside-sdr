@@ -18,6 +18,19 @@
 #include "fireside/playback.h"
 
 namespace fireside::txo {
+
+// A copy of the transmitted I/Q for the display (the transmit spectrum / waterfall): what the over sends, before the mirror, the image correction
+// and the clamp (USB above the TX DDS), at the stream's rate, in drive units (power out = the band's k x |x|^2). The stream thread NEVER waits for it:
+// write() only try-locks, and drops what does not fit. Display only: nothing read from it goes back to the radio.
+class IqTap {
+public:
+    explicit IqTap(size_t capacity = size_t(1) << 18) : ring_(capacity) {}
+    void write(const std::complex<float>* x, size_t n, double rate) noexcept;    // the stream thread
+    size_t read(std::vector<std::complex<float>>& out, double* rate = nullptr);   // appends everything queued; returns how many
+    uint64_t dropped() const { return dropped_.load(); }
+private:
+    std::mutex m_; std::vector<std::complex<float>> ring_; size_t head_ = 0, count_ = 0; double rate_ = 0; std::atomic<uint64_t> dropped_{0};
+};
 class ToneSource {
 public:
     explicit ToneSource(double rate = 48000, int channels = 8) : rate_(rate), ch_(channels) {}
@@ -25,7 +38,8 @@ public:
     void set_target(double amplitude) { target_.store(amplitude < 0 ? 0 : amplitude); }
     void set_cap(double cap);                                     // clamped to kAbsoluteMaxDrive
     void set_tone_hz(double hz) { tone_.store(hz); }
-    void set_mirror(bool m) { mirror_.store(m); }                 // Q sign (the TX sign convention is to verify on the radio)
+    void set_mirror(bool m) { mirror_.store(m); }
+    void set_tap(std::shared_ptr<IqTap> t) { tap_ = std::move(t); }   // set before the Stream starts: the keyed I/Q is copied to it (the display)                 // Q sign (the TX sign convention is to verify on the radio)
     // TX image correction from the EEPROM tables (PowerSDR units, DttSP correctIQ.c for TX): Q += 0.001 * phase * I, then I *= 1 + 0.001 * gain, on the
     // physical I/Q as sent to the radio (after the mirror), before the hard clamp.
     void set_correction(double gain_units, double phase_units) { corr_gain_.store(1.0 + 0.001 * gain_units); corr_phase_.store(0.001 * phase_units); }
@@ -49,6 +63,7 @@ private:
     double level_ = 0, phase_ = 0; std::atomic<double> level_pub_{0};   // level_ belongs to the stream thread; level_pub_ is what others read
     bool live_ = false; mutable std::mutex live_m_; std::vector<std::complex<float>> live_ring_; size_t live_head_ = 0, live_count_ = 0; std::atomic<uint64_t> live_under_{0};
     std::vector<std::complex<float>> buf_; bool have_buf_ = false; long long pos_ = 0; std::atomic<long long> seek_{kNoSeek}, pos_pub_{0}; static constexpr long long kNoSeek = std::numeric_limits<long long>::min(); std::atomic<bool> done_{false};
+    std::shared_ptr<IqTap> tap_; std::vector<std::complex<float>> tap_buf_;
 };
 
 // Runs a ToneSource into an 8-channel playback PCM on its own thread (period-sized blocks; zeros keep the stream alive while unkeyed).

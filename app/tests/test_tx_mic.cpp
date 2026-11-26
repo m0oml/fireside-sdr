@@ -144,3 +144,16 @@ TEST(tx_review_iq_limiter_splatter_is_negligible_when_it_acts) {
         if (hz >= 150 && hz <= 2800) inb += p; else if (hz <= -150 && hz >= -2800) opp += p; else if (hz > 3100 && hz < 6000) above += p; else if (hz > -100 && hz < 100) carrier += p; }
     CHECK(10 * std::log10(opp / inb) < -70); CHECK(10 * std::log10(above / inb) < -70); CHECK(10 * std::log10(carrier / inb) < -70);
 }
+TEST(tx_hum_filter_removes_mains_harmonics_and_spares_the_voice_between_them) {
+    auto through = [](double hum, double hz) {
+        MicChainConfig c; c.highpass_hz = 0; c.lowpass_hz = 0; c.compressor = false; c.limiter.ceiling = 1.0; c.hum_hz = hum;
+        MicChain m(c); auto x = tone(hz, 96000, 0.1); std::vector<float> y; m.process(x.data(), x.size(), y);
+        return rms_db(y, 48000) - rms_db(x, 48000);
+    };
+    for (double h : {150.0, 250.0, 350.0, 550.0, 750.0, 1150.0}) CHECK(through(50, h) < -30);            // the buzz lines measured on the air mic (2026-11-26)
+    CHECK(through(50, 250.1) < -15); CHECK(through(50, 1150.5) < -10);                                  // the mains drifts ~0.1 Hz: still deep at n x the drift
+    for (double h : {275.0, 525.0, 1025.0}) CHECK(std::fabs(through(50, h)) < 1.0);                     // the voice between the lines: untouched
+    CHECK(std::fabs(through(50, 2000.0)) < 0.2); CHECK(std::fabs(through(0, 250.0)) < 0.1);             // above the last notch, and off: no effect
+    CHECK(through(60, 300) < -30 && std::fabs(through(60, 330)) < 1.0);                                 // 60 Hz mains
+    bool threw = false; try { MicChainConfig c; c.hum_hz = 55; MicChain m(c); } catch (const std::invalid_argument&) { threw = true; } CHECK(threw);
+}

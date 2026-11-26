@@ -722,16 +722,28 @@ TEST(voice_usb_and_lsb_on_their_sideband_at_the_set_peak_and_ptt_unkeys) {
         r.tx->set_k(5, 11150); r.tx->arm(backup_image(), backup_image());
         FakeMic mic; const auto t0 = std::chrono::steady_clock::now();
         txc::VoiceOptions v; v.lsb = lsb; v.peak_w = 10;                               // the voice defaults: speech peaks reach the ceiling
+        auto tap = std::make_shared<txo::IqTap>(); r.tx->set_iq_tap(tap);
         auto res = r.tx->voice(14.20, mic, [&] { return std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(2500); }, v);
         CHECK(res.keyed); CHECK(res.stop.find("PTT released") != std::string::npos); CHECK(!r.sim.keyed); CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(2));
         CHECK(res.max_fwd_w > 7.0 && res.max_fwd_w <= 1.15 * 10.0);                     // peaks at the set power (the ALC only trims down)
         CHECK(res.iq_peak_db > -3.0 && res.iq_peak_db <= 0.5); CHECK(res.drive_start > 0); CHECK(res.trims >= 0 && res.drive <= res.drive_start);   // the diagnostics in the over's log line
+        CHECK(res.mean_fwd_w > 0 && res.mean_fwd_w <= res.talk_fwd_w + 1e-9 && res.talk_fwd_w <= res.max_fwd_w + 1e-9);   // average power: whole over <= while talking <= peak
         const double sb = sideband_ratio_db(iq, 48000, true);                          // undo the mirror: USB above the carrier
         // > 20 dB: the right sideband. (On the simulated, perfect radio the EEPROM's TX image correction for this radio itself makes an image
         // ~36 dB down; on the real radio it cancels the radio's own imbalance. ~27 dB seen here.)
         if (lsb) CHECK(sb < -20); else CHECK(sb > 20);
         CHECK(res.underruns < 48000 / 10);                                              // the live ring kept up (silence only at the start / end)
+        {   // the display's copy of the over: the I/Q sent, in drive units (k x |x|^2 = watts), at the stream's rate
+            std::vector<std::complex<float>> got; double rate = 0; tap->read(got, &rate);
+            float pk = 0; for (auto& z : got) pk = std::max(pk, std::abs(z));
+            CHECK(got.size() > 48000 && rate == 48000); CHECK(11150.0 * pk * pk > 5.0 && 11150.0 * pk * pk < 1.2 * 10.0);
+        }
     }
+}
+TEST(iq_tap_drops_rather_than_grows_and_reads_everything) {
+    txo::IqTap t(100); std::vector<std::complex<float>> x(150, {0.5f, 0.f}), out; double rate = 0;
+    t.write(x.data(), x.size(), 96000); CHECK_EQ(t.dropped(), uint64_t(50));
+    CHECK_EQ(t.read(out, &rate), size_t(100)); CHECK(rate == 96000); CHECK_EQ(t.read(out), size_t(0));
 }
 TEST(voice_refusals_time_out_and_a_failing_mic_leave_the_radio_unkeyed) {
     if (backup_image().empty()) return;

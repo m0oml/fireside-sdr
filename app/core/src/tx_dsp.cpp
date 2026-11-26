@@ -55,6 +55,7 @@ Biquad::Biquad(Type t, double fs, double hz, double q, double gain_db) : fs_(fs)
         case Type::HighShelf: { const double r = 2 * std::sqrt(A) * alpha;
             b0 = A * ((A + 1) + (A - 1) * cw + r); b1 = -2 * A * ((A - 1) + (A + 1) * cw); b2 = A * ((A + 1) + (A - 1) * cw - r);
             a0 = (A + 1) - (A - 1) * cw + r; a1 = 2 * ((A - 1) - (A + 1) * cw); a2 = (A + 1) - (A - 1) * cw - r; break; }
+        case Type::Notch: b0 = 1; b1 = -2 * cw; b2 = 1; a0 = 1 + alpha; a1 = -2 * cw; a2 = 1 - alpha; break;
         default: throw std::invalid_argument("bad biquad type");
     }
     b0_ = b0 / a0; b1_ = b1 / a0; b2_ = b2 / a0; a1_ = a1 / a0; a2_ = a2 / a0;
@@ -194,6 +195,10 @@ MicChain::MicChain(const MicChainConfig& c) : c_(c), pre_(float(db2lin(c.mic_gai
     if (c.clip_level < 0 || c.clip_level > 1) throw std::invalid_argument("clip level must be 0 (off) or in (0, 1]");
     for (const auto& b : c.eq) if (!(std::fabs(b.gain_db) <= 24)) throw std::invalid_argument("EQ band gain must be within +-24 dB");
     if (c.highpass_hz > 0) filters_.emplace_back(Biquad::Type::HighPass, c.sample_rate, c.highpass_hz);
+    if (c.hum_hz != 0) {
+        if (!(c.hum_hz == 50 || c.hum_hz == 60) || !(c.hum_max_hz >= c.hum_hz && c.hum_max_hz <= 4000)) throw std::invalid_argument("hum filter: 50 or 60 Hz, up to 4 kHz");
+        for (double f = c.hum_hz; f <= c.hum_max_hz + 1e-9 && f < c.sample_rate / 2; f += c.hum_hz) filters_.emplace_back(Biquad::Type::Notch, c.sample_rate, f, f / (6.0 + 0.006 * f));
+    }
     for (const auto& b : c.eq) filters_.emplace_back(b.type, c.sample_rate, b.hz, b.q, b.gain_db);
     if (c.lowpass_hz > 0) filters_.emplace_back(Biquad::Type::LowPass, c.sample_rate, c.lowpass_hz);
     if (c.gate) gate_ = std::make_unique<NoiseGate>(c.sample_rate, c.gate_cfg);

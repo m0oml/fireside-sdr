@@ -479,10 +479,10 @@ namespace {
 constexpr double kSpeed = 5.0;
 // One time base for everything: the TxControl clock (gate timers, sleeps), its UTC source and the playback pacing all run kSpeed x real time.
 struct FastTime {
-    double w0 = wall_utc(), base;                       // simulated UTC at w0
-    explicit FastTime(double utc_start) : base(utc_start) {}
-    double now() const { return base + (wall_utc() - w0) * kSpeed; }
-    atu::Clock clock() const { return {[this] { return now(); }, [](double s) { std::this_thread::sleep_for(std::chrono::duration<double>(std::max(0.0, s) / kSpeed)); }}; }
+    double w0 = wall_utc(), base, speed;                // simulated UTC at w0; simulated seconds per real second
+    explicit FastTime(double utc_start, double sp = kSpeed) : base(utc_start), speed(sp) {}
+    double now() const { return base + (wall_utc() - w0) * speed; }
+    atu::Clock clock() const { return {[this] { return now(); }, [this](double s) { std::this_thread::sleep_for(std::chrono::duration<double>(std::max(0.0, s) / speed)); }}; }
 };
 // Playback: ch0/ch1 kept with the simulated UTC of each write, the PA level for the simulated radio, nothing allowed on ch2..7; can fail after `fail_after` writes.
 struct FastPcm : IPcmOut {
@@ -498,15 +498,15 @@ struct FastPcm : IPcmOut {
             const double i = x[f * 8] / 2147483647.0, q = x[f * 8 + 1] / 2147483647.0; iq.push_back({i, q}); pk = std::max({pk, std::fabs(i), std::fabs(q)});
         }
         level->store(pk); peak.store(std::max(peak.load(), pk));
-        std::this_thread::sleep_for(std::chrono::duration<double>(double(n) / r / kSpeed)); return n;
+        std::this_thread::sleep_for(std::chrono::duration<double>(double(n) / r / t.speed)); return n;
     }
 };
 struct FtRig : Rig {
     std::unique_ptr<FastTime> ft; std::unique_ptr<txc::TxControl> tx; std::vector<std::complex<double>> iq; std::vector<std::pair<double, size_t>> marks; std::atomic<double> peak{0};
     double rate; long fail_after = -1;
     // `utc_start`: the simulated UTC now (pick it relative to a slot boundary)
-    FtRig(double utc_start, double r = 48000) : rate(r) {
-        ft = std::make_unique<FastTime>(utc_start);
+    FtRig(double utc_start, double r = 48000, double speed = kSpeed) : rate(r) {
+        ft = std::make_unique<FastTime>(utc_start, speed);
         sim.pa_from_level = true; sim.meter = txs::from_image(backup_image()).meter; sim.rev_frac = 0.02;
         tx = std::make_unique<txc::TxControl>(fx, [this](double rr) { return std::unique_ptr<IPcmOut>(new FastPcm(rr, *ft, &sim.level, iq, marks, peak, fail_after)); }, ft->clock());
         tx->set_utc_source([this] { return ft->now(); }); tx->set_k(5, 11150); tx->arm(backup_image(), backup_image());
@@ -659,6 +659,47 @@ TEST(ft_send_refusals_and_failures_leave_the_radio_unkeyed) {
     r.fail_after = 850;                                                                       // the playback device dies mid-over
     auto res = r.tx->send_prepared(14.080, f48, tx::Parity::Even, 5, o);
     CHECK(!res.sent); CHECK(!r.sim.keyed); CHECK(r.mox_writes() <= size_t(2)); CHECK(!r.tx->keyed());
+}
+
+// ---------------------------------------------------------------- WSPR over (the same send path as FT8: TxGate, limits, closed loop)
+#include "fireside/wspr.h"
+#include "fireside/wspr_decode.h"
+TEST(wspr_over_starts_1_s_after_the_even_minute_holds_5_w_ends_in_the_slot_and_wsprd_decodes_it) {
+    if (backup_image().empty()) return;
+    double slot = 0; FtRig r(utc_before_slot(120, tx::Parity::Even, 30.0, &slot), 48000, 20.0); txc::Options o;   // 30 s ahead (rendering the over takes real time); 20 x time: the 110.6 s over takes ~6 s
+    auto res = r.tx->send_wspr(14.0956, "M0OML", "IO91", 1500, tx::Parity::Even, 5.0, o);
+    CHECK(res.sent); CHECK(!res.unkey_failed); CHECK(!r.sim.keyed); CHECK_NEAR(res.slot_utc, slot, 1e-6); CHECK_EQ(res.late_s, 0.0);
+    CHECK_EQ(r.mox_writes(), size_t(2));
+    CHECK(res.max_fwd_w <= 7.5); CHECK_NEAR(res.mean_fwd_w, 5.0, 0.6);
+    double first = 0, last = 0;
+    for (size_t k = 0; k < r.marks.size(); ++k) { const size_t e = k + 1 < r.marks.size() ? r.marks[k + 1].second : r.iq.size(); bool any = false;
+        for (size_t i = r.marks[k].second; i < e; ++i) if (std::abs(r.iq[i]) > 0) { any = true; break; }
+        if (any) { if (!first) first = r.marks[k].first; last = r.marks[k].first; } }
+    CHECK(first > slot + 0.6 && first < slot + 1.3); CHECK(last > slot + 110 && last < slot + 112.5);   // 1 s + 110.6 s of signal (block granularity at 20 x)
+    if (decode::find_wsprd().empty()) { std::printf("  (wsprd not installed: decode check skipped)\n"); return; }
+    const auto dir = std::filesystem::temp_directory_path() / ("fireside_wspr_tx_" + std::to_string(::getpid())); std::filesystem::create_directories(dir);
+    auto a = r.audio(slot, 114); float pk = 0; for (float v : a) pk = std::max(pk, std::fabs(v)); for (auto& v : a) v *= 0.5f / std::max(pk, 1e-9f);
+    const auto wav = (dir / "000101_0000.wav").string(); { const auto b = wspr::wav16(a); std::ofstream f(wav, std::ios::binary); f.write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size())); }
+    std::string out, err; CHECK(decode::wsprd_runner()(wav, 14.0956, dir.string(), out, err));
+    bool found = false;
+    std::istringstream is(out); std::string ln;
+    while (std::getline(is, ln)) if (auto sp = wspr::parse_wsprd_line(ln)) if (sp->call == "M0OML" && sp->grid == "IO91" && sp->dbm == 37 && std::fabs(sp->mhz - (14.0956 + 1502.2e-6)) < 3e-6) found = true;
+    CHECK(found); if (!found) std::printf("  wsprd said: %s %s\n", out.c_str(), err.c_str());
+    std::filesystem::remove_all(dir);
+}
+TEST(wspr_send_refusals_and_a_swr_trip_leave_the_radio_unkeyed) {
+    if (backup_image().empty()) return;
+    double slot = 0; FtRig r(utc_before_slot(120, tx::Parity::Even, 3.0, &slot), 48000, 20.0); txc::Options o;
+    CHECK(!r.tx->send_wspr(14.0956, "M0OML", "IO91", 1500, tx::Parity::Even, 25.0, o).sent);     // above 20 W
+    CHECK(!r.tx->send_wspr(14.0956, "M0OML", "IO91", 1500, tx::Parity::Even, 0.5, o).sent);      // below 1 W
+    CHECK(!r.tx->send_wspr(14.0956, "M0OML/P", "IO91", 1500, tx::Parity::Even, 5.0, o).sent);    // compound call: not a type-1 message
+    CHECK(!r.tx->send_wspr(14.0956, "M0OML", "IO9", 1500, tx::Parity::Even, 5.0, o).sent);       // bad grid
+    CHECK(!r.tx->send_wspr(14.0956, "M0OML", "IO91", 1700, tx::Parity::Even, 5.0, o).sent);      // outside the WSPR sub-band
+    CHECK(!r.tx->send_wspr(13.9956, "M0OML", "IO91", 1500, tx::Parity::Even, 5.0, o).sent);      // below 20 m
+    CHECK_EQ(r.mox_writes(), size_t(0));
+    r.sim.rev_frac = 0.6;                                                                     // a bad antenna: SWR far above 3
+    auto res = r.tx->send_wspr(14.0956, "M0OML", "IO91", 1500, tx::Parity::Even, 5.0, o);
+    CHECK(!res.sent); CHECK(!r.sim.keyed); CHECK(!res.unkey_failed); CHECK(txc::TxControl::is_safety_stop(res.stop));
 }
 TEST(tx_key_hook_runs_right_before_mox_on_and_right_after_mox_off) {   // the session moves the shared RX1/TX DDS onto the dial for the over (as PowerSDR)
     if (backup_image().empty()) return;

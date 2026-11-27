@@ -99,6 +99,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
     connect(receiver_, &ReceiverPanel::callerDecoded, log_panel_, &LogPanel::callerDecoded);
     if (tx_card_) {   // click to reply + auto sequence + auto log
         tx_card_->setMyGridSource([this] { return log_panel_->myGrid(); });
+        receiver_->setMyGridSource([this] { return log_panel_->myGrid(); });   // WSPR spots: distance from here
         connect(receiver_, &ReceiverPanel::decodedLineActivated, tx_card_, &TransmitCard::replyTo);
         connect(receiver_, &ReceiverPanel::receiveLost, tx_card_, &TransmitCard::onReceiveLost);     // no receive: auto transmit stops (RF in the shack can stop the stream)
         connect(receiver_, &ReceiverPanel::callerDecoded, tx_card_, &TransmitCard::heardLine);
@@ -156,7 +157,8 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
     }
     // QRZ.com: callers first, then (if ticked on the Log tab) every decoded station; the answer goes after their decoder lines
     connect(receiver_, &ReceiverPanel::decodedCall, log_panel_->qrz(), [this](const QString& c) { log_panel_->qrz()->wantCached(c); });      // everyone: from the cache only
-    connect(receiver_, &ReceiverPanel::cqDecoded, log_panel_->qrz(), [this](const QString& c) { log_panel_->qrz()->want(c, false); });     // calling CQ: looked up (callers to me: below, first)
+    connect(receiver_, &ReceiverPanel::cqDecoded, log_panel_->qrz(), [this](const QString& c) { log_panel_->qrz()->want(c, false); });
+    connect(receiver_, &ReceiverPanel::wsprCall, log_panel_->qrz(), [this](const QString& c) { log_panel_->qrz()->want(c, false); });      // WSPR spots: looked up once the slot is decoded     // calling CQ: looked up (callers to me: below, first)
     connect(receiver_, &ReceiverPanel::callerDecoded, log_panel_->qrz(), [this](const QString& line) {
         const auto m = fireside::logbook::parse_ftx_message(fireside::logbook::ftx_line_text(line.toStdString())); if (m.ok) log_panel_->qrz()->want(QString::fromStdString(m.from), true); });
     connect(log_panel_->qrz(), &QrzClient::infoReady, receiver_, [this](const QString& call, const fireside::qrz::Info& i) {

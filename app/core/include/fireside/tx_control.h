@@ -154,10 +154,19 @@ public:
     SendResult send_ft(double dial_mhz, const std::string& text, double audio_hz, bool ft4, tx::Parity parity, double power_w, const Options& o,
                        const ProgressFn& p = {}, const LogFn& log = {});
     // The same in two parts, so the signal can be rendered while still receiving and the radio part started just before the slot (the GUI).
-    struct FtPrepared { std::vector<std::complex<float>> buf; double rate = 0; bool ft4 = false; std::string text; double audio_hz = 0; };
+    struct FtPrepared { std::vector<std::complex<float>> buf; double rate = 0; bool ft4 = false; std::string text; double audio_hz = 0; tx::DigiMode mode = tx::DigiMode::FT8; double only_slot_utc = 0; };   // only_slot_utc > 0: that slot or none
     static FtPrepared prepare_ft(const std::string& text, double audio_hz, bool ft4, double rate);   // throws std::runtime_error / invalid_argument
     SendResult send_prepared(double dial_mhz, const FtPrepared& f, tx::Parity parity, double power_w, const Options& o,
                              const ProgressFn& p = {}, const LogFn& log = {}, double min_lead_s = 1.5);
+    // WSPR (wspr.h): one 110.6 s transmission of "call grid dBm" (the dBm from power_w, so the report matches the set power) at audio_hz (1400..1600) above
+    // the dial, USB, in the next two-minute slot of `parity` (slots start on even minutes; never joined late: WSPR must start 1 s after the minute).
+    // power_w 1..kWsprMaxWatts. Everything else as send_prepared: TxGate (key-down limit one slot), forward / reflected / SWR limits, the closed-loop
+    // power trim in the first 3 s, the band's drive level learnt from a clean over, abort() unkeys. Rendered here, so no copy of the ~110 s signal is kept.
+    static constexpr double kWsprMaxWatts = 20;
+    static FtPrepared prepare_wspr(const std::string& call, const std::string& grid4, double power_w, double audio_hz, double rate);   // throws std::invalid_argument
+    // only_slot_utc > 0 (the beacon): the over goes in the slot starting then, or it is refused ("missed its slot") rather than waiting for a later one.
+    SendResult send_wspr(double dial_mhz, const std::string& call, const std::string& grid4, double audio_hz, tx::Parity parity, double power_w, const Options& o,
+                         const ProgressFn& p = {}, const LogFn& log = {}, double min_lead_s = 1.5, double only_slot_utc = 0);
     void set_utc_source(std::function<double()> utc) { utc_ = std::move(utc); }   // tests; default: the system clock
     // Called with true right before every key-down and with false right after the unkey (the session moves the shared RX1/TX DDS onto
     // the dial for the over and back to the receive IF shift afterwards, as PowerSDR does). dds_below_dial_hz: where the DDS goes for the over
@@ -194,6 +203,7 @@ public:
     void set_lines(std::shared_ptr<TxLines> l) { std::lock_guard<std::mutex> g(lines_m_); lines_ = std::move(l); }
 
 private:
+    SendResult send_impl(double dial_mhz, FtPrepared&& f, tx::Parity parity, double power_w, const Options& o, const ProgressFn& p, const LogFn& log, double min_lead_s);
     std::optional<atu::Status> atu_report_locked();               // the same, for callers already holding op_
     Flex& fx_; PcmFactory pcm_; atu::Clock clk_; std::function<double()> utc_; txs::TxCal cal_; atu::Atu atu_; atu::Memory mem_; std::map<int, double> k_;
     std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool, double)> key_hook_; std::function<void(const std::string&)> trip_hook_; mutable std::mutex tap_m_; std::shared_ptr<txo::IqTap> tap_;

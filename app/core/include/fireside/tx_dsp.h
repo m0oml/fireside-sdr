@@ -236,7 +236,7 @@ ImdResult measure_imd(const std::vector<cf>& iq, Sideband sb, double f1 = 600, d
 // Slots are aligned to UTC: FT8 every 15 s (:00 :15 :30 :45), FT4 every 7.5 s (:00 :07.5 :15 ...). Even/odd is the parity of the slot
 // index (floor(utc / length)); since 60 s is a whole number of slots the parity is the same as counted from the start of any minute, so
 // FT8 even = :00 and :30, odd = :15 and :45. `utc` is seconds since the Unix epoch. Nothing here reads a clock: the caller supplies the time.
-enum class DigiMode { FT8, FT4 };
+enum class DigiMode { FT8, FT4, WSPR };   // WSPR: 120 s slots, each starting on an even UTC minute (parity = alternate two-minute slots)
 enum class Parity { Even, Odd };
 struct Slot { long long index; double start_utc; Parity parity; };
 struct TxPlan {
@@ -244,14 +244,14 @@ struct TxPlan {
     double audio_start_utc;     // when sample 0 of the transmit audio must be sent (slot start + start_offset, or now if joining late)
     double skip_s;              // seconds of the audio that are already in the past (0 unless joining late)
 };
-double slot_seconds(DigiMode m);                // 15 / 7.5
+double slot_seconds(DigiMode m);                // 15 / 7.5 / 120 (WSPR)
 double signal_seconds(DigiMode m);              // 79 x 0.16 = 12.64 s / 105 x 0.048 = 5.04 s (symbol periods: QEX 2020 Table 4; FT4 = 87 + 16 sync + 2 ramp symbols. FT4 period 7.5 s: "twice as fast as FT8"; the 6 s / 4.48 s of the April 2019 FT4 draft are superseded)
 // Nominal start of the transmission: 0.5 s after the beginning of the T/R interval. Source: Franke, Somerville, Taylor, "The FT4 and FT8 Communication
 // Protocols", QEX July/August 2020 (the AP section, which covers both modes: "the nominal start time, 0.5 s after the beginning of a transmit interval").
 // The paper gives no separate FT4 figure. It also says that a late WSJT-X "will skip the missed part of the transmission and start sending a correctly
 // synchronized message for the remainder" (what plan_tx's skip_s does), and that without a-priori information a decoder loses callers who start more than
 // 5 s late (8 s with AP "mycall"), so a useful max_late_s is a few seconds at most.
-double default_start_offset_s(DigiMode m);
+double default_start_offset_s(DigiMode m);     // 0.5 s (FT8 / FT4); WSPR 1 s (WSJT-X: WSPR transmissions start 1 s after the even minute)
 Slot slot_containing(double utc, DigiMode m);                  // the slot with start <= utc < start + length
 Slot next_slot(double utc, DigiMode m);                        // the first slot that starts strictly after utc
 Slot next_slot_with_parity(double utc, DigiMode m, Parity p, double min_lead_s = 0);   // first slot of parity p starting at least min_lead_s after utc

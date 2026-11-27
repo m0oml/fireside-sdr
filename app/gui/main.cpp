@@ -713,6 +713,23 @@ int main(int argc, char** argv) {
                             tc->cwPaddleBox()->setChecked(true); rx->setModeIndex(mode0); rx->setDecoderIndex(dec0); pump(5);
                             step("CW: leaving the CW screen stops reading the paddle", !tc->cwWatching());
                         }
+                        {   // WSPR: the button tunes the band's WSPR dial with the decoder; the beacon schedules a slot (nothing keyed yet); Stop / a decoder change end it
+                            const double dial0 = rx->dialHz(); const int dec0 = rx->decoderIndex(); const size_t mw = count(1292);
+                            step("WSPR button: 20 m WSPR dial, USB, the WSPR decoder", rx->selectWspr() && std::fabs(rx->dialHz() - 14.0956e6) < 1 && rx->decoderIndex() == 6 && rx->modeIndex() == 0);
+                            pump(3); step("WSPR: the beacon controls replace the FT8 ones", tc->wsprBeaconButton()->parentWidget() && !tc->wsprBeaconButton()->parentWidget()->isHidden() && tc->messageBox()->parentWidget()->isHidden());
+                            rx->setDialHz(14.0960e6); pump(3); tc->wsprBeaconButton()->click(); pump(3);
+                            step("WSPR beacon refused off the WSPR dial", !tc->wsprBeaconOn() && tc->statusLabel()->text().contains("not on this band's WSPR frequency") && count(1292) == mw);
+                            rx->setDialHz(14.0956e6); pump(3); tc->wsprPowerBox()->setValue(5); tc->wsprBeaconButton()->click(); pump(3);
+                            const double now_w = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+                            step("WSPR beacon on: a two-minute slot ahead is planned, nothing keyed", tc->wsprBeaconOn() && tc->wsprNextUtc() > now_w + 2 && std::fmod(tc->wsprNextUtc(), 120.0) == 0.0
+                                 && tc->statusLabel()->text().startsWith("WSPR beacon on") && tc->statusLabel()->text().contains("37 dBm") && count(1292) == mw && !w.simRadio()->keyed);
+                            tc->stopButton()->click(); pump(3);
+                            step("Stop ends the WSPR beacon without keying", !tc->wsprBeaconOn() && !tc->wsprBeaconButton()->isChecked() && count(1292) == mw);
+                            tc->wsprBeaconButton()->click(); pump(3); rx->setDecoderIndex(4); pump(3);
+                            step("a decoder change ends the WSPR beacon", !tc->wsprBeaconOn() && tc->statusLabel()->text().contains("Decoder changed") && count(1292) == mw && !tc->messageBox()->parentWidget()->isHidden());
+                            step("WSPR upload is off by default", !tc->wsprUploadBox()->isChecked());
+                            rx->setDecoderIndex(dec0); rx->setDialHz(dial0); pump(5);
+                        }
                         const size_t mox2 = count(1292); tc->sendButton()->click(); pump(2);
                         QPushButton* stopb = nullptr; for (auto* b : tc->digitalPart()->findChildren<QPushButton*>()) if (b->text() == "Stop") stopb = b;
                         if (stopb) stopb->click();

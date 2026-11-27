@@ -155,6 +155,9 @@ public:
     QPushButton* clearQsoButton() const { return clear_qso_; }             // PSK Reporter: "Heard by 12 (hour), furthest 2300 km" in the status line
     // Mode card: FT8 / FT4 = the band's FT dial frequency (band plan), USB, the wide filter and that decoder; false if the band has none.
     bool selectFt(bool ft4);
+    bool selectWspr();                                  // WSPR: the band's WSPR dial (20 m between bands), USB, the wide filter and the WSPR decoder (wsprd); false if the band has none
+    static bool isFtIndex(int i) { return i == 4 || i == 5; }   // FT8 / FT4 (the QSO views, callers, reply); WSPR (6) has none of them
+    void setMyGridSource(std::function<QString()> f) { my_grid_src_ = std::move(f); }   // my locator, for the WSPR spots' distance
     QCheckBox* autoSidebandBox() const { return auto_sb_; }   // LSB on 160 / 80 / 40 m, USB elsewhere, when the dial enters a band in USB / LSB               // the antenna selector card, in the top row                        // the named output box, for the Audio tab               // the transmit power meter card, next to the Signal card at the top
     void showCallInfo(const QString& call, const QString& text);
     QString heardGrid(const QString& call) const;       // the last locator this station sent in a decode (2 h), base call; "" if none: where it is NOW   // callbook text after the recent lines from this station ("  │ Klaus, Ulm, Germany, 770 km"), once per line                       // decoder lines highlighted as addressed to my call (tests)           // decoder output (one or more lines): appended, FT8/FT4 lines to my call highlighted, signals emitted    // tag recent decoder lines from this station: 0 new, 1 new band/mode, 2 worked
@@ -165,7 +168,7 @@ public:
     int audioOutputTarget() const { return radio_out_ ? 1 : 0; }
     uint64_t radioFramesWritten() const { return radio_out_ ? radio_out_->frames_written() : 0; }
     // text decoders (CW, PSK31, RTTY) on the demodulated audio
-    int decoderIndex() const;                           // 0 Off, 1 CW, 2 PSK31, 3 RTTY, 4 FT8, 5 FT4
+    int decoderIndex() const;                           // 0 Off, 1 CW, 2 PSK31, 3 RTTY, 4 FT8, 5 FT4, 6 WSPR
     void setDecoderIndex(int index);                    // also switches the receiver to the matching mode and sets the usual tone
     void setDecoderTone(int hz);                        // CW pitch / PSK31 centre / RTTY mark frequency (audio Hz)
     QString decodedText() const;
@@ -231,6 +234,9 @@ signals:
     void rateRequested(unsigned rate);                  // the Source card's 48 / 96 / 192 buttons: MainWindow hands it to the Radio tab (starts the radio if needed, one confirmation, then the stream at that rate)
     void stopRadioRequested();                           // the Source card's Stop radio button
     void dialChanged(double hz);
+    // WSPR: a two-minute slot heard LIVE was decoded (date yymmdd, hhmm, the dial in MHz, one formatted line per spot; ok false: the decoder failed, why in error)
+    void wsprSlot(const QString& date, const QString& hhmm, double dial_mhz, const QStringList& lines, bool ok, const QString& error);
+    void wsprCall(const QString& call);                 // WSPR: a station spotted (after its slot's decode): looked up on QRZ like a CQ caller; the answer goes on its line
     void receiveLost(const QString& why);               // the live radio stream stopped by itself (no data, bus reset, device error): automatic transmit must stop                        // user changed the dial (digits, band button, click on the spectrum)
 protected:
     bool eventFilter(QObject* o, QEvent* e) override;
@@ -239,6 +245,8 @@ private slots:
     void settingsChanged();
 private:
     QHash<QString, QPair<QString, qint64>> heard_grids_;  // base call -> (grid it sent, UTC s)
+    QPushButton* wspr_btn_ = nullptr; std::shared_ptr<std::atomic<double>> wspr_dial_ = std::make_shared<std::atomic<double>>(0.0); std::function<QString()> my_grid_src_;
+    QString wsprDistance(const QString& line) const;   // "  1234 km" from my grid to the spot's, or ""
     fireside::RxEngine engine_; bool threaded_; AudioOut* audioOut_; AudioOut* data_out_ = nullptr; float data_gain_ = 0.25f; QCheckBox* ext_box_ = nullptr; bool external_ = false;
     SpectrumWidget* spectrum_; WaterfallWidget* waterfall_; FrequencyDisplay* freq_; SMeter* meter_; QLabel *meter_text_, *mode_chip_, *status_, *source_label_;
     QButtonGroup *bands_, *modes_, *agcs_, *filters_, *steps_; QHBoxLayout* filter_row_; QBoxLayout* log_slot_ = nullptr; QWidget* log_card_ = nullptr; QBoxLayout* form_slot_ = nullptr; QWidget* form_card_ = nullptr; QWidget *band_card_ = nullptr, *mode_card_ = nullptr; QHBoxLayout* deck_ = nullptr;

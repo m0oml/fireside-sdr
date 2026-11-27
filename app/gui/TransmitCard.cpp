@@ -153,12 +153,14 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
         connect(tuner_btn_, &QPushButton::clicked, this, [this] { tuner_dialog_->show(); tuner_dialog_->raise(); tuner_dialog_->activateWindow(); });
         atu_part_ = part({row({tune_, tuner_btn_}, false)}); }
     ext_part_ = part({row({ext_allow_, ext_w_})});                                      // goes on the Audio tab
-    digi_part_ = part({row({ft_mode_, ft_hz_, ft_clear_, ft_par_}), row({ft_msg_, ft_w_}, false), row({send_, cq_, ft_repeat_, auto_seq_, stop_}, false)});
+    ft_box_ = part({row({ft_mode_, ft_hz_, ft_clear_, ft_par_}), row({ft_msg_, ft_w_}, false), row({send_, cq_, ft_repeat_, auto_seq_, stop_}, false)});
+    digi_part_ = new QWidget(this); { auto* v = new QVBoxLayout(digi_part_); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(6); v->addWidget(ft_box_); }   // FT8 / FT4, or the WSPR beacon (buildWspr)
     voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_, key_ptt_})});
     { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
     if (stop3_) stop3_->setObjectName("txstop");                                            // the transmit Stops: a muted red, easy to find
     buildCw();                                                                        // the CW part (TransmitCardCw.cpp)
     buildVox();                                                                       // VOX + monitor under the voice controls (TransmitCardVox.cpp)
+    buildWspr();                                                                      // the WSPR beacon and upload, in the digital part (TransmitCardWspr.cpp)
     hide();                                                                           // this object only owns the parts: the window places them (Antenna, Transmit, decoder row, voice strip)
     timer_ = new QTimer(this); timer_->setInterval(100); connect(timer_, &QTimer::timeout, this, &TransmitCard::tick); timer_->start();
     loadCheckedCal();
@@ -381,6 +383,10 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
                 report(QString("Attended CQ: \"%1\" was sent %2 times, back to CQ.").arg(last_sent_).arg(att_calls_)); cq_->click(); });
             voice_in_.reset(); vox_over_in_.reset();                                            // a voice over's input (a PC capture lives on this thread; the worker has been joined)
             if (after_arm_) { auto d = std::move(after_arm_); after_arm_ = nullptr; d(); }               // start-up: receiving starts once the check is done
+            if (wspr_on_) {                                                                        // the beacon: on to its next slot, or stopped (a limit, a refusal)
+                if (safety || (res.startsWith("Not sent") && !res.contains("missed its slot"))) wsprOff("WSPR beacon stopped: " + res);
+                else QTimer::singleShot(200, this, [this, g = stop_gen_] { if (g == stop_gen_ && wspr_on_) scheduleWspr(); });
+            }
             extOverEnded(!safety);                                                                  // a program re-keyed while its last over was unkeying
             if (unkey_failed_) { unkey_failed_ = false; if (auto_confirm_ < 0) QMessageBox::critical(this, "The radio may still be transmitting",
                 "The unkey command did not get through (three tries, then 2 s of retries).\n\nPower the radio off now (front panel), then check the FireWire connection.\n\n" + res); }
@@ -847,12 +853,13 @@ void TransmitCard::autoArm() {
     arm_tried_ = true; { QSignalBlocker b(arm_); arm_->setChecked(true); } onArm(true);
 }
 void TransmitCard::stopEverything(const QString& why) {
-    ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); endAttPause(); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false;
+    ++stop_gen_; ft_timer_->stop(); ft_pending_.reset(); endAttPause(); if (wspr_on_) wsprOff(""); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false;
     if (seq_) { seq_->stop(); noteSeqEnd(false); }                                           // a logged QSO stopped during its RR73 repeats is still done
     extCancel(); if (tx_) tx_->abort(); report(why); updateButtons();
 }
 void TransmitCard::onDial(double hz) {
     const int band = txm::band_of(hz); if (band == last_band_) return;
+    if (wspr_on_) stopEverything("Band changed: the WSPR beacon is stopped.");
     const bool qso_running = ft_pending_ || att_pause_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || (worker_running_ && !ext_over_);
     last_band_ = band; updateMemoryLabel(); updateButtons();
     if (qso_running) {                                                                        // a QSO or CQ belongs to its band: never carried to another one
@@ -863,7 +870,7 @@ void TransmitCard::onDial(double hz) {
 }
 
 void TransmitCard::onReceiveLost(const QString& why) {
-    const bool automatic = ft_pending_ || att_pause_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || extActive();
+    const bool automatic = ft_pending_ || att_pause_ || ft_repeat_->isChecked() || follow_pending_ || from_cq_ || (seq_ && seq_->active()) || extActive() || wspr_on_;
     if (!automatic) return;
     rx_hold_ = true;
     stopEverything(QString("Receive stopped (%1): auto transmit stopped, nothing queued. It does not start again by itself: check the receive, then press CQ or double-click a station.").arg(why));
@@ -881,7 +888,7 @@ void TransmitCard::tick() {
     lamp_->setStyleSheet(keyed ? "background:#c62828;color:white;font-weight:bold;border-radius:4px;padding:2px" : "background:#3a3a3a;color:#888;border-radius:4px;padding:2px");
     txc::Progress p; bool have; { std::lock_guard<std::mutex> l(m_); p = last_; have = have_last_; }
     if (have) pm_->setReading(p.rd.fwd_w, p.rd.rev_w, p.rd.swr ? *p.rd.swr : 0.0, keyed); else pm_->setReading(0, 0, 0, false);
-    stop_->setEnabled(worker_running_ || ft_pending_ != nullptr || att_pause_);
+    stop_->setEnabled(worker_running_ || ft_pending_ != nullptr || att_pause_ || wspr_on_);
 }
 
 void TransmitCard::updateButtons() {
@@ -893,11 +900,12 @@ void TransmitCard::updateButtons() {
     tune_->setToolTip(band >= 0 && armed && !(tx_->k_for(band) > 0) ? "No measured drive on this band yet: Tune borrows the next band's measured level (or the EEPROM table, which errs low). Press Measure drive after a good tune."
                                                                     : "Transmits a carrier (up to 15 s) while the ATU searches. Asks first: listen to the frequency.");
     measure_->setEnabled(armed && idle && band >= 0); test_->setEnabled(armed && idle && band >= 0); test_w_->setEnabled(idle); mirror_->setEnabled(idle);
-    send_->setEnabled(armed && idle && band >= 0 && !ft_pending_); cq_->setEnabled(send_->isEnabled()); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_);
+    send_->setEnabled(armed && idle && band >= 0 && !ft_pending_ && !wspr_on_); cq_->setEnabled(send_->isEnabled());
+    if (wspr_beacon_) wspr_beacon_->setEnabled(wspr_on_ || (armed && idle && band >= 0 && !ft_pending_)); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_);
     restore_->setEnabled(armed && idle && band >= 0 && on_atu && tx_->memory().recall(band).has_value());
     if (!on_atu) { tune_->setToolTip(QString("This band transmits on ANT%1: the ATU is on ANT1 only (Antennas tab)").arg(txAnt())); }
     if (tune2_) { tune2_->setEnabled(tune_->isEnabled()); tune2_->setToolTip(tune_->toolTip()); }
-    power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr || att_pause_);
+    power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr || att_pause_ || wspr_on_);
     ext_allow_->setEnabled(armed || ext_allow_->isChecked());                      // can always be unticked
     gen_btn_->setEnabled(armed && idle && band >= 0 && !ft_pending_);
 }

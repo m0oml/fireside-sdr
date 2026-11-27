@@ -16,6 +16,7 @@
 #include "fireside/tuning.h"
 #include "fireside/tx_out.h"
 #include "fireside/tx_render.h"
+#include "fireside/wspr.h"
 
 namespace fireside::txc {
 constexpr double kOverGraceS = 0.15;           // FT8/FT4, voice and other programs: how long a reading may sit above a limit (two or three readings) before unkeying
@@ -295,19 +296,41 @@ SendResult TxControl::send_ft(double mhz, const std::string& text, double audio_
     try { f = prepare_ft(text, audio_hz, ft4, o.rate); } catch (const std::exception& e) { SendResult r; r.why_not = e.what(); if (log) log(std::string("send refused: ") + e.what()); return r; }
     return send_prepared(mhz, f, parity, power_w, o, p, log, 1.5);
 }
+TxControl::FtPrepared TxControl::prepare_wspr(const std::string& call, const std::string& grid4, double power_w, double audio_hz, double rate) {
+    if (!(audio_hz >= wspr::kAudioLoHz && audio_hz <= wspr::kAudioHiHz)) throw std::invalid_argument("WSPR audio frequency must be 1400..1600 Hz");
+    if (!(power_w >= 1 && power_w <= kWsprMaxWatts)) throw std::invalid_argument("WSPR power must be 1..20 W");
+    if (!(rate == 48000 || rate == 96000 || rate == 192000)) throw std::invalid_argument("stream rate must be 48, 96 or 192 kHz");
+    const int dbm = wspr::dbm_for_watts(power_w);
+    const auto sym = wspr::encode(call, grid4, dbm);                                              // throws for a compound call or a bad grid
+    FtPrepared f; f.rate = rate; f.mode = tx::DigiMode::WSPR; f.audio_hz = audio_hz;
+    f.text = call + " " + grid4 + " " + std::to_string(dbm);
+    f.buf = wspr::synth_iq(sym, audio_hz, rate, tx::default_start_offset_s(tx::DigiMode::WSPR), tx::default_start_offset_s(tx::DigiMode::WSPR) + wspr::kSignalS);   // sample 0 = slot start
+    return f;
+}
+SendResult TxControl::send_wspr(double mhz, const std::string& call, const std::string& grid4, double audio_hz, tx::Parity parity, double power_w, const Options& o,
+                                const ProgressFn& p, const LogFn& log, double min_lead_s, double only_slot_utc) {
+    FtPrepared f;
+    try { f = prepare_wspr(call, grid4, power_w, audio_hz, o.rate); f.only_slot_utc = only_slot_utc; } catch (const std::exception& e) { SendResult r; r.why_not = e.what(); if (log) log(std::string("send refused: ") + e.what()); return r; }
+    return send_impl(mhz, std::move(f), parity, power_w, o, p, log, min_lead_s);
+}
 SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity parity, double power_w, const Options& o,
                                      const ProgressFn& p, const LogFn& log, double min_lead_s) {
+    FtPrepared copy = f; return send_impl(mhz, std::move(copy), parity, power_w, o, p, log, min_lead_s);
+}
+SendResult TxControl::send_impl(double mhz, FtPrepared&& f, tx::Parity parity, double power_w, const Options& o,
+                                const ProgressFn& p, const LogFn& log, double min_lead_s) {
     std::lock_guard<std::mutex> l(op_); SendResult r; Busy b(*this);
     auto no = [&](const std::string& w) { r.why_not = w; say(log, "send refused: " + w); return r; };
-    const std::string& text = f.text; const double audio_hz = f.audio_hz; const bool ft4 = f.ft4;
+    const std::string text = f.text; const double audio_hz = f.audio_hz; const bool ft4 = f.ft4; const double only_slot = f.only_slot_utc;
+    const tx::DigiMode mode = f.mode == tx::DigiMode::WSPR ? tx::DigiMode::WSPR : ft4 ? tx::DigiMode::FT4 : tx::DigiMode::FT8;
+    const bool is_wspr = mode == tx::DigiMode::WSPR; const char* label = is_wspr ? "WSPR" : ft4 ? "FT4" : "FT8";
     if (!armed_) return no("transmit is not armed");
     if (f.buf.empty() || f.rate != o.rate) return no("the prepared signal does not match the stream rate");
     const int band = txm::band_of((mhz * 1e6) + audio_hz + 50);
     if (band < 0 || txm::band_of(mhz * 1e6) != band) return no("outside the amateur bands");
-    if (!(power_w >= 1) || power_w > txs::kMaxWatts) return no("power must be 1..100 W");
-    const tx::DigiMode mode = ft4 ? tx::DigiMode::FT4 : tx::DigiMode::FT8;
+    if (is_wspr ? !(power_w >= 1 && power_w <= kWsprMaxWatts) : (!(power_w >= 1) || power_w > txs::kMaxWatts)) return no(is_wspr ? "WSPR power must be 1..20 W" : "power must be 1..100 W");
     const double off = tx::default_start_offset_s(mode), sig = tx::signal_seconds(mode), slot_len = tx::slot_seconds(mode);
-    auto buf = f.buf;
+    auto buf = std::move(f.buf);
 
     // drive: measured level, else the EEPROM table (errs low); the closed loop below trims it either way
     const double k = k_for(band), dcap = drive_cap(band);
@@ -319,7 +342,8 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     }
     const double drive_max = std::min(dcap, drive * 2.0);          // the loop may raise the drive by at most 6 dB
     tx::TxPlan plan;
-    try { plan = tx::plan_tx(utc_(), mode, parity, off, 2.0, min_lead_s); } catch (const std::exception& e) { return no(e.what()); }
+    try { plan = tx::plan_tx(utc_(), mode, parity, off, is_wspr ? 0.0 : 2.0, min_lead_s); } catch (const std::exception& e) { return no(e.what()); }
+    if (only_slot > 0 && std::fabs(plan.slot.start_utc - only_slot) > 0.5) return no("missed its slot (not ready in time)");
     r.slot_utc = plan.slot.start_utc; r.late_s = plan.skip_s;
     if (o.tx_ant < 1 || o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
     if (auto why = lines_ready(mhz); !why.empty()) return no(why);
@@ -337,7 +361,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     gc.grace_s = kOverGraceS; gc.hard_fwd_w = hard_fwd_limit_w(power_w);              // a key-down overshoot is ridden out for 0.15 s; the hard limit never
     KeyHook kh(key_hook_);
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
-    if (!gate.key(std::string(ft4 ? "FT4 " : "FT8 ") + text, gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
+    if (!gate.key(std::string(label) + " " + text, gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
     keyed_ = true;
     src.seek((long long)std::llround((utc_() + latency_s - plan.slot.start_utc) * o.rate)); src.set_keyed(true);
     const double sig_start = plan.slot.start_utc + off, sig_end = sig_start + sig, t0 = clk_.now();
@@ -365,7 +389,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
         r.mean_fwd_w = sum_fwd / n_fwd; r.k = r.mean_fwd_w / (drive * drive);
         if (r.sent && (!r.swr || *r.swr < 2.5)) set_k(band, k > 1000 ? 0.7 * k + 0.3 * r.k : r.k);   // the band's drive level learns from every clean over
     }
-    char m[200]; std::snprintf(m, sizeof m, "%s %s: %s, %.1f W (set %.1f W)%s", ft4 ? "FT4" : "FT8", text.c_str(), r.stop.c_str(), r.mean_fwd_w, power_w, r.late_s > 0 ? " (joined late)" : ""); say(log, m);
+    char m[200]; std::snprintf(m, sizeof m, "%s %s: %s, %.1f W (set %.1f W)%s", label, text.c_str(), r.stop.c_str(), r.mean_fwd_w, power_w, r.late_s > 0 ? " (joined late)" : ""); say(log, m);
     return r;
 }
 }  // namespace fireside::txc

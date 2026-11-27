@@ -41,6 +41,10 @@ correction / FT8-FT4 send (core, shared by the GUI card and `build/firesidekey`)
 right of the decoder. Tests: 24 CTest groups (523 core tests) + 124 Python; the GUI smoke test runs arm / measure / tune / FT4 send / stop on the simulated radio.
 
 ## Open / next
+0. WSPR (2026-11-26, user's OK: receive + attended beacon, 1..20 W, until Stop): `fireside/wspr.h` (encoder checked against the real wsprd, wsprnet request bodies),
+   `fireside/wspr_decode.h` (WsprDecoder runs WSJT-X's wsprd per 2-minute slot), decoder index 6, TransmitCardWspr.cpp (beacon keys only through
+   TxControl::send_wspr -> the same send path as FT8: TxGate, limits, closed loop; only the planned slot), wsprnet upload off by default. Tested on the
+   simulated radio and against wsprd; NOT yet on the air (first: receive on 20/40 m, then a 5 W beacon with the user present).
 1. ~~FT8 reply / auto-sequence~~ DONE 2026-11-19 (click to reply, `qso_seq`, auto log; tested on the simulated radio, not yet on the air) (double-click a CQ or a call to M0OML: report, RR73, 73, then log to Wavelog). The user has not made a complete QSO yet.
    Done towards it (2026-11-19): lines to M0OML highlighted red in the decoder; the first caller fills the log entry and is looked up (Wavelog + callbook);
    later callers are left alone (status says so); their RR73 after logging does not refill. Send / Repeat / Arm / Test tone no longer ask a question.

@@ -166,6 +166,18 @@ private:
     // VOX + monitor
     QCheckBox *vox_ = nullptr, *anti_vox_ = nullptr, *monitor_ = nullptr; QSpinBox *vox_thr_ = nullptr, *vox_hang_ = nullptr; QLabel* vox_lvl_ = nullptr; QTimer* vox_timer_ = nullptr;
     std::shared_ptr<fireside::vox::VoxInput> vox_in_; class PcAudioFeed* mon_feed_ = nullptr; std::atomic<bool> vox_kill_{false}; std::string vox_kill_why_; std::mutex vox_m_; double voice_timeout_s_ = 180; bool pc_audio_ = true;
+    // WSPR (TransmitCardWspr.cpp): the beacon (attended: runs until Stop / unticking / a band or decoder change / receive lost; 1..20 W; one slot in N
+    // chosen at random) keys only through TxControl::send_wspr; and the wsprnet.org upload of the spots heard live (off until ticked, remembered).
+    void buildWspr(); void wsprBeacon(bool on); void scheduleWspr(); void startWsprOver(double slot_utc); void wsprOff(const QString& why); void onWsprSlot(const QString& date, const QString& hhmm, double dial_mhz, const QStringList& lines, bool ok, const QString& error);
+    void wsprPump(); void saveWspr(); void loadWspr(); QString wsprRefusal();
+    QWidget *ft_box_ = nullptr, *wspr_part_ = nullptr; QPushButton* wspr_beacon_ = nullptr; QDoubleSpinBox* wspr_w_ = nullptr; QSpinBox* wspr_every_ = nullptr; QCheckBox* wspr_upload_ = nullptr; QLabel* wspr_note_ = nullptr;
+    QTimer* wspr_timer_ = nullptr; QTimer* wspr_up_timer_ = nullptr; bool wspr_on_ = false; double wspr_next_utc_ = 0; int wspr_hz_ = 1500; class QNetworkAccessManager* wspr_net_ = nullptr;
+    struct WsprPost { QByteArray body; bool spot = true; int tries = 0; }; QList<WsprPost> wspr_queue_; int wspr_sent_ = 0, wspr_failed_ = 0; QString wspr_last_error_;
+public:
+    QPushButton* wsprBeaconButton() const { return wspr_beacon_; } QCheckBox* wsprUploadBox() const { return wspr_upload_; } QDoubleSpinBox* wsprPowerBox() const { return wspr_w_; } QSpinBox* wsprEveryBox() const { return wspr_every_; }
+    bool wsprBeaconOn() const { return wspr_on_; } double wsprNextUtc() const { return wspr_next_utc_; } int wsprUploadsSent() const { return wspr_sent_; }
+    void setWsprNextForTests(double utc) { wspr_next_utc_ = utc; }
+private:
     void buildVox(); void voxTick(); void voxOn(bool on); void saveVox(); void loadVox(); bool voxScreen() const;                                     // receive was lost: nothing automatic sends again until the operator presses Send / CQ or double-clicks a station                // a double-click on a callsign no country uses: asked to confirm (second click within 15 s)
     QCheckBox* auto_seq_ = nullptr; std::unique_ptr<fireside::seq::Sequencer> seq_; std::function<QString()> my_grid_;
     void pauseReceive(); QString resumeReceive();        // receive pauses for an over (the slot so far decoded first) and comes back after it

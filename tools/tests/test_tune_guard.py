@@ -254,6 +254,24 @@ class TuningIsOneOpcode(unittest.TestCase):
         for bad in (".set(", "MOX", "TxGate", "TxControl", "Flex", "permit("):
             self.assertNotIn(bad, v.replace("txc::IAudioIn", "").replace("tx_control.h", ""), bad)
 
+    def test_wspr_keys_only_through_send_wspr_and_its_decoder_cannot_touch_the_radio(self):
+        """The WSPR beacon (TransmitCardWspr.cpp) keys only through TxControl::send_wspr (the gate, its limits, the hard clamp); its on / off state is
+        never saved (attended: off in every new window). The encoder and the wsprd runner hold nothing that can key or write to the radio."""
+        g = code("gui/TransmitCardWspr.cpp", strip_strings=True)
+        self.assertEqual(re.findall(r"\bt\.(\w+)\(", g), ["send_wspr"])
+        for bad in ("TxGate", "SET_MOX", "set_keyed", ".set(", "Flex", "send_prepared", "send_ft", "t.voice(", "t.cw("):
+            self.assertNotIn(bad, g, bad)
+        gl = code("gui/TransmitCardWspr.cpp")
+        self.assertEqual(sorted(set(re.findall(r'setValue\("(\w+)"', gl))), ["wspr_every", "wspr_upload", "wspr_w"])
+        self.assertNotIn('value("wspr_beacon"', gl); self.assertNotIn('value("wspr_on"', gl)
+        for f in ("core/src/wspr.cpp", "core/include/fireside/wspr.h", "core/src/decode_wspr.cpp", "core/include/fireside/wspr_decode.h"):
+            c = code(f)
+            for bad in (".set(", "MOX", "TxGate", "TxControl", "Flex", "session", "permit(", "snd_", "ioctl", "/dev/"):
+                self.assertNotIn(bad, c, f + ": " + bad)
+        t = code("core/src/tx_control.cpp")
+        body = t[t.index("SendResult TxControl::send_wspr"):]; body = body[:body.index("\n}") + 2]
+        self.assertIn("send_impl(", body); self.assertNotIn("TxGate", body); self.assertNotIn(".set(", body)
+
     def test_only_tune_cpp_and_startup_cpp_write(self):
         offenders = []
         for root in ("core/src", "gui", "tools"):

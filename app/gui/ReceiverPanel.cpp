@@ -2,6 +2,8 @@
 #include "fireside/award.h"
 #include "fireside/tx_meter.h"
 #include "fireside/bandplan.h"
+#include "fireside/wspr.h"
+#include "fireside/wspr_decode.h"
 #include "AppLog.h"
 #include <QScrollBar>
 #include <QSplitter>
@@ -115,13 +117,13 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
 
     // ---- decoder: text from CW / PSK31 / RTTY
     { auto* body = new QVBoxLayout; body->setSpacing(6); auto* row = new QHBoxLayout; row->setSpacing(8);
-      dec_mode_ = new QComboBox; dec_mode_->addItems({"Off", "CW (Morse)", "PSK31", "RTTY", "FT8", "FT4"}); dec_mode_->setToolTip("Decodes text from the received audio. Picking a decoder also sets the right receiver mode.");
+      dec_mode_ = new QComboBox; dec_mode_->addItems({"Off", "CW (Morse)", "PSK31", "RTTY", "FT8", "FT4", "WSPR"}); dec_mode_->setToolTip("Decodes text from the received audio. Picking a decoder also sets the right receiver mode.");
       dec_tone_ = new QSpinBox; dec_tone_->setRange(200, 3000); dec_tone_->setSingleStep(10); dec_tone_->setValue(700); dec_tone_->setSuffix(" Hz"); dec_tone_->setToolTip("CW: tone pitch. PSK31: signal centre. RTTY: mark tone, the higher of the two (space is 170 Hz below it, as on the air). FT8 and FT4 need none: they decode 200-3000 Hz. Double-click a decoded FT8/FT4 line to copy the station into the Log tab.");
       auto* clear = new QPushButton("Clear"); dec_status_ = new QLabel("Decoder off"); dec_status_->setObjectName("muted");
       tx_btn_ = new QPushButton("TX lab  \u25B8"); tx_btn_->setCheckable(true); tx_btn_->setVisible(false); tx_btn_->setToolTip("Show or hide the transmit lab (offline: renders files, not connected to the radio). The radio's transmit controls are to the right of the decoder.");
       my_call_ = new QLineEdit; my_call_->setPlaceholderText("my call"); my_call_->setMaximumWidth(100);
       my_call_->setToolTip("Your callsign. FT8 then also decodes weak messages addressed to you (shown with \"a2\", as in WSJT-X). Empty: the Log tab's station callsign is used.");
-      connect(my_call_, &QLineEdit::editingFinished, this, [this] { my_call_->setText(my_call_->text().trimmed().toUpper()); if (decoderIndex() == 4) rebuildDecoder(); });
+      connect(my_call_, &QLineEdit::editingFinished, this, [this] { my_call_->setText(my_call_->text().trimmed().toUpper()); if (decoderIndex() == 4 || decoderIndex() == 6) rebuildDecoder(); });
       clear_qso_ = new QPushButton("Clear QSO"); clear_qso_->setVisible(false); clear_qso_->setToolTip("Empties the QSO pane (right) and forgets the station being worked there. Transmitting is not affected: Stop does that.");
       connect(clear_qso_, &QPushButton::clicked, this, [this] { clearQso(); });
       ext_box_ = new QCheckBox("External program");
@@ -165,7 +167,9 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
         ft8_btn_ = pill("FT8"); ft4_btn_ = pill("FT4"); psk_btn_ = pill("PSK31"); rtty_btn_ = pill("RTTY");
         ft8_btn_->setToolTip("FT8: the band's FT8 frequency, USB, the wide filter and the FT8 decoder"); ft4_btn_->setToolTip("FT4: the band's FT4 frequency, USB, the wide filter and the FT4 decoder");
         psk_btn_->setToolTip("PSK31: USB and the PSK31 decoder (the dial stays where it is)"); rtty_btn_->setToolTip("RTTY: USB and the RTTY decoder (the dial stays where it is)");
-        g->addWidget(ft8_btn_, 0, 0); g->addWidget(ft4_btn_, 0, 1); g->addWidget(psk_btn_, 1, 0); g->addWidget(rtty_btn_, 1, 1); mode_pages_->addWidget(pg); }
+        wspr_btn_ = pill("WSPR"); wspr_btn_->setToolTip("WSPR: the band's WSPR frequency, USB, the wide filter and WSJT-X's wsprd decoder (two-minute slots); the beacon is on the Transmit card");
+        g->addWidget(ft8_btn_, 0, 0); g->addWidget(ft4_btn_, 0, 1); g->addWidget(psk_btn_, 1, 0); g->addWidget(rtty_btn_, 1, 1); g->addWidget(wspr_btn_, 2, 0); mode_pages_->addWidget(pg); }
+      connect(wspr_btn_, &QPushButton::clicked, this, [this] { selectWspr(); });
       connect(ft8_btn_, &QPushButton::clicked, this, [this] { selectFt(false); }); connect(ft4_btn_, &QPushButton::clicked, this, [this] { selectFt(true); });
       connect(psk_btn_, &QPushButton::clicked, this, [this] { setDecoderIndex(2); }); connect(rtty_btn_, &QPushButton::clicked, this, [this] { setDecoderIndex(3); });
       filter_row_ = new QHBoxLayout; filter_row_->setSpacing(6); filters_ = group(this, true); rebuildFilterButtons();
@@ -312,6 +316,7 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
         for (int i = 0; i < int(std::size(kBands)); ++i) bands_->button(i)->setChecked(i == idx);
         if (idx != last_band_idx_) {                                                      // a new band: its sideband (voice modes only; never under an FT8 / FT4 decoder)
             const bool first = last_band_idx_ == -2; last_band_idx_ = idx;
+            if (!first) { clearDecoded(); clearQso(); }                               // another band: the decodes and the QSO pane start empty (user 2026-11-27)
             if (!first && idx >= 0 && !restoring_ && !recalling_ && auto_sb_ && auto_sb_->isChecked() && (modeIndex() == 0 || modeIndex() == 1) && decoderIndex() < 4) {
                 const QString n = kBands[idx].name; const int want = (n == "160" || n == "80" || n == "40") ? 1 : 0;
                 if (modeIndex() != want) setModeIndex(want);
@@ -617,6 +622,7 @@ void ReceiverPanel::refresh() {
     if (st.ended) note_ = "End of recording."; else if (!st.error.empty()) note_ = QString("Stopped: ") + QString::fromStdString(st.error);
     if (!st.error.empty() && st.live && !rx_lost_sent_) { rx_lost_sent_ = true; appLog("receiver", "receive lost: " + QString::fromStdString(st.error)); emit receiveLost(QString::fromStdString(st.error)); }   // once per source: auto transmit stops (it cannot hear the answers)
     if (!st.error.empty() && st.live && direct_rate_ > 0 && !restart_pending_) restartDirect(QString::fromStdString(st.error));   // the direct stream died: bring it back
+    wspr_dial_->store(dialHz() / 1e6);                                          // the WSPR decoder reads it when a slot is decoded (the frequencies it reports)
     { std::string t; if (engine_.take_text(t) > 0) addDecodedText(QString::fromStdString(t));
       if (decoderIndex() != 0) dec_status_->setText(st.decoder.empty() ? "Waiting for a signal..." : QString::fromStdString(st.decoder)); }
     meter_->setLevel(st.signal_dbfs <= -199 ? -120 : st.signal_dbfs);
@@ -684,7 +690,8 @@ bool ReceiverPanel::recallBand(int i) {
     const Band& b = kBands[i]; const BandMem m = bandMemory(i);
     if (!m.set || m.hz < b.lo || m.hz > b.hi) {                                           // never been here: its usual start, or the FT8 / FT4 frequency under that decoder
         double f = b.start_hz;
-        if (decoderIndex() >= 4) for (const auto& mk : fireside::bandplan::marks_between(b.lo, b.hi)) if (QString(mk.label) == (decoderIndex() == 5 ? "FT4" : "FT8")) { f = mk.hz; break; }
+        if (isFtIndex(decoderIndex())) for (const auto& mk : fireside::bandplan::marks_between(b.lo, b.hi)) if (QString(mk.label) == (decoderIndex() == 5 ? "FT4" : "FT8")) { f = mk.hz; break; }
+        if (decoderIndex() == 6 && fireside::wspr::dial_hz_for(b.start_hz) > 0) f = fireside::wspr::dial_hz_for(b.start_hz);
         setDialHz(f); return true;
     }
     band_recall_ = true; recalling_ = true;                                               // the old band keeps what it had; no auto sideband over the memory
@@ -771,20 +778,23 @@ bool ReceiverPanel::setDataOutput(bool on, double level_db) {
 void ReceiverPanel::setDecoderTone(int hz) { dec_tone_->setValue(hz); rebuildDecoder(); applySettings(); }
 void ReceiverPanel::setDecoderIndex(int i) {
     QTimer::singleShot(0, this, [this] { syncFtButtons(); });
-    i = std::clamp(i, 0, 5);
+    const int was = decoderIndex();
+    i = std::clamp(i, 0, 6);
     if (external_ && i > 0) {                                                   // External program: the mode and filter a decoder brings, but no decoder of ours
         if (i == 1 && modeIndex() != 3) setModeIndex(3);
         if (i >= 2 && modeIndex() != 0) setModeIndex(0);
-        if (i == 4 || i == 5) filter_width_ = 3600, rebuildFilterButtons();
+        if (i >= 4) filter_width_ = 3600, rebuildFilterButtons();
         i = 0;
     }
     { QSignalBlocker b(dec_mode_); dec_mode_->setCurrentIndex(i); }
-    static const int tone[] = {700, 700, 1000, 2125, 1500, 1500};
+    if (i != was) { clearDecoded(); clearQso(); }                                   // another mode: the decodes and the QSO pane start empty (user 2026-11-27)
+    ext_box_->setVisible(i != 6);                                                   // WSPR: no other program is needed (we decode, upload and beacon ourselves)
+    static const int tone[] = {700, 700, 1000, 2125, 1500, 1500, 1500};
     if (i > 0) dec_tone_->setValue(tone[i]);
     if (i == 1 && modeIndex() != 3) setModeIndex(3);                                                       // Morse: CW mode (tone at the pitch)
     if (i >= 2 && modeIndex() != 0) setModeIndex(0);                                                          // PSK31 / RTTY / FT8 / FT4: always USB (LSB too: digital modes are USB on every band), tones inside the voice filter
-    if (i == 4 || i == 5) filter_width_ = 3600, rebuildFilterButtons();                                              // FT8 spans 200-3000 Hz: the widest voice filter (applySettings below)
-    dec_text_->setVisible(i != 0); if (callers_) callers_->setVisible(i >= 4); clearCallers(); if (qso_text_) qso_text_->setVisible(i >= 4); if (clear_qso_) clear_qso_->setVisible(i >= 4);
+    if (i >= 4) filter_width_ = 3600, rebuildFilterButtons();                                                        // FT8 spans 200-3000 Hz (WSPR sits at 1400-1600): the widest voice filter (applySettings below)
+    dec_text_->setVisible(i != 0); if (callers_) callers_->setVisible(isFtIndex(i)); clearCallers(); if (qso_text_) qso_text_->setVisible(isFtIndex(i)); if (clear_qso_) clear_qso_->setVisible(isFtIndex(i));
     if (tx_side_) { dec_text_->setMinimumHeight(i >= 4 ? 110 : 60); dec_text_->setMaximumHeight(QWIDGETSIZE_MAX); }   // beside the transmit card: fill its height
     else dec_text_->setFixedHeight(i >= 4 ? 190 : 84); dec_tone_->setVisible(i != 0 && i < 4);   // CW / PSK31 / RTTY only: FT8 and FT4 decode the whole passband    // FT8 prints a dozen lines per slot dec_status_->setText(i == 0 ? "Decoder off" : "Waiting for a signal...");
     rebuildDecoder(); applySettings(); syncGroup(); emit decoderSelected(i);
@@ -802,6 +812,14 @@ void ReceiverPanel::rebuildDecoder() {
                   decode::Ft8Options o; o.wall_clock = engine_.status().live; o.my_call = myCall().toStdString(); { QPointer<ReceiverPanel> me(this); o.late_lines = [me](const std::string& t) { const QString q = QString::fromStdString(t); QMetaObject::invokeMethod(qApp, [me, q] { if (me) me->addDecodedText(q); }, Qt::QueuedConnection); }; } /* a cut-short slot's weak decodes, later */ engine_.set_decoder(std::make_unique<decode::Ft8Decoder>(o)); break; }   // live audio follows UTC slots; a file is taken to start at a slot boundary
         case 5: { if (!engine_.status().live) engine_.with_source([](IqSource* s) { if (s) s->rewind(); });
                   decode::Ft8Options o; o.ft4 = true; o.wall_clock = engine_.status().live; engine_.set_decoder(std::make_unique<decode::Ft8Decoder>(o)); break; }
+        case 6: { decode::WsprOptions o; o.wall_clock = engine_.status().live; o.my_call = myCall().toStdString(); wspr_dial_->store(dialHz() / 1e6); o.dial_now = wspr_dial_; o.dial_mhz = dialHz() / 1e6;
+                  if (!o.wall_clock) engine_.with_source([](IqSource* s) { if (s) s->rewind(); });   // a recording is taken to start on an even minute
+                  QPointer<ReceiverPanel> me(this); const bool live = o.wall_clock;
+                  o.on_slot = [me, live](const decode::WsprSlot& w) {                                // the decode thread: hand the slot to the window's thread
+                      QStringList lines; for (const auto& sp : w.spots) lines << QString::fromStdString(fireside::wspr::format(sp));
+                      const QString d = QString::fromStdString(w.date), h = QString::fromStdString(w.hhmm), err = QString::fromStdString(w.error); const double mhz = w.dial_mhz; const bool ok = w.ok;
+                      if (live) QMetaObject::invokeMethod(qApp, [me, d, h, mhz, lines, ok, err] { if (me) emit me->wsprSlot(d, h, mhz, lines, ok, err); }, Qt::QueuedConnection); };
+                  engine_.set_decoder(std::make_unique<decode::WsprDecoder>(o)); break; }
         default: engine_.set_decoder(nullptr);
     }
     pushFocus();                                                                          // a new decoder: tell it where the stations calling us are
@@ -932,7 +950,24 @@ bool is_me(const std::string& to, const QString& me) {
 void ReceiverPanel::addDecodedText(const QString& t0) {
     QString t = t0;
     QString me = myCall(); if (const int sl = me.indexOf('/'); sl >= 0) { const QStringList p = me.split('/'); me = *std::max_element(p.begin(), p.end(), [](const QString& a, const QString& b) { return a.size() < b.size(); }); }   // the base call of M0OML/P
-    if (decoderIndex() >= 4) {                                                  // FT8 / FT4: fixed columns (message | tag | callbook), filled in later in place
+    if (decoderIndex() == 6) {                                                  // WSPR: each spot with its distance from my grid; a hashed call that wsprd knew, shown plain
+        static const QRegularExpression hashed("<([A-Z0-9/]+)>");
+        QStringList out, calls; const qint64 now = QDateTime::currentSecsSinceEpoch();
+        for (QString l : t0.split('\n')) {
+            if (l.trimmed().isEmpty()) { out << l; continue; }
+            l.replace(hashed, "\\1");
+            if (const auto sp = fireside::wspr::parse_wsprd_line(l.toStdString()); sp && sp->call.find('<') == std::string::npos) {
+                const QString b = QString::fromStdString(fireside::qrz::base_call(sp->call));
+                if (!b.isEmpty()) { calls << b; if (sp->grid.size() >= 4) heard_grids_.insert(b, {QString::fromStdString(sp->grid).toUpper(), now}); }
+            }
+            out << l + wsprDistance(l);
+        }
+        t = out.join('\n');
+        dec_text_->moveCursor(QTextCursor::End); dec_text_->insertPlainText(t); dec_text_->moveCursor(QTextCursor::End);
+        calls.removeDuplicates(); for (const QString& c : calls) emit wsprCall(c);   // after the slot's decode: the callbook, then its line is filled in
+        return;
+    }
+    if (isFtIndex(decoderIndex())) {                                            // FT8 / FT4: fixed columns (message | tag | callbook), filled in later in place
         QStringList out;
         for (const QString& l : t0.split('\n')) {
             const std::string txt = fireside::logbook::ftx_line_text(l.toStdString());
@@ -943,7 +978,7 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
         if (t.trimmed().isEmpty()) return;
     }
     dec_text_->moveCursor(QTextCursor::End); dec_text_->insertPlainText(t); dec_text_->moveCursor(QTextCursor::End);
-    if (decoderIndex() < 4) return;
+    if (!isFtIndex(decoderIndex())) return;
     const QStringList lines = t.split('\n', Qt::SkipEmptyParts);
     QTextCharFormat hf; hf.setBackground(QColor("#7a1f2b")); hf.setForeground(QColor("#ffffff")); hf.setFontWeight(QFont::Bold);
     QTextBlockFormat hb; hb.setBackground(QColor("#7a1f2b"));
@@ -1164,8 +1199,19 @@ bool ReceiverPanel::selectFt(bool ft4) {
     setDecoderIndex(ft4 ? 5 : 4);                                                         // USB and the wide filter come with the decoder
     setDialHz(f); syncFtButtons(); return true;
 }
+bool ReceiverPanel::selectWspr() {
+    double f = fireside::wspr::dial_hz_for(dialHz()); if (f <= 0) f = fireside::wspr::dial_hz_for(14.1e6);     // between bands: 20 m
+    setDecoderIndex(6); setDialHz(f); syncFtButtons(); return true;
+}
+QString ReceiverPanel::wsprDistance(const QString& line) const {
+    const auto sp = fireside::wspr::parse_wsprd_line(line.toStdString()); const QString mine = my_grid_src_ ? my_grid_src_() : QString();
+    double la1, lo1, la2, lo2, km, deg;
+    if (!sp || sp->grid.empty() || mine.size() < 4 || !fireside::qrz::grid_latlon(mine.toStdString(), la1, lo1) || !fireside::qrz::grid_latlon(sp->grid, la2, lo2)) return QString();
+    fireside::qrz::distance_bearing(la1, lo1, la2, lo2, km, deg); return QString("  %1 km").arg(km, 0, 'f', 0);
+}
 void ReceiverPanel::syncFtButtons() {
     if (!ft8_btn_) return; QSignalBlocker a(ft8_btn_), b(ft4_btn_), c(psk_btn_), d(rtty_btn_);
+    if (wspr_btn_) { QSignalBlocker w(wspr_btn_); wspr_btn_->setChecked(decoderIndex() == 6); }
     ft8_btn_->setChecked(decoderIndex() == 4); ft4_btn_->setChecked(decoderIndex() == 5); psk_btn_->setChecked(decoderIndex() == 2); rtty_btn_->setChecked(decoderIndex() == 3);
 }
 void ReceiverPanel::setHeardNote(const QString& t) { if (t != heard_note_) { heard_note_ = t; updateStatus(); } }
@@ -1243,6 +1289,17 @@ void ReceiverPanel::showCallInfo(const QString& call, const QString& text) {
           if (hb.isValid() && hb.text() == head) { QTextCursor c(hb); c.movePosition(QTextCursor::EndOfBlock); QTextCharFormat f; f.setForeground(QColor("#8b93a7")); c.insertText("  " + text, f); }
       } }
     QTextCharFormat fmt; fmt.setForeground(QColor("#8b93a7")); fmt.setFontWeight(QFont::Normal); fmt.setBackground(Qt::transparent); int n = 0;
+    if (decoderIndex() == 6) {                                                    // WSPR: after each spot of this station (its distance is on the line already)
+        static const QRegularExpression km(",?\\s*\\d+ km( \\(QRZ\\))?$"); QString info = text; info.remove(km); if (info.trimmed().isEmpty()) return;
+        for (QTextBlock b = dec_text_->document()->lastBlock(); b.isValid() && n < 200; b = b.previous(), ++n) {
+            static const QRegularExpression dist("\\s+\\d+ km$");                       // our distance column ends the line: not part of the spot
+            const QString line = b.text(); if (line.contains(kInfoSep)) continue;
+            const auto sp = fireside::wspr::parse_wsprd_line(QString(line).remove(dist).toStdString());
+            if (!sp || QString::fromStdString(fireside::qrz::base_call(sp->call)) != call) continue;
+            QTextCursor c(b); c.movePosition(QTextCursor::EndOfBlock); c.insertText(kInfoSep + info, fmt);
+        }
+        return;
+    }
     for (QTextBlock b = dec_text_->document()->lastBlock(); b.isValid() && n < 80; b = b.previous(), ++n) {
         const QString line = b.text(); const int sep = line.indexOf(kInfoSep);
         if (sep >= 0 && line.size() > sep + int(kInfoSep.size()) + kTagCols) continue;                           // info already there
@@ -1255,7 +1312,7 @@ void ReceiverPanel::showCallInfo(const QString& call, const QString& text) {
     }
 }
 bool ReceiverPanel::eventFilter(QObject* o, QEvent* e) {
-    if ((o == dec_text_->viewport() || (qso_text_ && o == qso_text_->viewport()) || (callers_ && o == callers_->viewport())) && e->type() == QEvent::MouseButtonDblClick && decoderIndex() >= 4) {   // FT8 / FT4: double-click a decoded line -> reply (+ the Log tab)
+    if ((o == dec_text_->viewport() || (qso_text_ && o == qso_text_->viewport()) || (callers_ && o == callers_->viewport())) && e->type() == QEvent::MouseButtonDblClick && isFtIndex(decoderIndex())) {   // FT8 / FT4: double-click a decoded line -> reply (+ the Log tab)
         auto* view = o == dec_text_->viewport() ? dec_text_ : (callers_ && o == callers_->viewport() ? callers_ : qso_text_);
         const auto* me = static_cast<QMouseEvent*>(e); QString line = view->cursorForPosition(me->position().toPoint()).block().text();
         if (view == qso_text_ && line.contains("  TX ")) return true;                                               // our own transmission: nothing to answer
@@ -1311,7 +1368,7 @@ void ReceiverPanel::syncGroup() {                                    // the grou
 void ReceiverPanel::chooseGroup(int g) {                             // the user clicked Voice / CW / Digi: go to a sensible mode of that group
     if (g == 0) { if (decoderIndex() != 0) setDecoderIndex(0); setModeIndex(modeIndex() == 3 ? last_voice_mode_ : modeIndex()); }
     else if (g == 1) { if (decoderIndex() > 1) setDecoderIndex(0); setModeIndex(3); }
-    else { if (last_digi_ == 4 || last_digi_ == 5) selectFt(last_digi_ == 5); else setDecoderIndex(last_digi_); }
+    else { if (last_digi_ == 4 || last_digi_ == 5) selectFt(last_digi_ == 5); else if (last_digi_ == 6) selectWspr(); else setDecoderIndex(last_digi_); }
     syncGroup(); applyGroup(g);
 }
 bool ReceiverPanel::transmitOpen() const { return tx_w_ && tx_w_->isVisibleTo(this); }

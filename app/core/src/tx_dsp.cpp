@@ -324,9 +324,9 @@ ImdResult measure_imd(const std::vector<cf>& iq, Sideband sb, double f1, double 
 }
 
 // ---- FT8 / FT4 slot timing ----
-double slot_seconds(DigiMode m) { return m == DigiMode::FT8 ? 15.0 : 7.5; }
-double signal_seconds(DigiMode m) { return m == DigiMode::FT8 ? 79 * 0.16 : 105 * 0.048; }
-double default_start_offset_s(DigiMode) { return 0.5; }
+double slot_seconds(DigiMode m) { return m == DigiMode::FT8 ? 15.0 : m == DigiMode::FT4 ? 7.5 : 120.0; }
+double signal_seconds(DigiMode m) { return m == DigiMode::FT8 ? 79 * 0.16 : m == DigiMode::FT4 ? 105 * 0.048 : 162 * 8192.0 / 12000.0; }   // WSPR: 162 symbols of 8192/12000 s = 110.6 s
+double default_start_offset_s(DigiMode m) { return m == DigiMode::WSPR ? 1.0 : 0.5; }
 namespace {
 Slot slot_from_index(long long k, DigiMode m) { return Slot{k, double(k) * slot_seconds(m), (k % 2 == 0) ? Parity::Even : Parity::Odd}; }   // 15 and 7.5 are exact in binary: no rounding at the boundaries
 void need_finite(double v, const char* what) { if (!std::isfinite(v)) throw std::invalid_argument(std::string(what) + " must be finite"); }

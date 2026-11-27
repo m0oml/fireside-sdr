@@ -79,6 +79,9 @@ const Mark kMarks[] = {
     {1840 * k, "FT8"}, {3573 * k, "FT8"}, {3575 * k, "FT4"}, {5357 * k, "FT8"}, {7047.5 * k, "FT4"}, {7074 * k, "FT8"}, {10136 * k, "FT8"}, {10140 * k, "FT4"},
     {14074 * k, "FT8"}, {14080 * k, "FT4"}, {18100 * k, "FT8"}, {18104 * k, "FT4"}, {21074 * k, "FT8"}, {21140 * k, "FT4"}, {24915 * k, "FT8"}, {24919 * k, "FT4"},
     {28074 * k, "FT8"}, {28180 * k, "FT4"}, {50313 * k, "FT8"}, {50318 * k, "FT4"},
+    // WSPR dial frequencies (WSJT-X defaults; 60 m: 5287.2 kHz, signals 5288.6-5288.8 kHz inside the UK 5288.5-5292 kHz segment). wspr::dial_hz_for has the same list.
+    {1836.6 * k, "WSPR"}, {3568.6 * k, "WSPR"}, {5287.2 * k, "WSPR"}, {7038.6 * k, "WSPR"}, {10138.7 * k, "WSPR"}, {14095.6 * k, "WSPR"}, {18104.6 * k, "WSPR"},
+    {21094.6 * k, "WSPR"}, {24924.6 * k, "WSPR"}, {28124.6 * k, "WSPR"}, {50293 * k, "WSPR"},
 };
 template <class T> std::vector<T> overlapping(const T* b, const T* e, double lo, double hi) {
     std::vector<T> v; for (auto* p = b; p != e; ++p) if (p->hi_hz > lo && p->lo_hz < hi) v.push_back(*p);

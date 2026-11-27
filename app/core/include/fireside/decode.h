@@ -94,6 +94,7 @@ struct Ft8Options {
     bool ft4 = false;                                         // FT4: 7.5 s slots, 4-GFSK, 20.8 Hz tone spacing (same message format and library)
     std::string my_call;                                      // your callsign: enables a-priori decoding of weak messages addressed to you (WSJT-X "a2"); empty = off
     std::function<void(const std::string&)> late_lines;       // finish(): the slot's full decode (lines the quick pass missed) arrives here later, on another thread
+    std::function<double()> now;                              // wall_clock: the UTC now (tests); empty = the system clock. The audio is timed by a SlotClock (slot_clock.h)
 };
 class Ft8Decoder : public TextDecoder {
 public:

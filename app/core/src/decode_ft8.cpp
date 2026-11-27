@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include "fireside/slot_clock.h"
 #include "fireside/decode.h"
 #include "fireside/dsp.h"
 #include "fireside/dxcc.h"
@@ -525,14 +526,16 @@ std::string Ft8Decoder::format(const Ft8Message& m) { char b[200]; std::snprintf
 std::vector<Ft8Message> Ft8Decoder::decode_slot(const float* a, size_t n, const std::string& label, bool ft4, const std::string& my_call) { HashTable tab; return decode_slot_with(a, n, tab, label, ft4, my_call); }
 
 constexpr double kLateJoinS = 0.4;           // a stream (re)starting this far into a slot still decodes it: FT8 / FT4 signals start 0.5 s in
+constexpr double kRetimeS = 0.02;            // a slot boundary more than this off the SlotClock's time is moved to it
 struct Ft8Decoder::Impl {
     Ft8Options o; std::unique_ptr<fireside::dsp::RationalResampler> rs;
     std::vector<float> slot; size_t fill = 0; long skip = -1; bool started = false; long slot_index = 0; double t0_utc = 0;   // skip: 12 kHz samples to discard until the first slot boundary
     std::vector<std::string> peeked; long peeked_slot = -1; HashTable tab; std::thread job; std::atomic<bool> running{false}; std::atomic<double> last_decode_s{0}, last_quick_s{0}; std::vector<double> focus; std::mutex fm; std::vector<double> get_focus() { std::lock_guard<std::mutex> l(fm); return focus; } std::mutex m; std::vector<Ft8Message> results; std::string last; size_t decoded_total = 0; std::vector<fireside::dsp::cf> tmp_in, tmp_out;
+    SlotClock clk; uint64_t in_n = 0, out_n = 0;                                            // live audio: when it was heard (slot_clock.h)
     double slot_s() const { return o.ft4 ? double(FT4_SLOT_TIME) : double(FT8_SLOT_TIME); }
     size_t slot_len() const { return size_t(slot_s() * kRate); }
-    explicit Impl(Ft8Options op) : o(op) { reset_state(); }
-    void reset_state() { join(); rs = std::make_unique<fireside::dsp::RationalResampler>(o.sample_rate, double(kRate)); slot.assign(slot_len(), 0.0f); fill = 0; skip = -1; started = false; slot_index = 0; { std::lock_guard<std::mutex> l(m); results.clear(); } last.clear(); decoded_total = 0;
+    explicit Impl(Ft8Options op) : o(op), clk(op.sample_rate) { reset_state(); }
+    void reset_state() { join(); rs = std::make_unique<fireside::dsp::RationalResampler>(o.sample_rate, double(kRate)); slot.assign(slot_len(), 0.0f); fill = 0; skip = -1; started = false; slot_index = 0; clk = SlotClock(o.sample_rate); in_n = out_n = 0; { std::lock_guard<std::mutex> l(m); results.clear(); } last.clear(); decoded_total = 0;
                         peeked.clear(); peeked_slot = -1; tab = HashTable{}; }
     void join() { if (job.joinable()) job.join(); }
     std::string label_for(long idx) const {
@@ -548,19 +551,45 @@ struct Ft8Decoder::Impl {
         job = std::thread([this, copy = std::move(copy), label, skip = std::move(skip)] { const auto t0 = std::chrono::steady_clock::now(); auto r = decode_slot_with(copy.data(), copy.size(), tab, label, o.ft4, o.my_call); last_decode_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             { std::lock_guard<std::mutex> l(m); for (auto& x : r) if (std::find(skip.begin(), skip.end(), x.text) == skip.end()) results.push_back(std::move(x)); } running = false; });
     }
+    // Every block: the next sample goes where the SlotClock says it was heard. While waiting for a slot: the wait is set to end at its boundary; while
+    // filling one: the position moves forward (silence between) or back (overwriting) when it is more than kRetimeS off.
+    void retime() {
+        if (!o.wall_clock || !started || !clk.valid()) return;
+        const double tc = clk.utc_of(double(out_n) * o.sample_rate / kRate), start = t0_utc + double(slot_index) * slot_s();
+        const long tol = long(kRetimeS * kRate);
+        if (skip > 0) { const long want = long(std::lround((start - tc) * kRate)); if (std::labs(want - skip) <= tol) return;
+                        if (want > 0) skip = want; else { skip = 0; fill = std::min(size_t(-want), slot.size() - 1); std::fill(slot.begin(), slot.begin() + long(fill), 0.0f); } return; }
+        const long d = long(std::lround((tc - (start + double(fill) / kRate)) * kRate));
+        if (d > tol) { const size_t nf = std::min(fill + size_t(d), slot.size() - 1); std::fill(slot.begin() + long(fill), slot.begin() + long(nf), 0.0f); fill = nf; }
+        else if (d < -tol) fill = fill > size_t(-d) ? fill - size_t(-d) : 0;
+    }
     void audio(const float* x, size_t n, std::string& out) {
+        if (o.wall_clock) {                                   // when this audio was heard (a stream starts with a backlog: not when it arrived)
+            double now; if (o.now) now = o.now(); else { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); now = double(ts.tv_sec) + double(ts.tv_nsec) * 1e-9; }
+            in_n += n; clk.observe(now, in_n);
+        }
         if (!started) {                                       // work out how far into a slot the first sample is
             started = true; double off = o.start_offset_s;
-            if (o.wall_clock) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); const double now = double(ts.tv_sec) + double(ts.tv_nsec) * 1e-9; off = std::fmod(now, slot_s()); t0_utc = now - off; }
+            if (o.wall_clock) { const double first = clk.utc_of(double(in_n - n)); off = std::fmod(first, slot_s()); t0_utc = first - off; }
             if (off <= kLateJoinS) { skip = 0; std::fill(slot.begin(), slot.end(), 0.0f); fill = size_t(std::lround(off * kRate)); }   // up to 0.4 s in: nothing lost (signals start at 0.5 s), silence before
             else skip = long(std::lround((slot_s() - off) * kRate));                        // later: that slot cannot be decoded, wait for the next boundary
             if (skip > 0 && o.wall_clock) slot_index = 1;
         }
+        retime();
         tmp_in.resize(n); for (size_t i = 0; i < n; ++i) tmp_in[i] = fireside::dsp::cf(x[i], 0.0f);
         tmp_out.clear(); rs->process(tmp_in.data(), n, tmp_out);
         for (const auto& v : tmp_out) {
+            ++out_n;
             if (skip > 0) { --skip; continue; }
-            slot[fill++] = v.real(); if (fill == slot.size()) launch();
+            slot[fill++] = v.real();
+            if (fill == slot.size()) {
+                launch();
+                if (o.wall_clock && clk.valid()) {                    // the next slot starts where the clock says, not where the count says
+                    const double e = clk.utc_of(double(out_n) * o.sample_rate / kRate) - (t0_utc + double(slot_index) * slot_s());
+                    if (e < -kRetimeS) skip = long(std::lround(-e * kRate));                                      // heard before the boundary: belongs to the slot just ended
+                    else if (e > kRetimeS) { fill = std::min(size_t(std::lround(e * kRate)), slot.size() - 1); std::fill(slot.begin(), slot.begin() + long(fill), 0.0f); }   // after it: silence first
+                }
+            }
         }
         std::lock_guard<std::mutex> l(m);
         for (auto& r : results) { const std::string line = Ft8Decoder::format(r); out += line; last = line; ++decoded_total; }

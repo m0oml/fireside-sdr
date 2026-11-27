@@ -100,7 +100,7 @@ void TransmitCard::cwTick() {
         const bool event = cw_no_settings() || QSettings("fireside", "cw").value("key_source", "event").toString() != "read_ptt";   // "read_ptt": the slower command, if the EVENT register does not follow the key
         cw_keys_ = std::make_shared<cwk::KeyWatcher>([sess, event]() { return sess->read_keys(event); }, event ? 0.003 : 0.020);   // READ_PTT takes ~16 ms a read
         QPointer<TransmitCard> self(this);
-        cw_keys_->set_on_press([self] { QMetaObject::invokeMethod(self, [self] { if (self && !self->worker_running_ && !self->ft_pending_ && !self->cw_practice_->isChecked() && self->cwWanted()) self->startCw(QString()); }, Qt::QueuedConnection); });
+        cw_keys_->set_on_press([self] { const qint64 pressed = QDateTime::currentMSecsSinceEpoch(); QMetaObject::invokeMethod(self, [self, pressed] { if (self) self->cw_pressed_ms_ = pressed; if (self && !self->worker_running_ && !self->ft_pending_ && !self->cw_practice_->isChecked() && self->cwWanted()) self->startCw(QString()); }, Qt::QueuedConnection); });
         cw_keys_->start();
     } else if (!want && cwWatching() && !cw_over_) { stopPractice(); cw_keys_->stop(); }
     if (practice && cwWatching() && !cw_prac_ && cw_tone_) {                          // the paddle -> the keyer -> the sidetone; nothing else
@@ -151,13 +151,15 @@ void TransmitCard::startCw(const QString& raw) {
     const QString what = text.isEmpty() ? QString("CW (paddle) on %1 MHz, %2 W, %3 wpm").arg(mhz, 0, 'f', 4).arg(c.power_w, 0, 'f', 0).arg(QString::number(c.keyer.wpm))
                                         : QString("CW \"%1\" on %2 MHz, %3 W, %4 wpm").arg(text).arg(mhz, 0, 'f', 4).arg(c.power_w, 0, 'f', 0).arg(QString::number(c.keyer.wpm));
     if (!text.isEmpty()) saveCw();
-    run(what, false, [this, mhz, c, keys](txc::TxControl& t) {
+    const qint64 press_ms = text.isEmpty() && cw_pressed_ms_ > 0 ? QDateTime::currentMSecsSinceEpoch() - cw_pressed_ms_ : 0; cw_pressed_ms_ = 0;
+    run(what, false, [this, mhz, c, keys, press_ms](txc::TxControl& t) {
         auto r = t.cw(mhz, *keys, c, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });
         if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
         if (!r.keyed) return QString("CW not keyed: ") + QString::fromStdString(r.why_not.empty() ? r.stop : r.why_not);
         if (r.max_fwd_w > 0.1) { last_tx_w_ = r.max_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }
         return QString("CW over: %1, %2 s, max %3 W (set %4 W)%5; first element %6 ms after the key%7").arg(QString::fromStdString(r.stop)).arg(r.seconds, 0, 'f', 1).arg(r.max_fwd_w, 0, 'f', 1)
                .arg(r.limited_to_w > 0 ? r.limited_to_w : c.power_w, 0, 'f', 0).arg(r.text_stopped ? QString(", text stopped by the paddle") : QString()).arg(1000 * r.key_delay_s, 0, 'f', 0)
-               .arg(r.underruns > 4800 ? QString(", stream gaps %1").arg(r.underruns) : QString());
+               .arg(r.underruns > 4800 ? QString(", stream gaps %1").arg(r.underruns) : QString())
+               + QString(" (paddle read to start %1 ms; set up %2%3, stream %4, MOX %5 ms)").arg(press_ms).arg(r.prep_ms, 0, 'f', 0).arg(r.prep_written ? "" : " reused").arg(r.stream_ms, 0, 'f', 0).arg(r.gate_ms, 0, 'f', 0);
     });
 }

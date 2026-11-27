@@ -99,6 +99,8 @@ struct CwResult {
     double key_delay_s = 0;                       // from the call to the first element (MOX on and settled): how late the first element starts
     double queue_ms = 0;                          // the generator's lead over the stream (excludes the stream's own latency)
     uint64_t underruns = 0;
+    bool prep_written = true;                     // false: the last over's set-up was reused (nothing changed)
+    double prep_ms = 0, stream_ms = 0, gate_ms = 0; // where the start went (from the call): radio set up for the over, I/Q stream running, MOX on
 };
 
 struct SendResult {
@@ -212,6 +214,12 @@ private:
     std::mutex lines_m_; std::shared_ptr<TxLines> lines_;
     std::string lines_ready(double freq_mhz);                     // "" or why nothing may key (the band lines could not be set)
     void prepare(double freq_mhz, uint32_t dsp_mode, int tx_ant); // TX antenna (1..3, else std::invalid_argument before any write), mode, DDS, filter, offset, carrier null
+    // CW overs come one after another (semi break-in): the set-up of the last one is reused when nothing changed (same frequency, mode, antenna,
+    // within kPrepReuseS, no other operation since). Every other operation and arm / disarm forget it, so they always write the full set-up.
+    bool prepare_cw(double freq_mhz, int tx_ant);                  // true = the set-up was written, false = reused
+    struct PrepState { bool valid = false; double mhz = 0; uint32_t mode = 0; int ant = 0; double t = 0; } prep_;
+    void forget_prep() { prep_.valid = false; }
+    static constexpr double kPrepReuseS = 120;
     struct Busy { TxControl& c; explicit Busy(TxControl& x) : c(x) { c.busy_ = true; c.abort_ = false; } ~Busy() { c.busy_ = false; c.keyed_ = false; } };
 };
 }  // namespace fireside::txc

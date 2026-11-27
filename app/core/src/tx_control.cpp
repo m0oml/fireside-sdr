@@ -35,7 +35,7 @@ TxControl::TxControl(Flex& fx, PcmFactory pcm, atu::Clock clock) : fx_(fx), pcm_
 }
 TxControl::~TxControl() { disarm(); }
 
-void TxControl::arm(const std::vector<uint8_t>& now, const std::vector<uint8_t>& backup, const LogFn& log) {
+void TxControl::arm(const std::vector<uint8_t>& now, const std::vector<uint8_t>& backup, const LogFn& log) { forget_prep();
     std::lock_guard<std::mutex> l(op_);
     armed_ = false;
     if (retired_) throw std::runtime_error("the radio session has ended: start the radio again");
@@ -70,7 +70,7 @@ TxControl::BackupSaved TxControl::backup_eeprom(const std::string& dir, const Lo
     return r;
 }
 // armed_ goes false BEFORE waiting: an operation queued behind the running one clears abort_ when it starts (Busy), but then finds itself disarmed and refuses.
-void TxControl::disarm() { armed_ = false; abort_ = true; std::lock_guard<std::mutex> l(op_); armed_ = false; }   // waits for a running operation (it sees abort_ and unkeys)
+void TxControl::disarm() { armed_ = false; abort_ = true; std::lock_guard<std::mutex> l(op_); armed_ = false; forget_prep(); }   // waits for a running operation (it sees abort_ and unkeys)
 void TxControl::retire() { retired_ = true; disarm(); }
 
 double TxControl::k_for(int band) const { auto it = k_.find(band); return it != k_.end() ? it->second : 0.0; }
@@ -109,6 +109,12 @@ void TxControl::prepare(double mhz, uint32_t mode, int ant) {
     fx_.set("RDAL_OP_SET_TX_DSP_FILTER", 200, 3100);              // as PowerSDR does
     fx_.set("RDAL_OP_SET_TX_OFFSET", 0, 0);
     txs::write_carrier_null(fx_, cal_, mhz); fx_.sync();
+    prep_ = {false, mhz, mode, ant, 0};                                        // only prepare_cw marks it reusable
+}
+bool TxControl::prepare_cw(double mhz, int ant) {
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (prep_.valid && prep_.mhz == mhz && prep_.mode == 4 && prep_.ant == ant && now - prep_.t < kPrepReuseS) { prep_.t = now; return false; }
+    prepare(mhz, 4, ant); prep_.valid = true; prep_.t = now; return true;
 }
 
 double TxControl::test_cap(int band) const {     // tunes, drive ramps and test tones (15 W at most): the hard clamp stays at 30 W, as during bring-up
@@ -123,7 +129,7 @@ double TxControl::drive_cap(int band) const {
     const double d = k > 1000 ? std::sqrt(1.1 * txs::kMaxWatts / k) : txs::drive_for_watts(cal_, band, 100.0);
     return std::min(d, txs::kAbsoluteMaxDrive);
 }
-RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const ProgressFn& p, const LogFn& log, double hold_s) {
+RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const ProgressFn& p, const LogFn& log, double hold_s) { forget_prep();
     std::lock_guard<std::mutex> l(op_); RampResult r; Busy b(*this);
     if (!armed_) { r.stop = "transmit is not armed"; return r; }
     const int band = txm::band_of(mhz * 1e6);
@@ -193,7 +199,7 @@ RampResult TxControl::ramp(double mhz, double target_w, const Options& o, const 
     return r;
 }
 
-TuneResult TxControl::tune(double mhz, double power_w, double threshold, const Options& o, const ProgressFn& p, const LogFn& log) {
+TuneResult TxControl::tune(double mhz, double power_w, double threshold, const Options& o, const ProgressFn& p, const LogFn& log) { forget_prep();
     std::lock_guard<std::mutex> l(op_); TuneResult r; Busy b(*this);
     if (!armed_) { r.why_not = "transmit is not armed"; return r; }
     const int band = txm::band_of(mhz * 1e6);
@@ -261,7 +267,7 @@ std::optional<atu::Status> TxControl::atu_report() {              // never along
     return atu_report_locked();
 }
 
-bool TxControl::restore_relays(int band, const LogFn& log) {
+bool TxControl::restore_relays(int band, const LogFn& log) { forget_prep();
     std::lock_guard<std::mutex> l(op_);
     if (!armed_) { say(log, "transmit is not armed"); return false; }
     auto s = mem_.recall(band); if (!s) { say(log, std::string("nothing stored for ") + txm::band_name(band)); return false; }
@@ -318,7 +324,7 @@ SendResult TxControl::send_prepared(double mhz, const FtPrepared& f, tx::Parity 
     FtPrepared copy = f; return send_impl(mhz, std::move(copy), parity, power_w, o, p, log, min_lead_s);
 }
 SendResult TxControl::send_impl(double mhz, FtPrepared&& f, tx::Parity parity, double power_w, const Options& o,
-                                const ProgressFn& p, const LogFn& log, double min_lead_s) {
+                                const ProgressFn& p, const LogFn& log, double min_lead_s) { forget_prep();
     std::lock_guard<std::mutex> l(op_); SendResult r; Busy b(*this);
     auto no = [&](const std::string& w) { r.why_not = w; say(log, "send refused: " + w); return r; };
     const std::string text = f.text; const double audio_hz = f.audio_hz; const bool ft4 = f.ft4; const double only_slot = f.only_slot_utc;
@@ -395,7 +401,7 @@ SendResult TxControl::send_impl(double mhz, FtPrepared&& f, tx::Parity parity, d
 }  // namespace fireside::txc
 
 namespace fireside::txc {
-VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p, const LogFn& log) {
+VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p, const LogFn& log) { forget_prep();
     std::lock_guard<std::mutex> l(op_); VoiceResult r; Busy b(*this);
     auto no = [&](const std::string& w) { r.why_not = w; say(log, "voice refused: " + w); return r; };
     if (!armed_) return no("transmit is not armed");
@@ -475,7 +481,7 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
 
 namespace fireside::txc {
 TxControl::GenCheck TxControl::sig_gen_check(double dial_mhz, double tone_hz, const std::function<std::pair<double, double>()>& read,
-                                             const std::function<bool(bool)>& preamp, bool preamp_was_on, const LogFn& log) {
+                                             const std::function<bool(bool)>& preamp, bool preamp_was_on, const LogFn& log) { forget_prep();
     std::lock_guard<std::mutex> l(op_); GenCheck r; Busy b(*this);
     auto say = [&](const std::string& m) { if (log) log(m); };
     if (!read) { r.why = "no receiver reading"; return r; }
@@ -513,7 +519,7 @@ TxControl::GenCheck TxControl::sig_gen_check(double dial_mhz, double tone_hz, co
 namespace fireside::txc {
 CwResult TxControl::cw(double mhz, ICwKeys& keys, const CwOptions& c, const ProgressFn& p, const LogFn& log) {
     std::lock_guard<std::mutex> l(op_); CwResult r; Busy b(*this);
-    auto no = [&](const std::string& w) { r.why_not = w; say(log, "CW refused: " + w); return r; };
+    auto no = [&](const std::string& w) { r.why_not = w; forget_prep(); say(log, "CW refused: " + w); return r; };
     auto steady = [] { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };   // thread-safe (the generator uses it)
     const double t_call = steady();
     if (!armed_) return no("transmit is not armed");
@@ -541,7 +547,7 @@ CwResult TxControl::cw(double mhz, ICwKeys& keys, const CwOptions& c, const Prog
     if (!c.text.empty() && std::find(text_key.begin(), text_key.end(), uint8_t(1)) == text_key.end()) return no("nothing to send in that text");
     if (c.o.tx_ant < 1 || c.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
     if (auto why = lines_ready(mhz); !why.empty()) return no(why);
-    prepare(mhz - kCwOffsetHz / 1e6, 4, c.o.tx_ant);                                   // CWU; the TX DDS 1 kHz below the dial, the tone 1 kHz above it: the carrier on the dial
+    r.prep_written = prepare_cw(mhz - kCwOffsetHz / 1e6, c.o.tx_ant); r.prep_ms = 1000 * (steady() - t_call);   // CWU; the TX DDS 1 kHz below the dial, the tone 1 kHz above it: the carrier on the dial
     txo::ToneSource src(c.o.rate, 8); src.set_tap(iq_tap()); src.set_cap(std::min(dcap, drive * 1.05)); src.set_target(drive); src.set_mirror(c.o.mirror_q);
     src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(c.o.rate * 0.05));
     // The generator: ~1 ms blocks, keeping only kLead of them queued ahead of the stream (the shorter, the sooner a paddle press is heard on the air).
@@ -582,12 +588,13 @@ CwResult TxControl::cw(double mhz, ICwKeys& keys, const CwOptions& c, const Prog
     txo::Stream st(pcm_(c.o.rate), src);
     for (int i = 0; i < 40 && src.live_queued() < lead / 2; ++i) clk_.sleep(0.002);
     if (st.failed()) return no("the I/Q stream failed to start");
+    r.stream_ms = 1000 * (steady() - t_call);
     GateConfig gc; gc.max_key_s = c.max_over_s; gc.max_fwd_w = fwd_limit_w(power_w); gc.max_rev_w = std::max(2.0, 0.5 * power_w); gc.max_swr = 3.0;
     gc.grace_s = kOverGraceS; gc.hard_fwd_w = hard_fwd_limit_w(power_w);
     KeyHook kh(key_hook_, kCwOffsetHz);                                                     // the DDS 1 kHz below the dial for the over
     TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
     if (!gate.key("CW", gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
-    keyed_ = true; r.keyed = true; src.set_keyed(true);
+    keyed_ = true; r.keyed = true; src.set_keyed(true); r.gate_ms = 1000 * (steady() - t_call);
     clk_.sleep(0.008);                                                                       // the T/R relays settle before the first element (no hot switching)
     go = true; const double t0 = clk_.now(); double last_trim = t0;
     while (gate.keyed()) {
@@ -605,9 +612,11 @@ CwResult TxControl::cw(double mhz, ICwKeys& keys, const CwOptions& c, const Prog
     }
     src.set_keyed(false); gate.ensure_unkeyed(2.0); keyed_ = false;
     r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns();
+    if (r.unkey_failed || r.stop != "CW over finished") forget_prep();         // only a clean over leaves its set-up for the next one
     r.text_done = text_done && !text_stopped; r.text_stopped = text_stopped; r.key_delay_s = first_key_t >= 0 ? first_key_t - t_call : 0; r.queue_ms = 1000.0 * double(lead) / c.o.rate;
     note_stop(r.stop);
-    char m[220]; std::snprintf(m, sizeof m, "CW: %s, %.1f s, max %.1f W (set %.0f W), first element %.0f ms after the key", r.stop.c_str(), r.seconds, r.max_fwd_w, power_w, 1000 * r.key_delay_s); say(log, m);
+    char m[300]; std::snprintf(m, sizeof m, "CW: %s, %.1f s, max %.1f W (set %.0f W), first element %.0f ms after the key (set up %.0f, stream %.0f, MOX %.0f ms)", r.stop.c_str(), r.seconds, r.max_fwd_w, power_w,
+                                1000 * r.key_delay_s, r.prep_ms, r.stream_ms, r.gate_ms); say(log, m);
     return r;
 }
 }  // namespace fireside::txc

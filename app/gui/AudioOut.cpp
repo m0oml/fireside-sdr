@@ -68,6 +68,20 @@ float AudioOut::radioPhonesPeakForTests() { return RadioPhonesMix::get().peak; }
 long AudioOut::radioPhonesBlocksForTests() { return RadioPhonesMix::get().blocks; }
 
 QString AudioOut::pcOutput() { return pc_out(); }
+bool AudioOut::pcDeviceFormat(void* device_out, int* channels) {
+#ifdef FIRESIDE_QT_AUDIO
+    const QString want = pc_out(); if (want == kRadioPhones) return false;
+    QAudioDevice dev = want.isEmpty() ? QMediaDevices::defaultAudioOutput() : QAudioDevice();
+    if (!want.isEmpty()) for (const auto& d : QMediaDevices::audioOutputs()) if (d.description() == want) { dev = d; break; }
+    if (dev.isNull()) dev = QMediaDevices::defaultAudioOutput();
+    if (dev.isNull()) return false;
+    QAudioFormat fmt; fmt.setSampleRate(48000); fmt.setChannelConfig(QAudioFormat::ChannelConfigStereo); fmt.setSampleFormat(QAudioFormat::Int16);
+    int ch = 2; if (!dev.isFormatSupported(fmt)) { fmt.setChannelConfig(QAudioFormat::ChannelConfigMono); if (!dev.isFormatSupported(fmt)) return false; ch = 1; }
+    *static_cast<QAudioDevice*>(device_out) = dev; if (channels) *channels = ch; return true;
+#else
+    (void)device_out; (void)channels; return false;
+#endif
+}
 void AudioOut::setPcOutput(const QString& description) {
     if (description == pc_out()) return;
     pc_out() = description; if (!qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) QSettings("fireside", "audio").setValue("pc_output", description);

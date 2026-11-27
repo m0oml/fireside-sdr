@@ -1071,6 +1071,24 @@ TEST(cw_text_iambic_squeeze_straight_key_and_paddle_breaks_the_text) {
         const auto m = r.marks_on(); CHECK_EQ(m.size(), size_t(1)); if (!m.empty()) CHECK_NEAR(double(m[0].second - m[0].first) / 48000, 0.5, 0.01);
     }
 }
+TEST(cw_overs_reuse_an_unchanged_set_up_and_anything_else_writes_it_again) {   // semi break-in: the next over starts ~150 ms sooner
+    if (backup_image().empty()) return;
+    CwRig r; r.tx->arm(backup_image(), backup_image()); ScriptKeys tap([](double t) { return uint8_t(t < 0.05 ? 1 : 0); });
+    txc::CwOptions c; c.keyer.wpm = 20; c.hang_s = 0.1;
+    auto tw = [&] { return sent(r, "RDAL_OP_SET_TX_FREQ_TW").size(); };
+    const auto a = r.tx->cw(14.030, tap, c); const size_t n1 = tw(); CHECK(a.keyed); CHECK(a.prep_written); CHECK(n1 >= 1);
+    const auto b = r.tx->cw(14.030, tap, c); CHECK(b.keyed); CHECK(!b.prep_written); CHECK_EQ(tw(), n1);          // same dial: reused
+    const auto d = r.tx->cw(14.031, tap, c); CHECK(d.prep_written); CHECK_EQ(tw(), n1 + 1);                         // retuned: written
+    c.o.tx_ant = 2; CHECK(r.tx->cw(14.031, tap, c).prep_written); c.o.tx_ant = 1;                                   // another antenna: written
+    CHECK(r.tx->cw(14.031, tap, c).prep_written);
+    r.tx->disarm(); r.tx->arm(backup_image(), backup_image()); CHECK(r.tx->cw(14.031, tap, c).prep_written);       // re-armed: written
+    c.straight = true; c.max_keydown_s = 1; ScriptKeys down([](double) { return uint8_t(1); });
+    CHECK(r.tx->cw(14.031, down, c).keyed); c.straight = false; c.max_keydown_s = 15;
+    CHECK(r.tx->cw(14.031, tap, c).prep_written);                                                                   // after a safety stop: written
+    CHECK(!r.tx->cw(14.031, tap, c).prep_written);
+    txc::Options o; r.tx->tune(14.031, 5, 2.0, o); CHECK(r.tx->cw(14.031, tap, c).prep_written);                     // any other operation in between: written
+    CHECK(!r.sim.keyed);
+}
 TEST(cw_refusals_stuck_key_and_stop_leave_the_radio_unkeyed) {
     if (backup_image().empty()) return;
     CwRig r; r.tx->arm(backup_image(), backup_image()); ScriptKeys down([](double) { return uint8_t(1); });

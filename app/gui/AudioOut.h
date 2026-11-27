@@ -22,6 +22,7 @@ public:
     // is stopped. Silent (not an error) until the duplex stream runs.
     static constexpr const char* kRadioPhones = "@radio-headphones";
     static bool radioPhones() { return pcOutput() == kRadioPhones; }
+    static bool pcDeviceFormat(void* device_out, int* channels);   // GUI thread: the QAudioDevice (cast to QAudioDevice*) the PC outputs use now, and its channel count; false if none
     // Tests: the last block mixed for the radio's headphones (peak, 0 if none) and how many blocks were mixed since start.
     static float radioPhonesPeakForTests(); static long radioPhonesBlocksForTests();
     bool available() const { return available_; }

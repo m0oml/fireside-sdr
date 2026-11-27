@@ -165,7 +165,7 @@ private:
     // CW
     QWidget* cw_part_ = nullptr; QDoubleSpinBox* cw_wpm_ = nullptr; QSpinBox *cw_weight_ = nullptr, *cw_hang_ = nullptr; QComboBox *cw_mode_ = nullptr, *cw_mem_ = nullptr; QCheckBox *cw_rev_ = nullptr, *cw_paddle_ = nullptr, *cw_side_ = nullptr;
     QDoubleSpinBox* cw_w_ = nullptr; QLineEdit* cw_text_ = nullptr; QPushButton *cw_send_ = nullptr, *cw_stop_ = nullptr; QLabel* cw_lights_ = nullptr; QTimer* cw_timer_ = nullptr;
-    std::unique_ptr<class CwSidetone> cw_tone_; std::shared_ptr<fireside::cwk::KeyWatcher> cw_keys_; std::unique_ptr<fireside::cwp::Practice> cw_prac_; QPushButton* cw_practice_ = nullptr; bool practiceAllowed(QString* why = nullptr) const; void stopPractice(); bool cw_over_ = false; std::function<QStringList()> cw_mems_;
+    std::unique_ptr<class CwSidetone> cw_tone_; std::shared_ptr<fireside::cwk::KeyWatcher> cw_keys_; std::unique_ptr<fireside::cwp::Practice> cw_prac_; QPushButton* cw_practice_ = nullptr; qint64 cw_pressed_ms_ = 0; bool practiceAllowed(QString* why = nullptr) const; void stopPractice(); bool cw_over_ = false; std::function<QStringList()> cw_mems_;
     void buildCw(); void cwTick(); void startCw(const QString& text); void saveCw(); void loadCw(); bool cwWanted() const;
     bool rx_hold_ = false; bool auto_hold_ = false;   // auto_hold_: after Stop, nothing answers by itself until the operator sends, calls CQ or double-clicks
     // VOX + monitor

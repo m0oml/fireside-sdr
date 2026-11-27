@@ -1101,3 +1101,29 @@ TEST(cw_key_watcher_latches_short_taps_and_reports_a_press) {
     w.stop(); CHECK(w.reads() > 10); CHECK_EQ(w.failures(), uint64_t(0));
     cwk::KeyWatcher bad([]() -> std::optional<uint32_t> { return std::nullopt; }, 0.002); bad.start(); std::this_thread::sleep_for(std::chrono::milliseconds(20)); bad.stop(); CHECK(bad.failures() > 0);
 }
+#include "fireside/cw_practice.h"
+TEST(cw_practice_keys_only_the_sidetone_feed_at_the_set_speed) {   // the paddle -> the keyer -> a callback; decimal speeds work
+    std::atomic<uint8_t> pad{0}; std::atomic<uint64_t> fed{0}, down{0};
+    tx::KeyerConfig k; k.wpm = 12.5;
+    cwp::Practice p([&] { return pad.load(); }, [&](const uint8_t* kd, size_t n, double r) { CHECK_EQ(r, 48000.0); fed += n; for (size_t i = 0; i < n; ++i) down += kd[i]; }, k, false);
+    p.start(); std::this_thread::sleep_for(std::chrono::milliseconds(100)); CHECK(fed.load() > 2400); CHECK_EQ(down.load(), uint64_t(0));   // paddle up: key up
+    pad = 1; std::this_thread::sleep_for(std::chrono::milliseconds(800)); pad = 0; std::this_thread::sleep_for(std::chrono::milliseconds(300)); p.stop();
+    const double down_s = double(down.load()) / 48000.0;                       // dots held ~0.8 s at 12.5 wpm: dot 96 ms on, 96 ms off, so about half
+    CHECK(down_s > 0.3); CHECK(down_s < 0.6); CHECK_EQ(p.down_samples(), down.load());
+    cwp::Practice st([&] { return uint8_t(2); }, nullptr, k, true); st.start(); std::this_thread::sleep_for(std::chrono::milliseconds(100)); st.stop();
+    CHECK(st.down_samples() > 0); CHECK_EQ(st.down_samples(), st.samples());     // straight key: down while closed
+}
+TEST(cw_key_watcher_slow_read_leaves_the_lock_free_for_others) {    // READ_PTT holds the session lock ~16 ms: the GUI must still get it
+    std::mutex m;
+    cwk::KeyWatcher w([&]() -> std::optional<uint32_t> { std::lock_guard<std::mutex> l(m); std::this_thread::sleep_for(std::chrono::milliseconds(16)); return 0u; }, 0.005);
+    w.start(); std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    double worst = 0;
+    for (int i = 0; i < 10; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        { std::lock_guard<std::mutex> l(m); }
+        worst = std::max(worst, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        std::this_thread::sleep_for(std::chrono::milliseconds(7));
+    }
+    w.stop();
+    CHECK(worst < 0.1); CHECK(w.reads() > 5);
+}

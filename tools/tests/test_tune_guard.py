@@ -236,6 +236,12 @@ class TuningIsOneOpcode(unittest.TestCase):
         self.assertEqual(re.findall(r"\bt\.(\w+)\(", g), ["cw"])
         for bad in ("TxGate", "SET_MOX", "set_keyed", ".set(", "Flex"):
             self.assertNotIn(bad, g, bad)
+        p = code("core/src/cw_practice.cpp") + code("core/include/fireside/cw_practice.h")   # practice: paddle -> keyer -> sidetone, nothing else
+        for bad in (".set(", "MOX", "TxGate", "TxControl", "tx_control", "Flex", "session", "permit(", "snd_", "ioctl", "/dev/"):
+            self.assertNotIn(bad, p, bad)
+        gl = code("gui/TransmitCardCw.cpp")
+        self.assertNotIn("practice", " ".join(re.findall(r'setValue\("(\w+)"', gl)))      # Practice is off in every new window
+        self.assertIn("!self->cw_practice_->isChecked()", gl)                        # a paddle press never starts an over while practising
         s = code("core/src/session.cpp")
         body = s[s.index("RadioSession::read_keys"):]; body = body[:body.index("\n}") + 2]
         self.assertEqual(re.findall(r'"(RDAL_OP_\w+)"', body), ["RDAL_OP_READ_PTT"]); self.assertIn("read_event()", body); self.assertNotIn(".set(", body)

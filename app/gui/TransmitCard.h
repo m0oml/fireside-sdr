@@ -12,6 +12,7 @@
 #include "fireside/rigctl.h"
 #include "fireside/eeprom.h"
 #include "fireside/cw_keys.h"
+#include "fireside/cw_practice.h"
 #include "fireside/vox.h"
 #include <functional>
 class QCheckBox; class QComboBox; class QDialog; class QDoubleSpinBox; class QLabel; class QLineEdit; class QProgressBar; class QPushButton; class QSpinBox; class QTimer;
@@ -87,7 +88,7 @@ public:
     QWidget* cwPart() const { return cw_part_; }
     void setCwMemorySource(std::function<QStringList()> f) { cw_mems_ = std::move(f); }
     QLineEdit* cwTextBox() const { return cw_text_; } QPushButton* cwSendButton() const { return cw_send_; } QLabel* cwLights() const { return cw_lights_; }
-    QCheckBox* cwPaddleBox() const { return cw_paddle_; } QDoubleSpinBox* cwPowerBox() const { return cw_w_; }
+    QCheckBox* cwPaddleBox() const { return cw_paddle_; } QPushButton* cwPracticeButton() const { return cw_practice_; } bool cwPractising() const { return cw_prac_ && cw_prac_->running(); } uint64_t cwPracticeDownSamples() const { return cw_prac_ ? cw_prac_->down_samples() : 0; } QDoubleSpinBox* cwPowerBox() const { return cw_w_; }
     bool cwWatching() const;                             // the paddle is being read (CW screen, armed, ticked)
     bool cwOver() const { return cw_over_; }
     // VOX (voice keys the transmitter): off in every new window, never remembered; only on the Voice screen with transmit ready. Monitor: hear the
@@ -162,9 +163,9 @@ public:
 private:
     int att_pause_ms_for_tests_ = -1, att_calls_ = kAttCalls;
     // CW
-    QWidget* cw_part_ = nullptr; QSpinBox *cw_wpm_ = nullptr, *cw_weight_ = nullptr, *cw_hang_ = nullptr; QComboBox *cw_mode_ = nullptr, *cw_mem_ = nullptr; QCheckBox *cw_rev_ = nullptr, *cw_paddle_ = nullptr, *cw_side_ = nullptr;
+    QWidget* cw_part_ = nullptr; QDoubleSpinBox* cw_wpm_ = nullptr; QSpinBox *cw_weight_ = nullptr, *cw_hang_ = nullptr; QComboBox *cw_mode_ = nullptr, *cw_mem_ = nullptr; QCheckBox *cw_rev_ = nullptr, *cw_paddle_ = nullptr, *cw_side_ = nullptr;
     QDoubleSpinBox* cw_w_ = nullptr; QLineEdit* cw_text_ = nullptr; QPushButton *cw_send_ = nullptr, *cw_stop_ = nullptr; QLabel* cw_lights_ = nullptr; QTimer* cw_timer_ = nullptr;
-    std::unique_ptr<class CwSidetone> cw_tone_; std::shared_ptr<fireside::cwk::KeyWatcher> cw_keys_; bool cw_over_ = false; std::function<QStringList()> cw_mems_;
+    std::unique_ptr<class CwSidetone> cw_tone_; std::shared_ptr<fireside::cwk::KeyWatcher> cw_keys_; std::unique_ptr<fireside::cwp::Practice> cw_prac_; QPushButton* cw_practice_ = nullptr; bool practiceAllowed(QString* why = nullptr) const; void stopPractice(); bool cw_over_ = false; std::function<QStringList()> cw_mems_;
     void buildCw(); void cwTick(); void startCw(const QString& text); void saveCw(); void loadCw(); bool cwWanted() const;
     bool rx_hold_ = false; bool auto_hold_ = false;   // auto_hold_: after Stop, nothing answers by itself until the operator sends, calls CQ or double-clicks
     // VOX + monitor

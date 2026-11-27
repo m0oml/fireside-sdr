@@ -1,4 +1,5 @@
 #include "fireside/cw_keys.h"
+#include <algorithm>
 #include <chrono>
 
 namespace fireside::cwk {
@@ -23,8 +24,10 @@ void KeyWatcher::run() {
             }
             prev = k;
         }
-        const double left = poll_s_ - (now_s() - t0);
-        if (left > 0) std::this_thread::sleep_for(std::chrono::duration<double>(left));
+        // Always leave a gap: the read holds the radio session's lock, and a read slower than poll_s_ (READ_PTT, ~16 ms) would otherwise
+        // take it back at once and starve every other user of the radio (the GUI froze on the CW screen with key_source=read_ptt).
+        const double left = std::max(poll_s_ - (now_s() - t0), std::max(0.002, 0.5 * dt));
+        std::this_thread::sleep_for(std::chrono::duration<double>(left));
     }
 }
 }  // namespace fireside::cwk

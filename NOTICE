@@ -15,6 +15,9 @@ cannot provide documentation or assistance. That is a statement of no objection,
 project. Thank you to FlexRadio and to Andrew for the quick and kind reply, and to the FlexRadio engineers who built a radio worth keeping on the
 air and released PowerSDR under the GPL, which this work depends on. The author keeps a copy of the correspondence.
 
+A special thank you to Peter, M0VTS, for access to the FLEX-5000A this work was built and tested on. Without him this project would have
+been impossible.
+
 ------------------------------------------------------------------------------------------------------------------------------------
 What this project borrowed, and from whom
 ------------------------------------------------------------------------------------------------------------------------------------

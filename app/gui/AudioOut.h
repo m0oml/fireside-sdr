@@ -26,9 +26,12 @@ public:
     static float radioPhonesPeakForTests(); static long radioPhonesBlocksForTests();
     bool available() const { return available_; }
     void push(const std::vector<float>& audio, float volume);   // volume 0..1
+    int queuedMs() const;                                         // audio waiting in the sink (ms); 0 if none or not a PC output
+    void setIdleFillMs(int ms) { idle_fill_ms_ = ms; }            // silence kept queued while idle (default 100 ms); the CW sidetone keeps less (it is the delay of the first element)
+    long dropped() const { return dropped_; }                     // blocks dropped because the sink was full
 private:
     void open();
     QString device_; bool follows_pc_ = false, enabled_ = false, to_radio_ = false;
-    int channels_ = 2; bool available_ = false; QAudioSink* sink_ = nullptr; QIODevice* io_ = nullptr; QTimer* keep_ = nullptr; qint64 last_push_ms_ = 0;
+    int channels_ = 2; bool available_ = false; QAudioSink* sink_ = nullptr; QIODevice* io_ = nullptr; QTimer* keep_ = nullptr; qint64 last_push_ms_ = 0; int idle_fill_ms_ = 100; long dropped_ = 0;
     void keepAlive();   // no audio for a while (receive paused while we transmit): silence, so the sound server never suspends the output (waking it took 2-3 s)
 };

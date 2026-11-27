@@ -173,7 +173,9 @@ int main(int argc, char** argv) {
             r->addDecodedText("093530  -6  0.1 1500 ~  M0OML CALL4X JN11\n"); step("queue: removed, calling again within 10 min: not listed", !order().contains("CALL4X"));
             r->setQsoPartner("CALL6X"); step("callers: replying to a line (partner set) removes that caller", !r->callersText().contains("CALL6X")); r->setQsoPartner(QString());
             r->endQso("CALL5X", false); step("callers: a QSO given up on takes them off the list", r->nextCaller({}).first != "CALL5X" && !r->callersText().contains("CALL5X"));
-            r->addDecodedText("093600  -6  0.1 1500 ~  M0OML CALL5X JN11\n"); step("callers: calling again within 10 min, not listed again", !r->callersText().contains("CALL5X"));
+            r->addDecodedText("093600  -6  0.1 1500 ~  M0OML CALL5X JN11\n"); step("callers: given up on, calling again: listed again at once", r->callersText().contains("CALL5X"));
+            r->endQso("CALL5X", true); r->addDecodedText("093615  -6  0.1 1500 ~  M0OML CALL5X JN11\n");
+            step("callers: worked, calling again within 10 min: not listed, and the status says why", !r->callersText().contains("CALL5X") && r->status().contains("CALL5X called you: not queued"));
             clk += 11 * 60000; r->addDecodedText("094700  -6  0.1 1500 ~  M0OML CALL5X JN11\n"); step("callers: after 10 min, listed again", r->callersText().contains("CALL5X"));
             r->clearDecoded();
             {   // the QSO pane during a QSO: only the partner (and our overs); anyone else calling waits in the callers area; the end is marked
@@ -727,6 +729,12 @@ int main(int argc, char** argv) {
                             tc->cwTextBox()->setText("e e"); const size_t m8 = count(1292); tc->cwSendButton()->click(); pump(2);
                             for (int i = 0; i < 300 && (tc->busy() || sim->keyed); ++i) pump(1); pump(5);
                             step("CW: Send keys the text once and unkeys", count(1292) == m8 + 2 && !sim->keyed && tc->statusLabel()->text().startsWith("CW over: CW over finished"));
+                            tc->cwPracticeButton()->click(); for (int i = 0; i < 20 && !tc->cwPractising(); ++i) pump(1);
+                            const size_t mp = count(1292); sim->contacts = 1; for (int i = 0; i < 20; ++i) { pump(1); if (sim->keyed) break; } sim->contacts = 0; pump(10);
+                            step("CW practice: the paddle plays the sidetone only, nothing keyed, Send off", tc->cwPractising() && tc->cwPracticeDownSamples() > 0 && !sim->keyed && count(1292) == mp
+                                 && !tc->busy() && !tc->cwSendButton()->isEnabled());
+                            tc->cwPracticeButton()->click(); pump(2); step("CW practice off: stopped", !tc->cwPractising() && !tc->cwPracticeButton()->isChecked());
+                            for (int i = 0; i < 4; ++i) pump(1);                                   // the watcher's 100 ms "an over is reading" window passes before the next press
                             tc->cwPaddleBox()->setChecked(false); pump(5); const size_t m9 = count(1292); sim->contacts = 1; pump(20); sim->contacts = 0; pump(5);
                             step("CW: with Paddle keys unticked the paddle is not read and keys nothing", !tc->cwWatching() && count(1292) == m9 && !sim->keyed);
                             tc->cwPaddleBox()->setChecked(true); rx->setModeIndex(mode0); rx->setDecoderIndex(dec0); pump(5);

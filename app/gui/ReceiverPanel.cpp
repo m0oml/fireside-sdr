@@ -1039,7 +1039,16 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
 qint64 ReceiverPanel::callersNow() const { return callers_now_ ? callers_now_() : QDateTime::currentMSecsSinceEpoch(); }
 void ReceiverPanel::addCaller(const QString& call, const QString& line) {
     const qint64 now = callersNow();
-    if (moved_on_.contains(call)) { if (now - moved_on_.value(call) < kMovedOnMs) return; moved_on_.remove(call); }   // worked, given up on or removed: not again for 10 min
+    if (moved_on_.contains(call)) {                                                               // worked or removed by hand: not again for 10 min
+        const qint64 ago = now - moved_on_.value(call);
+        if (ago < kMovedOnMs) {                                                                    // said, so a red line that is not queued is never a mystery
+            if (!kept_out_said_.contains(call)) { kept_out_said_.insert(call);
+                const QString why = QString("%1 called you: not queued (worked or removed %2 min ago; back after 10 min, or double-click the line)").arg(call).arg(std::max<qint64>(1, ago / 60000));
+                appLog("receiver", why); note_ = why; updateStatus(); }
+            return;
+        }
+        moved_on_.remove(call); kept_out_said_.remove(call);
+    }
     for (auto& c : caller_list_) if (c.call == call) { c.line = line; c.ms = now; c.manual = false; renderCallers(); return; }   // a repeat call: its newest line, same place
     caller_list_.append({call, line, info_by_call_.value(call), tag_by_call_.value(call, -1), now, false}); renderCallers();      // a new caller joins at the bottom
 }
@@ -1052,12 +1061,12 @@ void ReceiverPanel::queueTop(const QString& call, const QString& line) {
 void ReceiverPanel::bumpCaller(const QString& call) {
     for (int i = 1; i < caller_list_.size(); ++i) if (caller_list_[i].call == call) { caller_list_.swapItemsAt(i, i - 1); renderCallers(); return; }
 }
-void ReceiverPanel::dropCaller(const QString& call) { if (call.isEmpty()) return; removeCaller(call); moved_on_.insert(call, callersNow()); }
+void ReceiverPanel::dropCaller(const QString& call) { if (call.isEmpty()) return; removeCaller(call); moved_on_.insert(call, callersNow()); kept_out_said_.remove(call); }
 void ReceiverPanel::removeCaller(const QString& call) {
     if (call.isEmpty()) return;
     for (int i = 0; i < caller_list_.size(); ++i) if (caller_list_[i].call == call) { caller_list_.removeAt(i); renderCallers(); return; }
 }
-void ReceiverPanel::clearCallers() { caller_list_.clear(); moved_on_.clear(); renderCallers(); }
+void ReceiverPanel::clearCallers() { caller_list_.clear(); moved_on_.clear(); kept_out_said_.clear(); renderCallers(); }
 void ReceiverPanel::tickCallers() { fadeQsos(); }                                  // the queue keeps its stations until worked, removed or moved on (no time limit)
 QString ReceiverPanel::callersText() const {
     QStringList out;
@@ -1172,7 +1181,7 @@ void ReceiverPanel::setQsoPartner(const QString& call) {
 }
 void ReceiverPanel::endQso(const QString& call, bool done) {               // the sequence finished: a closing line, and the pane takes callers again
     const QString b = QString::fromStdString(fireside::qrz::base_call(call.toStdString()));
-    if (!b.isEmpty()) { removeCaller(b); moved_on_.insert(b, callersNow()); }   // worked, or tried and moved on: off the callers list (not back for 10 min)
+    if (!b.isEmpty()) { removeCaller(b); if (done) { moved_on_.insert(b, callersNow()); kept_out_said_.remove(b); } }   // off the callers list; worked: not back for 10 min. Given up on: back as soon as they call again (they may have heard us late)
     if (qso_text_) { qso_text_->moveCursor(QTextCursor::End); QTextCursor c = qso_text_->textCursor(); if (!qso_text_->document()->isEmpty()) c.insertBlock();
         QTextCharFormat f; f.setForeground(done ? QColor("#3ddc84") : QColor("#8b93a7")); f.setFontWeight(QFont::Bold); c.setBlockFormat(QTextBlockFormat());
         c.insertText(done ? QString::fromUtf8("\u2500\u2500 QSO with %1 done \u2500\u2500").arg(b) : QString::fromUtf8("\u2500\u2500 QSO with %1 not completed (no answer) \u2500\u2500").arg(b), f);

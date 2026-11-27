@@ -105,7 +105,7 @@ void AudioOut::push(const std::vector<float>& audio, float volume) {
 #ifdef FIRESIDE_QT_AUDIO
     if (!available_ || audio.empty()) return;
     const qint64 bytes = qint64(audio.size()) * 2 * channels_;
-    if (sink_->bytesFree() < bytes) return;                                               // would grow latency: drop this block
+    if (sink_->bytesFree() < bytes) { ++dropped_; return; }                              // would grow latency: drop this block
     std::vector<int16_t> pcm(audio.size() * size_t(channels_));
     for (size_t i = 0; i < audio.size(); ++i) { const int16_t v = int16_t(std::lround(std::min(std::max(audio[i] * volume, -1.0f), 1.0f) * 32767.0f)); for (int c = 0; c < channels_; ++c) pcm[i * size_t(channels_) + size_t(c)] = v; }   // the same sample on every channel
     io_->write(reinterpret_cast<const char*>(pcm.data()), bytes); last_push_ms_ = QDateTime::currentMSecsSinceEpoch();
@@ -113,10 +113,18 @@ void AudioOut::push(const std::vector<float>& audio, float volume) {
     (void)audio; (void)volume;
 #endif
 }
+int AudioOut::queuedMs() const {
+#ifdef FIRESIDE_QT_AUDIO
+    if (to_radio_ || !available_ || !sink_) return 0;
+    return int((sink_->bufferSize() - sink_->bytesFree()) / (2 * channels_) / 48);
+#else
+    return 0;
+#endif
+}
 void AudioOut::keepAlive() {
 #ifdef FIRESIDE_QT_AUDIO
     if (to_radio_ || !available_ || QDateTime::currentMSecsSinceEpoch() - last_push_ms_ < 120) return;       // real audio is flowing
-    const qint64 frame = 2 * channels_, queued = sink_->bufferSize() - sink_->bytesFree(), want = 48000 / 10 * frame;   // keep ~100 ms of silence queued
+    const qint64 frame = 2 * channels_, queued = sink_->bufferSize() - sink_->bytesFree(), want = qint64(48 * idle_fill_ms_) * frame;   // keep ~idle_fill_ms_ of silence queued
     if (queued >= want) return;
     const qint64 n = std::min<qint64>(want - queued, sink_->bytesFree()) / frame * frame; if (n <= 0) return;
     const std::vector<char> zeros(size_t(n), 0); io_->write(zeros.data(), n);

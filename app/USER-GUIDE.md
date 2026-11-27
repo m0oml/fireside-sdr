@@ -88,7 +88,7 @@ Fireside SDR can be the radio for WSJT-X, JTDX, JS8Call, fldigi and other progra
   - Measure drive once on the band (Transmit card), as for our own overs.
   - Tick **Let other programs key** on the **Audio** tab (Other programs card) and set the power beside it. **This is off in every new window**: you tick it each session.
 - **What a keyed over does:** the other program's audio is sent as it is (no processing). The power beside the tick is reached when its audio is at full scale; quieter audio gives less, never more.
-- **Limits:** at most 2 minutes per over; the radio unkeys if the program releases PTT, stops talking to us for 15 s, disconnects, or you untick the box, press Stop or stop the radio. Only one program can key at a time, only in the amateur bands, and the dial cannot be moved while keyed. The forward-power, SWR and time limits of every over apply.
+- **Limits:** at most 5 minutes per over (long enough for any SSTV picture); the radio unkeys if the program releases PTT, stops talking to us for 15 s, disconnects, or you untick the box, press Stop or stop the radio. Only one program can key at a time, only in the amateur bands, and the dial cannot be moved while keyed. The forward-power, SWR and time limits of every over apply.
 - **What is still ours:** the Transmit power meter and TX lamp show every over, and **Stop** always unkeys. Start at low power and watch the meter on the first overs.
 - This route has been tested on the simulated radio and with real Hamlib `rigctl`, not yet on the air with WSJT-X.
 

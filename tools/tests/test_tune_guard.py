@@ -90,7 +90,7 @@ class TuningIsOneOpcode(unittest.TestCase):
             self.assertIn(need, req, need)
         self.assertIn("now_ms() - ext_beat_ms_ < ext_watchdog_ms_", t)                       # the watchdog ...
         self.assertIn("ext_watchdog_ms_{kExtWatchdogMs}", code("gui/TransmitCard.h"))        # ... 15 s unless a test shortens it
-        h = code("gui/TransmitCard.h"); self.assertRegex(h, r"kExtWatchdogMs = 15000;"); self.assertRegex(h, r"kExtMaxKeyS = 120;")
+        h = code("gui/TransmitCard.h"); self.assertRegex(h, r"kExtWatchdogMs = 15000;"); self.assertRegex(h, r"kExtMaxKeyS = 300;")
         self.assertIn('ext_allow_->setChecked(false)', t)                                    # off in every new window ...
         self.assertNotRegex(t, r"setValue\(\s*\"ext_allow")                                  # ... and never remembered
 

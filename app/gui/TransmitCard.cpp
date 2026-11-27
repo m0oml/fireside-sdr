@@ -120,7 +120,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     key_ptt_ = new QCheckBox("Key jack"); key_ptt_->setChecked(false); key_ptt_->setToolTip("The CW key jack keys a voice over while it is closed (either contact: a straight key, a paddle or a foot switch). Voice modes only: in CW the key sends Morse as usual");
     ext_allow_ = new QCheckBox("Let other programs key (CAT)"); ext_allow_->setChecked(false);
     ext_allow_->setToolTip("WSJT-X, JS8Call, fldigi ... may key the radio over the CAT server (PTT: CAT), sending what they play into \"Fireside TX audio\". "
-                           "Off in every new window. Needs the direct stream, a measured drive level for the band; at most 2 minutes per over; unkeys if the program goes quiet for 15 s.");
+                           "Off in every new window. Needs the direct stream, a measured drive level for the band; at most 5 minutes per over (long enough for any SSTV picture); unkeys if the program goes quiet for 15 s.");
     ext_w_ = new QDoubleSpinBox; ext_w_->setRange(1, 100); ext_w_->setDecimals(0); ext_w_->setValue(20); ext_w_->setSuffix(" W");
     ext_w_->setToolTip("Power when the other program's audio is at full scale (less if it is quieter; never more)");
     ft_timer_ = new QTimer(this); ft_timer_->setSingleShot(true); connect(ft_timer_, &QTimer::timeout, this, &TransmitCard::startSend);

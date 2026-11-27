@@ -14,6 +14,8 @@ struct FakeRig : Backend {
     bool tx_busy() const override { return busy || key; }
     void set_freq(double f) override { hz = f; ++sets; }
     void set_mode(int i, double width) override { mode = i; last_w = width; if (width > 0) w = width; ++mode_sets; }
+    bool have_s = true; int s_db = -12;
+    bool strength_db(int& db) const override { if (!have_s) return false; db = s_db; return true; }
 };
 }  // namespace
 
@@ -107,7 +109,7 @@ TEST(rigctl_several_commands_partial_lines_unknown_and_quit) {
     CHECK_EQ(s.feed("F 14074000 f m\n"), std::string("RPRT 0\n14074000\nPKTUSB\n3600\n"));
     CHECK_EQ(s.feed("f"), std::string("")); CHECK_EQ(s.feed("\r\n"), std::string("14074000\n"));    // split across reads, CRLF
     CHECK_EQ(s.feed("\\no_such_thing 1 2 f\n"), std::string("RPRT -4\n"));     // unknown: nothing done, rest of the line dropped
-    CHECK_EQ(s.feed("l STRENGTH\n"), std::string("RPRT -11\n"));               // argument consumed: in step afterwards
+    CHECK_EQ(s.feed("l RFPOWER\n"), std::string("RPRT -11\n"));                // a level we do not offer: argument consumed, in step afterwards
     CHECK_EQ(s.feed("S 1 VFOB\n"), std::string("RPRT -11\n")); CHECK_EQ(s.feed("S 0 VFOA\n"), std::string("RPRT 0\n"));
     CHECK_EQ(s.feed("V VFOB\n"), std::string("RPRT -11\n")); CHECK_EQ(s.feed("V VFOA\n"), std::string("RPRT 0\n"));
     CHECK_EQ(s.feed(std::string(2000, 'x')), std::string("RPRT -1\n"));       // a runaway line
@@ -119,4 +121,16 @@ TEST(rigctl_dump_state_shape) {
     CHECK(d.rfind("1\n2\n0\n100000.000000 65000000.000000 0xc2f ", 0) == 0);
     CHECK(d.find("0 0 0 0 0 0 0\n0 0 0 0 0 0 0\n") != std::string::npos);       // no transmit ranges
     CHECK(d.size() > 10 && d.substr(d.size() - 5) == "done\n");
+}
+TEST(rigctl_s_meter_level_is_read_only_and_keeps_a_keying_client_alive) {
+    struct Beats : PttRequest { int n = 0; bool request_ptt(int, bool) override { return false; } void heartbeat(int) override { ++n; } } p;
+    FakeRig r; Session s(r, &p, 1);
+    CHECK_EQ(s.feed("l STRENGTH\n"), std::string("-12\n"));
+    CHECK_EQ(s.feed("+\\get_level STRENGTH\n"), std::string("get_level: STRENGTH\nLevel Value: -12\nRPRT 0\n"));
+    r.s_db = 20; CHECK_EQ(s.feed("l STRENGTH\n"), std::string("20\n"));                       // S9 + 20 dB
+    CHECK_EQ(s.feed("l RFPOWER\n"), std::string("RPRT -11\n"));                                // nothing else is offered
+    CHECK_EQ(s.feed("L STRENGTH 5\n"), std::string("RPRT -11\n"));                             // and nothing can be set
+    r.have_s = false; CHECK_EQ(s.feed("l STRENGTH\n"), std::string("RPRT -11\n"));
+    CHECK_EQ(p.n, 6);                                                                           // every poll is a heartbeat
+    CHECK_EQ(r.sets + r.mode_sets, 0); CHECK(dump_state().find("0x40000000\n") != std::string::npos);
 }

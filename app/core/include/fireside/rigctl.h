@@ -30,7 +30,10 @@ struct Backend {
     virtual bool tx_busy() const = 0;                     // transmitting or a transmit job running: the dial must not move
     virtual void set_freq(double hz) = 0;                 // only called with a valid frequency while not tx_busy
     virtual void set_mode(int index, double width) = 0;   // width > 0: that passband; <= 0: as the mode leaves it (its default on a change, else unchanged)
+    // The S-meter (read-only) for get_level STRENGTH: dB relative to S9 (Hamlib's unit; S9 = -73 dBm on HF). false: no reading (no signal / no radio).
+    virtual bool strength_db(int& db) const { (void)db; return false; }
 };
+inline constexpr unsigned kLevelStrength = 0x40000000u;  // RIG_LEVEL_STRENGTH (bit 30), advertised in \dump_state's has_get_level
 
 // The ONLY way a CAT client can ask to transmit. `client` identifies the connection. request_ptt(on = true) returns whether the request was
 // accepted; request_ptt(false) releases (the return value is ignored). heartbeat() is called for every command a client sends (a keying

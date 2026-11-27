@@ -64,7 +64,7 @@ std::string dump_state() {
     std::snprintf(b, sizeof b, "0x%x 2400\n0x%x 1800\n0x%x 3600\n0x2 500\n0x2 250\n0x1 6000\n0x20 12000\n0 0\n", kSsbModes, kSsbModes, kSsbModes); o << b;
     o << "0\n0\n0\n0\n";                                                                       // max RIT, XIT, IF shift, announces
     o << "\n\n";                                                                               // preamp, attenuator lists (none offered)
-    o << "0x0\n0x0\n0x0\n0x0\n0x0\n0x0\n";                                                     // get/set func, level, parm
+    std::snprintf(b, sizeof b, "0x0\n0x0\n0x%x\n0x0\n0x0\n0x0\n", kLevelStrength); o << b;                 // get/set func, get level (the S-meter only), set level, get/set parm
     o << "vfo_ops=0x0\nptt_type=0x0\ntargetable_vfo=0x0\nhas_set_vfo=1\nhas_get_vfo=1\nhas_set_freq=1\nhas_get_freq=1\nhas_set_conf=0\nhas_get_conf=0\n"
          "has_power2mW=0\nhas_mW2power=0\nhas_get_ant=0\nhas_set_ant=0\ntimeout=0\nrig_model=2\nrigctld_version=fireside rigctl 1\ndone\n";
     return o.str();
@@ -135,6 +135,10 @@ std::string Session::line(const std::string& text) {
         else if (n == "get_lock_mode") { if (!ext) { out += "0\nRPRT 0\n"; continue; } kv = {{"Locked", "0"}}; }   // rigctld prints the value AND RPRT here
         else if (n == "chk_vfo") { out += ext ? "ChkVFO: 0\n" : "0\n"; continue; }                                 // rigctld: no header, no RPRT
         else if (n == "send_morse" || n == "send_voice_mem") code = kERejected;
+        else if (n == "get_level") {                                                           // the S-meter only (read-only): dB relative to S9
+            int db = 0;
+            if (!need(1)) {} else if (a[0] != "STRENGTH") code = kENavail; else if (!b_.strength_db(db)) code = kENavail; else kv = {{"Level Value", std::to_string(db)}};
+        }
         else code = kENavail;
 
         if (!raw.empty() && code == kOk) { out += raw; continue; }

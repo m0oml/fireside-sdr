@@ -96,7 +96,7 @@ public:
     QString messageText() const;                         // newest F5K_*_trx.bin in backupDir() (or the remembered one)
     // Keying by other programs over CAT (Hamlib set_ptt): the ONLY implementation of rigctl::PttRequest. An over is TxControl::voice() with the data
     // chain, the "Fireside TX audio" input and the card's power; it keys only while: "Let other programs key" is ticked (never remembered), transmit
-    // is armed, the owning program holds PTT and has talked to us in the last 15 s, at most 2 minutes, in an amateur band with a measured drive level,
+    // is armed, the owning program holds PTT and has talked to us in the last 15 s, at most 5 minutes, in an amateur band with a measured drive level,
     // with the direct FireWire stream running (receive keeps going). Stop, unticking, a radio stop and the program disconnecting all unkey.
     fireside::rigctl::PttRequest* pttRequest();
     QCheckBox* extAllowBox() const { return ext_allow_; }
@@ -131,7 +131,7 @@ private:
     void onPttChanged(); void startVoice(); void connectTrip();
     struct ExtPtt; std::unique_ptr<ExtPtt> ext_; QCheckBox* ext_allow_ = nullptr; QDoubleSpinBox* ext_w_ = nullptr;
     std::atomic<int> ext_owner_{-1}; std::atomic<bool> ext_ptt_{false}, ext_allowed_{false}, ext_over_{false}; std::atomic<qint64> ext_beat_ms_{0};
-    static constexpr qint64 kExtWatchdogMs = 15000; static constexpr double kExtMaxKeyS = 120;
+    static constexpr qint64 kExtWatchdogMs = 15000; static constexpr double kExtMaxKeyS = 300;   // 5 min: every common SSTV mode (PD290 289 s, Scottie DX 269 s); user 2026-11-27
     std::atomic<qint64> ext_watchdog_ms_{kExtWatchdogMs};                       // tests shorten it (setExtWatchdogForTests)
     // ext_m_ orders the end of an over against a re-key from the same program. Once extActive() has said no, the over is closing (latched); a T 1 from
     // its owner from then until the job's completion has run on the GUI thread is held (ext_rekey_) and started there as a new over, never folded into

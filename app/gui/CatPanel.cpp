@@ -1,4 +1,5 @@
 #include "CatPanel.h"
+#include <cmath>
 #include <algorithm>
 #include <QCheckBox>
 #include <QHBoxLayout>
@@ -21,6 +22,10 @@ struct CatPanel::Rx : fireside::rigctl::Backend {
     bool tx_busy() const override { return keyed() || (busy && busy()); }
     void set_freq(double hz) override { rx->setDialHz(hz); }                           // the one tuning path (dialChanged -> RadioPanel -> Tuner)
     void set_mode(int i, double w) override { if (rx->modeIndex() != i) rx->setModeIndex(i); if (w > 0) rx->setFilterWidth(w); }
+    bool strength_db(int& db) const override {                                         // the receiver's S-meter (calibrated dBm), as dB over S9 (-73 dBm)
+        const double dbfs = rx->signalDbfs(); if (!(dbfs > -199)) return false;
+        db = int(std::lround(dbfs + rx->meterOffsetDb() + 73.0)); return true;
+    }
 };
 
 struct CatPanel::Fwd : fireside::rigctl::PttRequest {

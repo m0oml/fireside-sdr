@@ -38,7 +38,7 @@ public:
     Sequencer(std::string my_call, std::string my_grid4, int max_tries = 6);
     // Starting points. Each returns false (and leaves the state alone) if `h` is not something to answer.
     bool reply_to(const Heard& h);        // a double-clicked line: their CQ, or a message to me (any step), or a message to someone else (call them)
-    void call_cq();                       // CQ ME GRID until someone answers
+    void call_cq(const std::string& text = "");   // CQ until someone answers: "CQ ME GRID", or `text` (a directed CQ such as "CQ DX ME GRID", checked by the caller)
     void stop();                          // Idle
     void limit_tries(int n) { limit_ = n; }   // the current message only (e.g. 2 tries to raise a waiting caller); the next step has the normal limit again
     // A decoded message. Returns true if it moved the QSO on (the next message changed).

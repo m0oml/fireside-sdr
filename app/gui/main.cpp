@@ -163,9 +163,14 @@ int main(int argc, char** argv) {
             step("callers: a repeat call refreshes the entry (listed once)", r->callersText().count("EA3ABC") == 1);
             r->addQsoTx("093445", 1500, "EA3ABC M0OML -05"); step("callers: our over to them answers them (removed at once)", !r->callersText().contains("EA3ABC"));
             for (int k = 1; k <= 6; ++k) { r->addDecodedText(QString("0935%1  -6  0.1 1500 ~  M0OML CALL%2X JN11\n").arg(10 + k).arg(k)); clk += 1000; }
-            step("callers: four lines, the newest three and how many more wait", r->callersText().split('\n').size() == 4 && r->callersText().contains("CALL6X") && r->callersText().contains("CALL4X")
-                 && !r->callersText().contains("CALL3X") && r->callersText().contains("and 4 more waiting"));
-            step("callers: the ones not shown are still in the list", r->nextCaller({"CALL6X", "CALL5X", "CALL4X", "CALL3X", "CALL2X", "CALL1X"}).first == "DK0ULR");
+            auto order = [&] { QStringList o; for (const QString& l : r->callersText().split('\n', Qt::SkipEmptyParts)) { const QStringList w = l.split(' ', Qt::SkipEmptyParts); if (w.size() >= 7) o << w[6]; } return o.join(','); };
+            step("queue: first come, first served (DK0ULR first, then the six in order)", order() == "DK0ULR,CALL1X,CALL2X,CALL3X,CALL4X,CALL5X,CALL6X" && r->nextCaller({}).first == "DK0ULR");
+            step("queue: the top not yet tried is next", r->nextCaller({"DK0ULR", "CALL1X"}).first == "CALL2X");
+            r->bumpCaller("CALL3X"); step("queue: up moves a station one place", order() == "DK0ULR,CALL1X,CALL3X,CALL2X,CALL4X,CALL5X,CALL6X");
+            r->bumpCaller("DK0ULR"); step("queue: the top cannot go higher", order().startsWith("DK0ULR,CALL1X"));
+            r->addDecodedText("093520  -6  0.1 1500 ~  M0OML CALL2X JN12\n"); step("queue: a repeat call keeps its place", order() == "DK0ULR,CALL1X,CALL3X,CALL2X,CALL4X,CALL5X,CALL6X" && r->callersText().contains("JN12"));
+            r->dropCaller("CALL4X"); step("queue: x removes a station", !order().contains("CALL4X"));
+            r->addDecodedText("093530  -6  0.1 1500 ~  M0OML CALL4X JN11\n"); step("queue: removed, calling again within 10 min: not listed", !order().contains("CALL4X"));
             r->setQsoPartner("CALL6X"); step("callers: replying to a line (partner set) removes that caller", !r->callersText().contains("CALL6X")); r->setQsoPartner(QString());
             r->endQso("CALL5X", false); step("callers: a QSO given up on takes them off the list", r->nextCaller({}).first != "CALL5X" && !r->callersText().contains("CALL5X"));
             r->addDecodedText("093600  -6  0.1 1500 ~  M0OML CALL5X JN11\n"); step("callers: calling again within 10 min, not listed again", !r->callersText().contains("CALL5X"));
@@ -186,6 +191,20 @@ int main(int argc, char** argv) {
                 clk += 3 * 15000; r->tickCallers(); step("QSO pane: the finished QSO is still there, fading", r->qsoPaneText().contains("DK0ULR -10"));
                 clk += 4 * 15000; r->tickCallers();
                 step("QSO pane: after 6 FT8 cycles the finished QSO is gone, the newer line stays", !r->qsoPaneText().contains("DK0ULR") && r->qsoPaneText().contains("OK1XYZ JO70"));
+                {   // during a QSO: a caller heard calling someone else leaves the queue; a double-click queues at the top instead of breaking off the QSO
+                    bool active = true; r->setQsoActiveSource([&active] { return active; }); r->clearQso(); r->setQsoPartner("DK0ULR");
+                    r->addDecodedText("093845  -9  0.1 1200 ~  M0OML EA3QQQ JN11\n"); step("queue (QSO): a new caller joins", r->callersText().contains("EA3QQQ"));
+                    r->addDecodedText("093900  -9  0.1 1800 ~  CQ OK1XYZ JO70\n093900  -9  0.1 1200 ~  DL1AA EA3QQQ -05\n");
+                    step("queue (QSO): callers heard calling CQ or another station leave", !r->callersText().contains("OK1XYZ") && !r->callersText().contains("EA3QQQ"));
+                    int replies = 0; auto cn = QObject::connect(r, &ReceiverPanel::decodedLineActivated, [&replies](const QString&) { ++replies; });
+                    r->addDecodedText("093915  -8  0.1 1500 ~  M0OML G4AAA IO81\n");
+                    r->activateLine("093915  -9  0.1 2200 ~  CQ SP5ABC KO02", false);
+                    step("queue (QSO): a double-click queues the station at the top, the QSO is not broken off", replies == 0 && r->nextCaller({}).first == "SP5ABC" && r->callersText().contains("queued by hand") == false);
+                    r->addDecodedText("093930  -9  0.1 2200 ~  DL1AA SP5ABC -07\n"); step("queue (QSO): one queued by hand stays when heard working someone else", r->nextCaller({}).first == "SP5ABC");
+                    r->activateLine("093930  -7  0.1 1500 ~  M0OML DK0ULR R-08", false); step("queue (QSO): the partner's own line still replies", replies == 1);
+                    active = false; r->activateLine("093930  -9  0.1 2200 ~  CQ HA1BBB JN86", false); step("queue: outside a QSO a double-click replies at once", replies == 2 && !r->callersText().contains("HA1BBB"));
+                    QObject::disconnect(cn); r->setQsoActiveSource({}); r->clearQso(); r->clearDecoded();
+                }
                 r->clearQso();
             }
             r->setCallersClockForTests({}); r->setDecoderIndex(4); r->clearDecoded(); lp->clearForm();   // (the Log tab entry was filled by those callers)
@@ -824,7 +843,7 @@ int main(int argc, char** argv) {
                                  && (count(1292) - m2) % 2 == 0 && !w.simRadio()->keyed);
                             rx->setDialHz(d0); pump(5);
                         }
-                        {   // a QSO answered from CQ ends; the partner's late 73 must not stop auto mode: back to CQ, and the 73 is not a "caller"
+                        {   // a QSO answered from a single CQ ends: no CQ follows (only Auto CQ calls by itself, user 2026-11-27); the partner's late 73 is not a "caller"
                             tc->autoSeqBox()->setChecked(true); const size_t c0 = count(1292);
                             auto overs = [&](size_t n) { for (int i = 0; i < 1500 && !(count(1292) >= c0 + n && !tc->busy()); ++i) pump(1); pump(30); return count(1292) >= c0 + n; };
                             tc->cqButton()->click(); pump(2);
@@ -833,18 +852,19 @@ int main(int argc, char** argv) {
                             step("late 73: their answer gets our report", tc->messageText().startsWith("DL3BBB M0OML ") && overs(4));
                             rx->addDecodedText(label(wall()) + " -11  0.1 1200 ~  M0OML DL3BBB R-12\n"); pump(2);
                             step("late 73: RR73 sent", tc->messageText() == "DL3BBB M0OML RR73" && overs(6));
-                            for (int i = 0; i < 1500 && !tc->messageText().startsWith("CQ "); ++i) pump(1);
-                            step("late 73: back to CQ when nobody else waits", tc->messageText().startsWith("CQ ") && tc->qsoText().startsWith("Calling CQ"));
+                            for (int i = 0; i < 3000 && !(rx->qsoPaneText().contains(QString::fromUtf8("QSO with DL3BBB done")) && !tc->busy() && !tc->sendQueued()); ++i) pump(1);   // its RR73 tries run out: the QSO ends
+                            pump(60);
+                            step("late 73: QSO done; without Auto CQ no CQ follows", !tc->qsoText().startsWith("Calling CQ") && !tc->sendQueued() && !tc->busy());
                             rx->addDecodedText(label(wall()) + " -11  0.1 1200 ~  M0OML DL3BBB 73\n"); pump(5);
-                            step("late 73: their 73 is not a waiting caller, and CQ carries on", rx->nextCaller({}).first != "DL3BBB" && tc->qsoText().startsWith("Calling CQ"));
+                            step("late 73: their 73 is not a waiting caller, and nothing is sent", rx->nextCaller({}).first != "DL3BBB" && !tc->sendQueued() && !tc->busy());
                             {   const QString qp = rx->qsoPaneText(); const int i73 = qp.indexOf("M0OML DL3BBB 73"), idone = qp.indexOf(QString::fromUtf8("QSO with DL3BBB done"));
                                 const QString between = i73 >= 0 && idone > i73 ? qp.mid(i73, idone - i73) : QString();
                                 step("late 73: shown inside that QSO's block, just above its done line", i73 >= 0 && idone > i73 && between.count('\n') == 1 && qp.count("M0OML DL3BBB 73") == 1); }
                             QPushButton* sb2 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb2 = bt;
                             if (sb2) sb2->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
                         }
-                        {   // a station we gave up on answers our CQ again and goes silent again: after the second give-up, CQ carries on (it stopped)
-                            tc->autoSeqBox()->setChecked(true); tc->setMaxTriesForTests(2);
+                        {   // Auto CQ: a station we gave up on answers our CQ again and goes silent again: after the second give-up, CQ carries on (it stopped)
+                            tc->autoSeqBox()->setChecked(true); tc->setMaxTriesForTests(2); tc->attendedBox()->setChecked(true);   // Auto CQ on: only it goes back to CQ
                             auto until = [&](const std::function<bool()>& f) { for (int i = 0; i < 6000 && !f(); ++i) pump(1); return f(); };
                             tc->ftHzBox()->setValue(1200); tc->cqButton()->click(); pump(2);
                             step("give-up twice: CQ goes out", until([&] { return tc->busy(); }));

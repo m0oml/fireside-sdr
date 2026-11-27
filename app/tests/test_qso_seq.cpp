@@ -3,6 +3,7 @@
 #include <cstring>
 #include "fireside/qso_seq.h"
 #include "fireside/tx_control.h"
+#include "fireside/tx_render.h"
 #include "test_util.h"
 using namespace fireside;
 namespace { seq::Heard H(const char* t, int snr = -10) { return seq::parse(t, snr); } }
@@ -162,4 +163,11 @@ TEST(seq_cq_picks_a_clear_frequency) {
     const double f4 = seq::clear_tx_hz({{1190, 0}}, 0, 1200, true); CHECK(f4 + 83.3 + 15 <= 1190 || f4 >= 1190 + 83.3 + 15);   // FT4 is wider
     CHECK_EQ(seq::line_parity("093015 -10  0.1 1200 ~  CQ X", false), 1); CHECK_EQ(seq::line_parity("093000 -10", false), 0);
     CHECK_EQ(seq::line_parity("093007 -10", true), 1); CHECK_EQ(seq::line_parity("S003 x", false), 1);
+}
+TEST(seq_directed_cq_goes_out_as_typed_and_is_answered_as_usual) {
+    seq::Sequencer s("M0OML", "IO92");
+    s.call_cq("CQ DX M0OML IO92"); CHECK_EQ(s.next_message(), std::string("CQ DX M0OML IO92")); CHECK(s.stage() == seq::Stage::Cq);
+    CHECK(tx::ft_message_ok("CQ DX M0OML IO92")); CHECK(tx::ft_message_ok("CQ ASIA M0OML IO92")); CHECK(!tx::ft_message_ok("CQ CQ DX M0OML IO92"));   // FT8 carries one word of up to 4 letters
+    CHECK(s.heard(H("M0OML JA1ABC PM95", -18))); CHECK_EQ(s.dx(), std::string("JA1ABC")); CHECK_EQ(s.next_message(), std::string("JA1ABC M0OML -18"));
+    s.stop(); s.call_cq(); CHECK_EQ(s.next_message(), std::string("CQ M0OML IO92"));                                   // empty: the plain CQ
 }

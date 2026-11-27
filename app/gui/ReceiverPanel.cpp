@@ -40,6 +40,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QTimer>
+#include <QToolButton>
 #include <QStyle>
 #include <QRegularExpression>
 #include <QFile>
@@ -135,14 +136,25 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
       qso_text_ = new QPlainTextEdit; qso_text_->setReadOnly(true); qso_text_->setMaximumBlockCount(400); qso_text_->setPlaceholderText("Your QSOs: what is sent to you, and what you send"); qso_text_->setVisible(false);
       connect(qso_text_->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int, int mx) { qso_text_->verticalScrollBar()->setValue(mx); });   // always follows the newest line
       qso_text_->setToolTip("Only what concerns you: lines addressed to your call, and your own transmissions (TX). Everything else on the band (other stations' calls, the station you are working talking to someone else) stays in the decoder pane. It always scrolls to the newest line. Double-click a line to reply.");
-      callers_ = new QPlainTextEdit; callers_->setReadOnly(true); callers_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff); callers_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); callers_->setLineWrapMode(QPlainTextEdit::NoWrap); callers_->setVisible(false);
-      callers_->setPlaceholderText("Stations calling you stay here until you answer them"); callers_->setFont(dec_text_->font());
-      callers_->setToolTip("Everyone who has called your call stays here, fading, until you answer them (they then move to the QSO pane) or they have gone unanswered for 6 FT8 / 10 FT4 cycles. Double-click one to reply.");
-      { const QFontMetrics fm(callers_->font()); callers_->setFixedHeight(4 * fm.lineSpacing() + int(2 * callers_->document()->documentMargin()) + 2 * callers_->frameWidth() + 2); }
+      {   // the queue: a title and up to four rows (more scroll), each [up] [x] line | tag info
+        callers_ = new QFrame; callers_->setVisible(false); callers_->setObjectName("queueBox");
+        auto* qv = new QVBoxLayout(callers_); qv->setContentsMargins(0, 0, 0, 0); qv->setSpacing(2);
+        queue_title_ = new QLabel("QUEUE  (empty: stations calling you wait here)"); queue_title_->setStyleSheet("color:#8b93a7; font-size:8pt; font-weight:bold;");
+        queue_title_->setToolTip("First come, first served: the top station is worked next when a QSO ends (auto mode). \u25B2 moves a station up one place, \u2715 removes it (not listed again for 10 minutes), "
+                                 "double-click a station to reply now. During a QSO, a double-click on a decode puts that station at the top instead of breaking off the QSO; "
+                                 "a station that called you and is then heard calling someone else leaves the queue.");
+        auto* rows = new QWidget; rows->setObjectName("queueRows"); queue_rows_ = new QVBoxLayout(rows); queue_rows_->setContentsMargins(0, 0, 0, 0); queue_rows_->setSpacing(1); queue_rows_->addStretch(1);
+        auto* sc = new QScrollArea; sc->setObjectName("queueScroll"); sc->setWidget(rows); sc->setWidgetResizable(true); sc->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        sc->setStyleSheet("#queueScroll { background: #0b0e14; border: 1px solid #2a3442; border-radius: 6px; } #queueRows { background: #0b0e14; }");   // the decoder box's dark background
+        sc->viewport()->setStyleSheet("background: #0b0e14;");
+        { const QFontMetrics fm(dec_text_->font()); sc->setFixedHeight(4 * (fm.lineSpacing() + 8) + 6); }
+        qv->addWidget(queue_title_); qv->addWidget(sc);
+      }
       dec_left_ = new QWidget; { auto* lv = new QVBoxLayout(dec_left_); lv->setContentsMargins(0, 0, 0, 0); lv->setSpacing(4); lv->addWidget(callers_); lv->addWidget(dec_text_, 1); }
       { auto* ct = new QTimer(this); ct->setInterval(1000); connect(ct, &QTimer::timeout, this, &ReceiverPanel::tickCallers); ct->start(); }
       { auto* sp = new QSplitter(Qt::Horizontal); dec_left_->setMinimumWidth(340); dec_left_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding); sp->addWidget(dec_left_); sp->addWidget(qso_text_); sp->setStretchFactor(0, 3); sp->setStretchFactor(1, 2); sp->setSizes({600, 400}); sp->setChildrenCollapsible(false); dec_split_ = sp; body->addWidget(sp, 1); } dec_card_ = theme::makeCard("Decoder", body, true); root->addWidget(dec_card_);   // expand: the list fills the card beside the transmit card
-      dec_text_->viewport()->installEventFilter(this); qso_text_->viewport()->installEventFilter(this); callers_->viewport()->installEventFilter(this);
+      dec_text_->viewport()->installEventFilter(this); qso_text_->viewport()->installEventFilter(this);
+      dec_text_->viewport()->setCursor(Qt::ArrowCursor); qso_text_->viewport()->setCursor(Qt::ArrowCursor);   // a pointer, not a text cursor (user 2026-11-27)
       connect(dec_mode_, &QComboBox::activated, this, [this](int i) { setDecoderIndex(i); });
       connect(dec_tone_, &QSpinBox::editingFinished, this, [this] { rebuildDecoder(); applySettings(); });
       connect(clear, &QPushButton::clicked, this, [this] { clearDecoded(); }); }
@@ -1000,6 +1012,10 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
         if (m.cq) emit cqDecoded(QString::fromStdString(m.from));
         if (source_live_) emit ftxLine(ln, dialHz(), decoderIndex() == 5 ? QString("FT4") : QString("FT8"));
         const bool to_me = !m.cq && is_me(m.to, me) && !is_me(m.from, me);
+        if (!to_me && !is_me(m.from, me) && qsoActiveNow() && (m.cq || (!m.to.empty() && !is_me(m.to, me)))) {   // during a QSO, a station that called us is heard calling someone else (or CQ): it has moved on
+            const QString fb = QString::fromStdString(fireside::qrz::base_call(m.from));
+            for (int qi = 0; qi < caller_list_.size(); ++qi) if (caller_list_[qi].call == fb && !caller_list_[qi].manual) { caller_list_.removeAt(qi); renderCallers(); break; }
+        }
         if (to_me) {
             QTextCursor c(blk); c.mergeBlockFormat(hb); c.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor); c.mergeCharFormat(hf);
             emit callerDecoded(ln);
@@ -1023,16 +1039,31 @@ void ReceiverPanel::addDecodedText(const QString& t0) {
 qint64 ReceiverPanel::callersNow() const { return callers_now_ ? callers_now_() : QDateTime::currentMSecsSinceEpoch(); }
 void ReceiverPanel::addCaller(const QString& call, const QString& line) {
     const qint64 now = callersNow();
-    if (moved_on_.contains(call)) { if (now - moved_on_.value(call) < kMovedOnMs) return; moved_on_.remove(call); }   // worked or given up on: not again for 10 min
-    removeCaller(call); caller_list_.append({call, line, info_by_call_.value(call), tag_by_call_.value(call, -1), callersNow()}); renderCallers();       // a repeat call refreshes the entry (and moves it to the newest place)
+    if (moved_on_.contains(call)) { if (now - moved_on_.value(call) < kMovedOnMs) return; moved_on_.remove(call); }   // worked, given up on or removed: not again for 10 min
+    for (auto& c : caller_list_) if (c.call == call) { c.line = line; c.ms = now; c.manual = false; renderCallers(); return; }   // a repeat call: its newest line, same place
+    caller_list_.append({call, line, info_by_call_.value(call), tag_by_call_.value(call, -1), now, false}); renderCallers();      // a new caller joins at the bottom
 }
+void ReceiverPanel::queueTop(const QString& call, const QString& line) {
+    if (call.isEmpty() || call == qso_partner_) return;
+    moved_on_.remove(call);                                                                       // the operator's own choice wins over the 10-minute rest
+    for (int i = 0; i < caller_list_.size(); ++i) if (caller_list_[i].call == call) { caller_list_.removeAt(i); break; }
+    caller_list_.prepend({call, line, info_by_call_.value(call), tag_by_call_.value(call, -1), callersNow(), true}); renderCallers();
+}
+void ReceiverPanel::bumpCaller(const QString& call) {
+    for (int i = 1; i < caller_list_.size(); ++i) if (caller_list_[i].call == call) { caller_list_.swapItemsAt(i, i - 1); renderCallers(); return; }
+}
+void ReceiverPanel::dropCaller(const QString& call) { if (call.isEmpty()) return; removeCaller(call); moved_on_.insert(call, callersNow()); }
 void ReceiverPanel::removeCaller(const QString& call) {
     if (call.isEmpty()) return;
     for (int i = 0; i < caller_list_.size(); ++i) if (caller_list_[i].call == call) { caller_list_.removeAt(i); renderCallers(); return; }
 }
-void ReceiverPanel::clearCallers() { caller_list_.clear(); moved_on_.clear(); if (callers_) callers_->clear(); }
-void ReceiverPanel::tickCallers() { fadeQsos(); }                                  // the callers stay until worked or tried (no time limit, no fade)
-QString ReceiverPanel::callersText() const { return callers_ ? callers_->toPlainText() : QString(); }
+void ReceiverPanel::clearCallers() { caller_list_.clear(); moved_on_.clear(); renderCallers(); }
+void ReceiverPanel::tickCallers() { fadeQsos(); }                                  // the queue keeps its stations until worked, removed or moved on (no time limit)
+QString ReceiverPanel::callersText() const {
+    QStringList out;
+    for (const auto& c : caller_list_) { QString l = c.line; if (c.tag >= 0 || !c.info.isEmpty()) l += kInfoSep + (c.tag >= 0 ? QString(fireside::award::tag_text(c.tag)) : QString()).leftJustified(kTagCols) + c.info; out << l; }
+    return out.join('\n');
+}
 static QColor tagColour(int tag) {
     switch (tag) {
         case 0: return QColor("#3ddc84"); case 1: return QColor("#ffb454"); case 2: return QColor("#8b93a7");
@@ -1042,24 +1073,44 @@ static QColor tagColour(int tag) {
     }
 }
 void ReceiverPanel::renderCallers() {
-    if (!callers_) return;
-    while (caller_list_.size() > kMaxCallers) caller_list_.removeFirst();                     // a very busy pile-up: the oldest go
-    callers_->clear(); QTextCursor c(callers_->document());
-    const int n = int(caller_list_.size()), shown = n > 4 ? 3 : n, from = n - shown;          // four lines: the newest four, or the newest three and a count
-    for (int i = from; i < n; ++i) {
-        QTextCharFormat f; f.setForeground(QColor("#ffffff")); f.setFontWeight(QFont::Bold);   // no fading: every waiting caller looks the same
-        QTextBlockFormat bf; bf.setBackground(QColor("#7a1f2b"));
-        if (i > from) c.insertBlock(); c.setBlockFormat(bf); c.insertText(caller_list_[i].line, f);
+    if (!queue_rows_) return;
+    while (caller_list_.size() > kMaxCallers) caller_list_.removeLast();                      // a very busy pile-up: the latest arrivals wait outside
+    while (queue_rows_->count() > 1) { QLayoutItem* it = queue_rows_->takeAt(0); if (it->widget()) it->widget()->deleteLater(); delete it; }   // (the stretch stays last)
+    const int n = int(caller_list_.size());
+    queue_title_->setText(n ? QString("QUEUE  (%1 waiting: the top is next)").arg(n) : QString("QUEUE  (empty: stations calling you wait here)"));
+    for (int i = 0; i < n; ++i) {
         const Caller& cl = caller_list_[i];
-        if (cl.tag >= 0 || !cl.info.isEmpty()) {                                                      // the same "| NEW  Name, City, Country, km" tail as the decoder lines
-            QTextCharFormat fd; fd.setForeground(QColor("#aab3c5")); fd.setFontWeight(QFont::Normal);
-            c.insertText(kInfoSep, fd);
-            QTextCharFormat ft = fd; if (cl.tag >= 0) { ft.setForeground(tagColour(cl.tag)); if (cl.tag >= fireside::award::kNewDxcc) ft.setFontWeight(QFont::Bold); }
-            c.insertText((cl.tag >= 0 ? QString(fireside::award::tag_text(cl.tag)) : QString()).leftJustified(kTagCols), ft);
-            c.insertText(cl.info, fd);
+        auto* row = new QFrame; row->setObjectName("queueRow"); row->setCursor(Qt::ArrowCursor);
+        row->setStyleSheet(cl.manual ? "#queueRow { background:#2a3a5a; }" : "#queueRow { background:#7a1f2b; }");   // queued by hand: blue; called us: red
+        auto* h = new QHBoxLayout(row); h->setContentsMargins(4, 1, 4, 1); h->setSpacing(4);
+        auto* up = new QToolButton; up->setText(QString::fromUtf8("▲")); up->setToolTip("Move up one place"); up->setEnabled(i > 0); up->setAutoRaise(true);
+        auto* x = new QToolButton; x->setText(QString::fromUtf8("✕")); x->setToolTip("Remove from the queue (not listed again for 10 minutes)"); x->setAutoRaise(true);
+        auto* lab = new QLabel; lab->setFont(dec_text_->font()); lab->setTextFormat(Qt::RichText); lab->setCursor(Qt::ArrowCursor);
+        QString html = QString("<span style='color:#ffffff; font-weight:bold;'>%1</span>").arg(cl.line.toHtmlEscaped().replace(' ', "&nbsp;"));
+        if (cl.tag >= 0 || !cl.info.isEmpty()) {
+            html += QString("<span style='color:#aab3c5;'>%1</span>").arg(kInfoSep.toHtmlEscaped().replace(' ', "&nbsp;"));
+            if (cl.tag >= 0) html += QString("<span style='color:%1;%2'>%3</span>").arg(tagColour(cl.tag).name(), cl.tag >= fireside::award::kNewDxcc ? " font-weight:bold;" : "",
+                                                                                      QString(fireside::award::tag_text(cl.tag)).leftJustified(kTagCols).toHtmlEscaped().replace(' ', "&nbsp;"));
+            html += QString("<span style='color:#aab3c5;'>%1</span>").arg(cl.info.toHtmlEscaped());
         }
+        if (cl.manual) html += "<span style='color:#9fb4d8;'>&nbsp;&nbsp;(queued by hand)</span>";
+        lab->setText(html); lab->setProperty("queue_line", cl.line); lab->installEventFilter(this); row->setProperty("queue_line", cl.line); row->installEventFilter(this);
+        h->addWidget(up); h->addWidget(x); h->addWidget(lab, 1);
+        const QString call = cl.call;
+        connect(up, &QToolButton::clicked, this, [this, call] { bumpCaller(call); });
+        connect(x, &QToolButton::clicked, this, [this, call] { dropCaller(call); });
+        queue_rows_->insertWidget(queue_rows_->count() - 1, row);
     }
-    if (n > 4) { QTextCharFormat f; f.setForeground(QColor("#aab3c5")); c.insertBlock(); c.setBlockFormat(QTextBlockFormat()); c.insertText(QString("... and %1 more waiting").arg(n - shown), f); }
+}
+void ReceiverPanel::activateLine(const QString& line0, bool from_queue) {
+    QString line = line0; if (const int sep = line.indexOf(kInfoSep); sep >= 0) line = line.left(sep);
+    if (line.trimmed().isEmpty()) return;
+    if (!from_queue && qsoActiveNow()) {                                                          // during a QSO: queue them at the top, the QSO carries on
+        const auto m = fireside::logbook::parse_ftx_message(fireside::logbook::ftx_line_text(line.toStdString()));
+        const QString b = m.ok ? QString::fromStdString(fireside::qrz::base_call(m.from)) : QString();
+        if (!b.isEmpty() && b != qso_partner_ && !is_me(m.from, myCall())) { queueTop(b, line.trimmed()); note_ = QString("%1 queued at the top: answered when this QSO ends").arg(b); updateStatus(); return; }
+    }
+    emit decodedLineActivated(line);
 }
 bool ReceiverPanel::qsoPaneAtBottom(int* maximum) const {
     if (!qso_text_) return true; auto* sb = qso_text_->verticalScrollBar(); if (maximum) *maximum = sb->maximum(); return sb->value() == sb->maximum();
@@ -1182,8 +1233,8 @@ QList<QPair<double, QString>> ReceiverPanel::recentFtx(qint64 window_ms) {
     QList<QPair<double, QString>> out; for (const auto& h : heard_ftx_) if (now - h.ms <= window_ms) out.append({h.hz, h.label});
     return out;
 }
-QPair<QString, QString> ReceiverPanel::nextCaller(const QSet<QString>& skip) const {   // the newest waiting caller not tried yet: {call, decoded line}
-    for (int i = caller_list_.size() - 1; i >= 0; --i) if (!skip.contains(caller_list_[i].call) && caller_list_[i].call != qso_partner_) return {caller_list_[i].call, caller_list_[i].line};
+QPair<QString, QString> ReceiverPanel::nextCaller(const QSet<QString>& skip) const {   // the top of the queue not tried yet: {call, decoded line}
+    for (int i = 0; i < caller_list_.size(); ++i) if (!skip.contains(caller_list_[i].call) && caller_list_[i].call != qso_partner_) return {caller_list_[i].call, caller_list_[i].line};
     return {};
 }
 void ReceiverPanel::addQsoTx(const QString& utc, int hz, const QString& msg) {
@@ -1312,12 +1363,14 @@ void ReceiverPanel::showCallInfo(const QString& call, const QString& text) {
     }
 }
 bool ReceiverPanel::eventFilter(QObject* o, QEvent* e) {
-    if ((o == dec_text_->viewport() || (qso_text_ && o == qso_text_->viewport()) || (callers_ && o == callers_->viewport())) && e->type() == QEvent::MouseButtonDblClick && isFtIndex(decoderIndex())) {   // FT8 / FT4: double-click a decoded line -> reply (+ the Log tab)
-        auto* view = o == dec_text_->viewport() ? dec_text_ : (callers_ && o == callers_->viewport() ? callers_ : qso_text_);
+    if (e->type() == QEvent::MouseButtonDblClick && isFtIndex(decoderIndex()) && o->property("queue_line").isValid()) {   // a queue row: reply now
+        activateLine(o->property("queue_line").toString(), true); return true;
+    }
+    if ((o == dec_text_->viewport() || (qso_text_ && o == qso_text_->viewport())) && e->type() == QEvent::MouseButtonDblClick && isFtIndex(decoderIndex())) {   // FT8 / FT4: double-click a decoded line -> reply (+ the Log tab), or queue it during a QSO
+        auto* view = o == dec_text_->viewport() ? dec_text_ : qso_text_;
         const auto* me = static_cast<QMouseEvent*>(e); QString line = view->cursorForPosition(me->position().toPoint()).block().text();
         if (view == qso_text_ && line.contains("  TX ")) return true;                                               // our own transmission: nothing to answer
-        if (const int sep = line.indexOf(kInfoSep); sep >= 0) line = line.left(sep);
-        if (!line.trimmed().isEmpty()) emit decodedLineActivated(line);
+        activateLine(line, false);
         return true;
     }
     return QWidget::eventFilter(o, e);

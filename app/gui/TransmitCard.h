@@ -63,6 +63,9 @@ public:
     void setMaxTriesForTests(int n) { test_tries_ = n; }   // smoke tests: a QSO gives up after n tries (not 6)
     QSpinBox* ftHzBox() const { return ft_hz_; } QCheckBox* ftClearBox() const { return ft_clear_; }
     QPushButton* cqButton() const { return cq_; }
+    QPushButton* autoCqButton() const { return auto_cq_; }   // Auto CQ: the Attended CQ cycle on a button (pressed = on)
+    QLineEdit* cqTextBox() const { return cq_text_; }
+    QString cqText();                                    // the CQ box (prefilled "CQ MYCALL GRID"; a directed CQ such as "CQ DX MYCALL GRID"); "" with the reason reported if it cannot be sent
     double recentTxPowerW() const;                       // mean forward power of our last FT8/FT4 over if it was in the last 10 minutes, else 0 (the log's TX_PWR)
     PowerMeter* powerMeter() const { return pm_; }
     // The card is only the owner: these are the pieces the window places. key: lamp, Stop, status. atu: tune power, threshold, Tune, Restore. calibration: a fold with Measure drive and Test tone.
@@ -77,6 +80,7 @@ public:
     QWidget* otherProgramsPart() const { return ext_part_; } QLabel* lampLabel() const { return lamp_; } QDialog* tunerDialog() const { return tuner_dialog_; } QPushButton* tunerButton() const { return tuner_btn_; } QPushButton* stopButton() const { return stop_; }
     QWidget* digitalPart() const { return digi_part_; } QWidget* voicePart() const { return voice_part_; }
     QString qsoText() const;                             // the sequencer's one-line state ("" if idle)
+    bool qsoActive() const { return seq_ && seq_->active() && seq_->stage() != fireside::seq::Stage::Cq; }   // working a station (not calling CQ, not idle)
     QString statusText() const;
     // CW (semi break-in): the KEY jack's paddle or straight key keys an over while the screen is in CW, transmit is armed and "Paddle keys" is
     // ticked; typed text (or a memory) goes out with Send. TxControl::cw() does the keying (the gate, limits and clamp); see TransmitCardCw.cpp.
@@ -141,7 +145,7 @@ private:
     void extCancel();                                                              // Stop, untick, radio stop, close: release and drop any held re-key
     void extOverEnded(bool may_restart);                                           // GUI thread, from run()'s completion of the program's over
     bool extActive() const; bool requestExt(int client, bool on); void extHeartbeat(int client);
-    std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_; void noteSeqEnd(bool may_continue = true); void autoNext(); QSet<QString> auto_tried_; bool auto_reply_ = false, from_cq_ = false, follow_pending_ = false; QPushButton *tune2_ = nullptr, *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
+    std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; QLineEdit* cq_text_ = nullptr; QString cq_auto_; QPushButton* auto_cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_; void noteSeqEnd(bool may_continue = true); void autoNext(); QSet<QString> auto_tried_; bool auto_reply_ = false, from_cq_ = false, follow_pending_ = false; QPushButton *tune2_ = nullptr, *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
     QString odd_call_; qint64 odd_call_ms_ = 0;
     // Attended CQ (the box that was "Repeat"): kAttCalls calls in one slot parity, then kAttPauseSlots or more silent slots (to the next slot of the
     // other parity), then CQ again in that other parity. A message typed by hand is sent kAttCalls times, then back to CQ; a QSO that ends goes back to CQ.
@@ -162,7 +166,7 @@ private:
     QDoubleSpinBox* cw_w_ = nullptr; QLineEdit* cw_text_ = nullptr; QPushButton *cw_send_ = nullptr, *cw_stop_ = nullptr; QLabel* cw_lights_ = nullptr; QTimer* cw_timer_ = nullptr;
     std::unique_ptr<class CwSidetone> cw_tone_; std::shared_ptr<fireside::cwk::KeyWatcher> cw_keys_; bool cw_over_ = false; std::function<QStringList()> cw_mems_;
     void buildCw(); void cwTick(); void startCw(const QString& text); void saveCw(); void loadCw(); bool cwWanted() const;
-    bool rx_hold_ = false;
+    bool rx_hold_ = false; bool auto_hold_ = false;   // auto_hold_: after Stop, nothing answers by itself until the operator sends, calls CQ or double-clicks
     // VOX + monitor
     QCheckBox *vox_ = nullptr, *anti_vox_ = nullptr, *monitor_ = nullptr; QSpinBox *vox_thr_ = nullptr, *vox_hang_ = nullptr; QLabel* vox_lvl_ = nullptr; QTimer* vox_timer_ = nullptr;
     std::shared_ptr<fireside::vox::VoxInput> vox_in_; class PcAudioFeed* mon_feed_ = nullptr; std::atomic<bool> vox_kill_{false}; std::string vox_kill_why_; std::mutex vox_m_; double voice_timeout_s_ = 180; bool pc_audio_ = true;

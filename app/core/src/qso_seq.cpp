@@ -79,7 +79,7 @@ Sequencer::Sequencer(std::string my_call, std::string my_grid4, int max_tries) :
 bool Sequencer::to_me(const Heard& h) const { return !h.cq && base(h.to) == base(me_); }
 void Sequencer::set(Stage s, std::string m) { st_ = s; msg_ = std::move(m); tries_ = 0; again_ = false; limit_ = 0; }
 void Sequencer::stop() { st_ = Stage::Idle; msg_.clear(); tries_ = 0; }
-void Sequencer::call_cq() { dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; rr73_done_ = false; reopened_ = 0; set(Stage::Cq, "CQ " + me_ + " " + grid_); }
+void Sequencer::call_cq(const std::string& text) { dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; rr73_done_ = false; reopened_ = 0; set(Stage::Cq, text.empty() ? "CQ " + me_ + " " + grid_ : text); }
 
 bool Sequencer::reply_to(const Heard& h) {
     if (!h.ok || h.from.empty() || base(h.from) == base(me_)) return false;

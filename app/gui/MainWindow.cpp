@@ -117,7 +117,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
             for (int i = 0; i < 4; ++i) { auto* b = new QPushButton(rx_text[i]); b->setCheckable(true); b->setProperty("ant", rx_names[i]); b->setCursor(Qt::PointingHandCursor);
                 b->setToolTip(i == 3 ? "Receive on the RX1 IN socket (receive only), for this band" : QString("Receive on %1 for this band").arg(rx_text[i])); rxg->addButton(b, i); g->addWidget(b, 0, i + 1); }
             for (int i = 0; i < 3; ++i) { auto* b = new QPushButton(QString("ANT%1").arg(i + 1)); b->setCheckable(true); b->setCursor(Qt::PointingHandCursor);
-                b->setToolTip(i == 0 ? "Transmit on ANT1, through the ATU, for this band" : QString("Transmit on ANT%1 for this band: NOT through the ATU (Tune is refused)").arg(i + 1)); txg->addButton(b, i + 1); g->addWidget(b, 1, i + 1); }
+                b->setToolTip(QString("Transmit on ANT%1 for this band (through the ATU, which keeps its tune per antenna)").arg(i + 1)); txg->addButton(b, i + 1); g->addWidget(b, 1, i + 1); }
             auto* note = new QLabel(" "); note->setObjectName("muted"); g->addWidget(note, 1, 4, 1, 2);
             g->addWidget(tx_card_->atuPart(), 2, 0, 1, 6);   // Tune ATU and the Tuner settings button (the rest is in a window)   // the tuner lives with the antennas
             receiver_->setAntennaWidget(w);
@@ -130,7 +130,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
                 for (auto* b : rxg->buttons()) { QSignalBlocker bl(b); b->setChecked(b->property("ant").toString() == want); }
                 if (auto* t = txg->button(antennas_->txAntennaFor(receiver_->dialHz()))) { QSignalBlocker bl(t); t->setChecked(true); }
                 const QString a = antennas_->activeAntenna(); const int tx = antennas_->txAntennaFor(receiver_->dialHz());
-                note->setText(tx == 1 ? "via the ATU" : "no ATU"); note->setToolTip(QString("%1%2").arg(tx == 1 ? "TX through the ATU" : "TX without the ATU").arg(a.isEmpty() ? QString() : "   RX now: " + (a == "RX1IN" ? QString("RX1 IN") : a)));
+                note->setText(QString()); note->setToolTip(QString("TX on ANT%1 through the ATU%2").arg(tx).arg(a.isEmpty() ? QString() : "   RX now: " + (a == "RX1IN" ? QString("RX1 IN") : a)));
             };
             connect(antennas_, &AntennaPanel::choiceChanged, this, redraw); connect(antennas_, &AntennaPanel::choiceChanged, tx_card_, [this] { tx_card_->antennaChanged(); });
             connect(receiver_, &ReceiverPanel::dialChanged, this, redraw); redraw();

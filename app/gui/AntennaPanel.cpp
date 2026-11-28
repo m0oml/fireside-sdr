@@ -21,15 +21,8 @@ AntennaPanel::AntennaPanel(QWidget* parent) : QWidget(parent) {
     size_t n = 0; const fireside::RxBand* bands = fireside::rx_bands(n);
 
     auto* top = new QGridLayout; top->setHorizontalSpacing(12); top->setVerticalSpacing(8);
-    auto_ = new QCheckBox("Switch the receive antenna automatically when the dial changes band"); auto_->setChecked(true);
-    auto_->setToolTip("On: moving the dial into another band switches the radio's RX antenna to that band's choice below (a relay click). Off: the antenna chosen at start-up stays.");
-    default_ = new QComboBox; for (const char* a : kNames) default_->addItem(shown(a), a); default_->setToolTip("Used for bands set to \"Default\" and for every frequency outside the listed bands (broadcast, 4 m etc.)");
-    auto* dl = new QLabel("Default antenna"); dl->setObjectName("dim");
-    top->addWidget(auto_, 0, 0, 1, 3); top->addWidget(dl, 1, 0); top->addWidget(default_, 1, 1); top->setColumnStretch(2, 1);
-    tx_default_ = new QComboBox; for (int a = 1; a <= 3; ++a) tx_default_->addItem(QString("ANT%1%2").arg(a).arg(a == 1 ? " (ATU)" : ""), a);
-    tx_default_->setToolTip("Transmit antenna for bands set to \"Default\" and outside the listed bands. Only ANT1 goes through the ATU.");
-    { auto* tl = new QLabel("Default transmit antenna"); top->addWidget(tl, 3, 0); top->addWidget(tx_default_, 3, 1); }
-    status_ = new QLabel; status_->setObjectName("muted"); status_->setWordWrap(true); top->addWidget(status_, 2, 0, 1, 3);
+    last_rx_.assign(n, QString()); last_tx_.assign(n, 0);
+    status_ = new QLabel; status_->setObjectName("muted"); status_->setWordWrap(true); top->addWidget(status_, 0, 0, 1, 3); top->setColumnStretch(2, 1);
     col->addWidget(theme::makeCard("Antennas by band", top));
 
     auto* lg = new QGridLayout; lg->setHorizontalSpacing(12); lg->setVerticalSpacing(8);
@@ -62,9 +55,11 @@ AntennaPanel::AntennaPanel(QWidget* parent) : QWidget(parent) {
     for (int j = 0; j < fireside::kTxLines; ++j) { auto* h = new QLabel(QString("TX%1").arg(j + 1)); h->setObjectName("dim"); h->setToolTip(QString("Band switch: %1 is on in the ticked bands").arg(kLineNames[j])); grid->addWidget(h, 0, 4 + j, Qt::AlignHCenter); line_hdr_[size_t(j)] = h; }
     for (size_t i = 0; i < n; ++i) {
         auto* name = new QLabel(bands[i].name); auto* range = new QLabel(QString("%1 - %2 MHz").arg(bands[i].lo_hz / 1e6, 0, 'f', 3).arg(bands[i].hi_hz / 1e6, 0, 'f', 3)); range->setObjectName("muted");
-        auto* box = new QComboBox; box->addItem("Default", QString()); for (const char* a : kNames) box->addItem(shown(a), a); box->setMinimumWidth(140);
+        auto* box = new QComboBox; for (const char* a : kNames) box->addItem(shown(a), a); box->addItem("Last", QString("LAST")); box->setMinimumWidth(140);
+        box->setToolTip("The receive antenna on this band: switched to every time the dial comes into the band. Last: the antenna last chosen on this band with the main screen's selector.");
         connect(box, &QComboBox::currentIndexChanged, this, [this] { changed(); });
-        auto* tbox = new QComboBox; tbox->addItem("Default", 0); for (int a = 1; a <= 3; ++a) tbox->addItem(QString("ANT%1%2").arg(a).arg(a == 1 ? " (ATU)" : ""), a); tbox->setMinimumWidth(130);
+        auto* tbox = new QComboBox; for (int a = 1; a <= 3; ++a) tbox->addItem(QString("ANT%1").arg(a), a); tbox->addItem("Last", 0); tbox->setMinimumWidth(130);
+        tbox->setToolTip("The transmit antenna on this band (all three go through the ATU). Last: the one last chosen on this band with the main screen's selector (ANT1 until then).");
         connect(tbox, &QComboBox::currentIndexChanged, this, [this] { changed(); });
         grid->addWidget(name, int(i) + 1, 0); grid->addWidget(range, int(i) + 1, 1); grid->addWidget(box, int(i) + 1, 2); grid->addWidget(tbox, int(i) + 1, 3);
         band_label_.push_back(name); band_box_.push_back(box); tx_box_.push_back(tbox);
@@ -78,14 +73,11 @@ AntennaPanel::AntennaPanel(QWidget* parent) : QWidget(parent) {
     }
     grid->setColumnStretch(4 + fireside::kTxLines, 1);
     auto* note = new QLabel("The radio's band-pass filters follow the frequency by themselves. The choice is applied only while the radio is running; at start-up the antenna for the current band is used. "
-                            "RX1 IN is the separate receive-only socket. The transmit antenna is set at the start of each over; only ANT1 goes through the ATU "
-                            "(Tune and Restore ATU are refused on a band set to ANT2 / ANT3). Nothing here transmits.");
+                            "Outside the listed bands the antenna stays as it is. RX1 IN is the separate receive-only socket. The transmit antenna is set at the start of each over; "
+                            "the ATU sits in front of all three jacks and keeps its tune per band and per antenna. Nothing here transmits.");
     note->setObjectName("muted"); note->setWordWrap(true);
     auto* gbox = new QVBoxLayout; gbox->addLayout(grid); gbox->addWidget(note);
     col->addWidget(theme::makeCard("Bands", gbox)); col->addStretch(1);
-    connect(auto_, &QCheckBox::toggled, this, [this] { changed(); });
-    connect(default_, &QComboBox::currentIndexChanged, this, [this] { changed(); });
-    connect(tx_default_, &QComboBox::currentIndexChanged, this, [this] { changed(); });
     load(); updateStatus(); updateLineColumns(); updateLineStatus();
 }
 
@@ -119,52 +111,61 @@ void AntennaPanel::updateLineStatus() {
     }
 }
 
-QString AntennaPanel::antennaFor(double hz) const {
+QString AntennaPanel::antennaFor(double hz) const {          // the band's fixed antenna; Last: the one last chosen there; with none (or outside the bands): stay as it is
     const int b = fireside::rx_band_index(hz);
-    if (b >= 0) { const QString a = band_box_[size_t(b)]->currentData().toString(); if (!a.isEmpty()) return a; }
-    return default_->currentData().toString();
+    if (b >= 0) { const QString a = band_box_[size_t(b)]->currentData().toString(); if (a != "LAST") return a; if (!last_rx_[size_t(b)].isEmpty()) return last_rx_[size_t(b)]; }
+    return active_.isEmpty() ? QString(last_wanted_.isEmpty() ? "ANT1" : last_wanted_) : active_;
 }
+QString AntennaPanel::lastRxFor(double hz) const { const int b = fireside::rx_band_index(hz); return b >= 0 ? last_rx_[size_t(b)] : QString(); }
 int AntennaPanel::txAntennaFor(double hz) const {
     const int b = fireside::rx_band_index(hz);
-    if (b >= 0) { const int a = tx_box_[size_t(b)]->currentData().toInt(); if (a >= 1 && a <= 3) return a; }
-    const int d = tx_default_->currentData().toInt(); return d >= 1 && d <= 3 ? d : 1;
+    if (b >= 0) { const int a = tx_box_[size_t(b)]->currentData().toInt(); if (a >= 1 && a <= 3) return a; const int l = last_tx_[size_t(b)]; return l >= 1 && l <= 3 ? l : 1; }
+    return last_tx_other_ >= 1 && last_tx_other_ <= 3 ? last_tx_other_ : 1;
 }
-void AntennaPanel::setTxAntennaForDial(double hz, int ant) {
+void AntennaPanel::setTxAntennaForDial(double hz, int ant) {           // the main screen's selector: a fixed band takes the new antenna; a Last band remembers it
     if (ant < 1 || ant > 3) return;
-    const int b = fireside::rx_band_index(hz); QComboBox* box = b >= 0 ? tx_box_[size_t(b)] : tx_default_;
+    const int b = fireside::rx_band_index(hz);
+    if (b < 0) { last_tx_other_ = ant; save(); emit choiceChanged(); return; }
+    QComboBox* box = tx_box_[size_t(b)];
+    if (box->currentData().toInt() == 0) { last_tx_[size_t(b)] = ant; save(); emit choiceChanged(); return; }
     const int i = box->findData(ant); if (i >= 0) box->setCurrentIndex(i);                    // -> changed(): saved, the selector redraws
 }
 QString AntennaPanel::bandNameFor(double hz) const { const int b = fireside::rx_band_index(hz); size_t n = 0; const fireside::RxBand* bands = fireside::rx_bands(n); return b >= 0 ? QString(bands[b].name) : QString("other frequencies"); }
-bool AntennaPanel::autoSwitch() const { return auto_->isChecked(); }
 
 void AntennaPanel::onDial(double hz) { dial_hz_ = hz; evaluate(false); }
 void AntennaPanel::changed() {
     emit choiceChanged(); save(); evaluate(true); }
 void AntennaPanel::evaluate(bool force) {
     const QString want = antennaFor(dial_hz_);
-    if (auto_->isChecked() && (force || want != last_wanted_)) emit antennaWanted(want, bandNameFor(dial_hz_));
+    if (force || want != last_wanted_) emit antennaWanted(want, bandNameFor(dial_hz_));
     last_wanted_ = want; updateStatus();
 }
 void AntennaPanel::setRadioRunning(bool on) { running_ = on; if (!on) active_.clear(); updateStatus(); updateLineStatus(); }
 void AntennaPanel::setActiveAntenna(const QString& name) { active_ = name; updateStatus(); emit choiceChanged(); }
-void AntennaPanel::setAntennaForDial(double hz, const QString& ant) {
-    const int b = fireside::rx_band_index(hz); QComboBox* box = b >= 0 ? band_box_[size_t(b)] : default_;
-    const int i = box->findData(ant); if (i < 0) return;
-    { QSignalBlocker blk(box); box->setCurrentIndex(i); }
-    save(); updateStatus(); last_wanted_ = ant; emit antennaWanted(ant, bandNameFor(hz)); emit choiceChanged();   // an explicit choice switches even with automatic switching off
+void AntennaPanel::setAntennaForDial(double hz, const QString& ant) {   // the main screen's selector: switches now; a fixed band takes it, a Last band remembers it
+    if (QString(ant) != "ANT1" && ant != "ANT2" && ant != "ANT3" && ant != "RX1IN") return;
+    const int b = fireside::rx_band_index(hz);
+    if (b >= 0) {
+        QComboBox* box = band_box_[size_t(b)];
+        if (box->currentData().toString() == "LAST") last_rx_[size_t(b)] = ant;
+        else { const int i = box->findData(ant); if (i < 0) return; QSignalBlocker blk(box); box->setCurrentIndex(i); }
+    }
+    save(); last_wanted_ = ant; updateStatus(); emit antennaWanted(ant, bandNameFor(hz)); emit choiceChanged();
 }
 void AntennaPanel::updateStatus() {
     const QString want = antennaFor(dial_hz_), band = bandNameFor(dial_hz_);
     QString s = QString("Dial in %1: %2 is chosen").arg(band, shown(want));
     if (!running_) s += ". The radio is not running: the antenna is set when it starts.";
-    else if (!active_.isEmpty()) s += active_ == want ? QString(". The radio is using it.") : QString(". The radio is using %1%2.").arg(shown(active_), auto_->isChecked() ? "" : " (automatic switching is off)");
+    else if (!active_.isEmpty()) s += active_ == want ? QString(". The radio is using it.") : QString(". The radio is using %1.").arg(shown(active_));
     status_->setText(s);
 }
 void AntennaPanel::save() const {
     if (qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) return;
-    QSettings q("fireside", "antennas"); q.setValue("auto", auto_->isChecked()); q.setValue("default", default_->currentData().toString());
-    size_t n = 0; const fireside::RxBand* bands = fireside::rx_bands(n); for (size_t i = 0; i < n; ++i) { q.setValue(QString("band/") + bands[i].id, band_box_[i]->currentData().toString()); q.setValue(QString("tx/") + bands[i].id, tx_box_[i]->currentData().toInt()); }
-    q.setValue("tx_default", tx_default_->currentData().toInt());
+    QSettings q("fireside", "antennas"); q.setValue("version", 2);
+    size_t n = 0; const fireside::RxBand* bands = fireside::rx_bands(n);
+    for (size_t i = 0; i < n; ++i) { q.setValue(QString("band/") + bands[i].id, band_box_[i]->currentData().toString()); q.setValue(QString("tx/") + bands[i].id, tx_box_[i]->currentData().toInt());
+                                     q.setValue(QString("last_rx/") + bands[i].id, last_rx_[i]); q.setValue(QString("last_tx/") + bands[i].id, last_tx_[i]); }
+    q.setValue("last_tx_other", last_tx_other_);
     for (int j = 0; j < fireside::kTxLines; ++j) {
         q.setValue(QString("lines/role%1").arg(j + 1), QString(fireside::line_role_id(fireside::LineRole(line_role_[size_t(j)]->currentData().toInt()))));
         for (size_t i = 0; i < n; ++i) q.setValue(QString("lines/tx%1/").arg(j + 1) + bands[i].id, line_band_[i][size_t(j)]->isChecked());
@@ -173,14 +174,20 @@ void AntennaPanel::save() const {
 }
 void AntennaPanel::load() {
     if (qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS")) return;
-    QSettings q("fireside", "antennas"); QSignalBlocker a(auto_), d(default_); auto_->setChecked(q.value("auto", true).toBool());
-    auto pick = [](QComboBox* box, const QString& v) { const int i = box->findData(v); box->setCurrentIndex(i >= 0 ? i : 0); };
-    if (q.contains("default")) pick(default_, q.value("default").toString());
-    else { const int idx = QSettings("fireside", "radio").value("antenna", 0).toInt(); default_->setCurrentIndex(idx >= 0 && idx <= 3 ? idx : 0); }      // first run: the antenna the Radio tab used to remember
+    QSettings q("fireside", "antennas");
+    // Version 1 had a "Default" entry (and a default antenna): such bands become Last, remembering the old default as their last antenna.
+    const bool v1 = q.value("version", 1).toInt() < 2;
+    const QString old_rx = q.value("default", "ANT1").toString(); const int old_tx = q.value("tx_default", 1).toInt();
     size_t n = 0; const fireside::RxBand* bands = fireside::rx_bands(n);
-    for (size_t i = 0; i < n; ++i) { QSignalBlocker b(band_box_[i]); pick(band_box_[i], q.value(QString("band/") + bands[i].id).toString());
-                                     QSignalBlocker t(tx_box_[i]); const int ti = tx_box_[i]->findData(q.value(QString("tx/") + bands[i].id, 0).toInt()); tx_box_[i]->setCurrentIndex(ti >= 0 ? ti : 0); }
-    { QSignalBlocker t(tx_default_); const int ti = tx_default_->findData(q.value("tx_default", 1).toInt()); tx_default_->setCurrentIndex(ti >= 0 ? ti : 0); }
+    for (size_t i = 0; i < n; ++i) {
+        QString r = q.value(QString("band/") + bands[i].id, "LAST").toString(); if (r.isEmpty()) r = "LAST";
+        last_rx_[i] = q.value(QString("last_rx/") + bands[i].id, v1 ? old_rx : QString()).toString();
+        { QSignalBlocker b(band_box_[i]); const int k = band_box_[i]->findData(r); band_box_[i]->setCurrentIndex(k >= 0 ? k : band_box_[i]->findData(QString("LAST"))); }
+        const int t = q.value(QString("tx/") + bands[i].id, 0).toInt();
+        last_tx_[i] = q.value(QString("last_tx/") + bands[i].id, v1 ? old_tx : 0).toInt();
+        { QSignalBlocker b(tx_box_[i]); const int k = tx_box_[i]->findData(t >= 1 && t <= 3 ? t : 0); tx_box_[i]->setCurrentIndex(k >= 0 ? k : 0); }
+    }
+    last_tx_other_ = q.value("last_tx_other", v1 ? old_tx : 1).toInt();
     for (int j = 0; j < fireside::kTxLines; ++j) {
         QSignalBlocker rb(line_role_[size_t(j)]);
         auto role = fireside::line_role_from_id(q.value(QString("lines/role%1").arg(j + 1), "unused").toString().toStdString());

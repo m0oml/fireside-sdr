@@ -1059,7 +1059,9 @@ int main(int argc, char** argv) {
                             auto* ap = w.audioPanel(); const size_t n0 = ops().size(); ap->hearBox()->setChecked(true); ap->testButton()->setChecked(true); pump(20);
                             step("feedback test: the processed voice is heard and nothing goes to the radio", ap->feedbackRunning() && ap->feedbackOutDbfs() > -20 && ops().size() == n0 && !w.simRadio()->keyed);
                             {   // the Audio tab's picture: the processed voice as the over would look (dB, 0 = the set power), strongest in the voice band
-                                for (int i = 0; i < 10; ++i) pump(1);
+                                auto peak = [&](double& hz) { const auto& f = ap->pictureFrameForTests(); size_t pk = 0; for (size_t i = 0; i < f.size(); ++i) if (f[i] > f[pk]) pk = i;
+                                                              hz = f.empty() ? 0 : (double(pk) - double(f.size()) / 2) * 48000.0 / double(f.size()); return f.empty() ? -999.0 : double(f[pk]); };
+                                double hz0 = 0; for (int i = 0; i < 300 && !(peak(hz0) > -25 && hz0 > 150 && hz0 < 3000); ++i) pump(1);   // under load the picture can take a moment
                                 const auto& f = ap->pictureFrameForTests(); size_t pk = 0; for (size_t i = 0; i < f.size(); ++i) if (f[i] > f[pk]) pk = i;
                                 const double hz = f.empty() ? 0 : (double(pk) - double(f.size()) / 2) * 48000.0 / double(f.size());
                                 step("Audio tab picture: the processed voice, near the set power, in the voice band", !f.empty() && f[pk] > -25 && f[pk] < 3 && hz > 150 && hz < 3000 && ops().size() == n0);
@@ -1224,30 +1226,37 @@ int main(int argc, char** argv) {
             }
             auto* at = w.antennas(); step("antennas tab exists with 12 band rows", at && at->bandCount() == 12);
             auto ant_writes = [&] { std::vector<uint32_t> v; for (auto& wr : bus->writes) if ((fireside::sim::be_word(wr.second, 0) & 0x7FFFFFFFu) == 1278u) v.push_back(fireside::sim::be_word(wr.second, 4)); return v; };
-            at->autoBox()->setChecked(true); at->defaultBox()->setCurrentIndex(0);                                        // default ANT1
+            // items per band: ANT1 ANT2 ANT3 RX1 IN Last (receive) / ANT1 ANT2 ANT3 Last (transmit); no default and no auto box (2026-11-28)
             size_t n40 = 0; const fireside::RxBand* bands = fireside::rx_bands(n40); int i40 = -1, i20 = -1; for (size_t i = 0; i < n40; ++i) { if (std::string(bands[i].id) == "40m") i40 = int(i); if (std::string(bands[i].id) == "20m") i20 = int(i); }
-            at->bandBox(i40)->setCurrentIndex(2); at->bandBox(i20)->setCurrentIndex(4);                                   // 40 m -> ANT2, 20 m -> RX1 IN (items: Default, ANT1, ANT2, ANT3, RX1 IN)
-            step("antenna lookup by dial", at->antennaFor(7.074e6) == "ANT2" && at->antennaFor(14.074e6) == "RX1IN" && at->antennaFor(9.6e6) == "ANT1" && at->antennaFor(3.573e6) == "ANT1");
+            for (int i = 0; i < at->bandCount(); ++i) at->bandBox(i)->setCurrentIndex(4);                                  // every band: Last
+            at->bandBox(i40)->setCurrentIndex(1); at->bandBox(i20)->setCurrentIndex(3);                                   // 40 m -> ANT2, 20 m -> RX1 IN
+            step("antenna lookup by dial", at->antennaFor(7.074e6) == "ANT2" && at->antennaFor(14.074e6) == "RX1IN" && at->bandBox(i40)->count() == 5 && at->bandBox(i40)->itemText(4) == "Last");
             rp->disconnectRadio(); rx->setDialHz(7.1e6); const size_t w0 = ant_writes().size();
             step("no antenna writes while the radio is not running", ant_writes().size() == w0);
             step("quick start", rp->quickStart(true) && rp->session().state() == fireside::RadioSession::State::Started);
-            { const auto v = ant_writes(); step("the start-up used the band's antenna (ANT2)", v.size() == w0 + 1 && v.back() == 2u); }
+            for (int i = 0; i < 400 && ant_writes().size() < w0 + 2; ++i) pump(1);                                       // the start-up's switch, and the same again once settled
+            { const auto v = ant_writes(); step("the start-up used the band's antenna (ANT2), sent again once settled", v.size() == w0 + 2 && v.back() == 2u && v[v.size() - 2] == 2u); }
             step("status line shows the antenna", rx->status().contains("RX ANT2"));
-            rx->setDialHz(7.2e6); step("same band: no write", ant_writes().size() == w0 + 1);
-            rx->setDialHz(14.074e6); { const auto v = ant_writes(); step("moving to 20 m switches to RX1 IN (4)", v.size() == w0 + 2 && v.back() == 4u); }
-            rx->setDialHz(14.2e6); step("inside 20 m: still no write", ant_writes().size() == w0 + 2);
-            rx->setDialHz(9.6e6); { const auto v = ant_writes(); step("outside every band: the default (ANT1)", v.size() == w0 + 3 && v.back() == 1u); }
-            at->autoBox()->setChecked(false); rx->setDialHz(7.1e6); step("auto switching off: the dial moves, the antenna stays", ant_writes().size() == w0 + 3);
-            at->autoBox()->setChecked(true); { const auto v = ant_writes(); step("auto switching on again applies the band's antenna", v.size() == w0 + 4 && v.back() == 2u); }
-            at->bandBox(i40)->setCurrentIndex(0); { const auto v = ant_writes(); step("setting the band to Default re-evaluates (ANT1)", v.size() == w0 + 5 && v.back() == 1u); }
-            at->bandBox(i40)->setCurrentIndex(3); { const auto v = ant_writes(); step("a table change takes effect at once (ANT3)", v.size() == w0 + 6 && v.back() == 3u); }
-            at->autoBox()->setChecked(false); at->setAntennaForDial(7.1e6, "ANT2");                                       // the main screen's selector
-            { const auto v = ant_writes(); step("the selector switches at once, even with auto off, and remembers it for the band", v.size() == w0 + 7 && v.back() == 2u && at->antennaFor(7.074e6) == "ANT2"); }
-            at->autoBox()->setChecked(true);
+            rx->setDialHz(7.2e6); step("same band: no write", ant_writes().size() == w0 + 2);
+            rx->setDialHz(14.074e6); { const auto v = ant_writes(); step("moving to 20 m switches to RX1 IN (4)", v.size() == w0 + 3 && v.back() == 4u); }
+            rx->setDialHz(14.2e6); step("inside 20 m: still no write", ant_writes().size() == w0 + 3);
+            rx->setDialHz(9.6e6); step("outside every band: the antenna stays", ant_writes().size() == w0 + 3 && at->antennaFor(9.6e6) == "RX1IN");
+            rx->setDialHz(7.1e6); { const auto v = ant_writes(); step("back to 40 m: its antenna again (ANT2)", v.size() == w0 + 4 && v.back() == 2u); }
+            at->bandBox(i40)->setCurrentIndex(2); { const auto v = ant_writes(); step("a table change takes effect at once (ANT3)", v.size() == w0 + 5 && v.back() == 3u); }
+            at->setAntennaForDial(7.1e6, "ANT2");                                                                          // the main screen's selector on a fixed band
+            { const auto v = ant_writes(); step("the selector switches at once and a fixed band takes it", v.size() == w0 + 6 && v.back() == 2u && at->bandBox(i40)->currentData().toString() == "ANT2"); }
+            at->bandBox(i40)->setCurrentIndex(4); step("a band set to Last with nothing chosen yet keeps the antenna in use", ant_writes().size() == w0 + 6 && at->antennaFor(7.1e6) == "ANT2");
+            at->setAntennaForDial(7.1e6, "ANT3");
+            { const auto v = ant_writes(); step("on a Last band the selector switches and is remembered, the band stays Last", v.size() == w0 + 7 && v.back() == 3u && at->bandBox(i40)->itemText(at->bandBox(i40)->currentIndex()) == "Last" && at->lastRxFor(7.1e6) == "ANT3"); }
+            rx->setDialHz(14.074e6); rx->setDialHz(7.1e6);
+            { const auto v = ant_writes(); step("Last brings back the antenna last chosen on the band", v.size() == w0 + 9 && v[v.size() - 2] == 4u && v.back() == 3u); }
+            step("transmit: a fixed band, and Last = the last chosen (ANT1 until one is)", [&] { at->txBox(i40)->setCurrentIndex(1); const bool a = at->txAntennaFor(7.1e6) == 2;
+                 at->txBox(i40)->setCurrentIndex(3); const bool b = at->txAntennaFor(7.1e6) == 1; at->setTxAntennaForDial(7.1e6, 3); const bool c = at->txAntennaFor(7.1e6) == 3 && at->txBox(i40)->currentIndex() == 3;
+                 at->txBox(i40)->setCurrentIndex(0); return a && b && c && at->txBox(i40)->count() == 4; }());
             for (auto v : ant_writes()) step("only wire values 1..4 were ever written", v >= 1u && v <= 4u);
             step("stop the radio after the antenna checks", rp->stopRadio()); step("status line forgets the antenna", !rx->status().contains("RX ANT"));
             const size_t w1 = ant_writes().size(); rx->setDialHz(14.074e6); step("no antenna writes after stop", ant_writes().size() == w1);
-            at->bandBox(i40)->setCurrentIndex(0); at->bandBox(i20)->setCurrentIndex(0); rx->setDialHz(7.1e6);
+            for (int i = 0; i < at->bandCount(); ++i) at->bandBox(i)->setCurrentIndex(0); rx->setDialHz(7.1e6);
         }
         {   // the rear TX lines as band switches: only SET_AMP_TXn 0 and SET_RCA_TXn 0/1, only while running, following the dial, off at stop
             auto* at = w.antennas(); size_t nb = 0; const fireside::RxBand* bands = fireside::rx_bands(nb); int i80 = -1; for (size_t i = 0; i < nb; ++i) if (std::string(bands[i].id) == "80m") i80 = int(i);

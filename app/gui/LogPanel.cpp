@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "LogPanel.h"
 #include <algorithm>
 #include <cmath>
@@ -410,8 +411,12 @@ int LogPanel::unsentCount() const {
 void LogPanel::logNow() {
     const Qso q = formQso(); std::string rec;
     try { rec = adif_record(q); } catch (const std::exception& e) { setStatus(QString("Not logged: ") + e.what()); return; }
+    const qint64 now_s = QDateTime::currentSecsSinceEpoch();
+    if (auto_logging_ && last_auto_.at > 0 && now_s - last_auto_.at <= kRepeatS && QString::fromStdString(last_auto_.q.call).toUpper() == QString::fromStdString(q.call).toUpper()
+        && band_for_hz(last_auto_.q.freq_hz) == band_for_hz(q.freq_hz) && last_auto_.q.mode == q.mode) { updateRepeat(q); return; }   // the same QSO again: update it
     QDir().mkpath(dir_);
     try { append_adif_file((dir_ + "/log.adi").toStdString(), q, "fireside", "1"); } catch (const std::exception& e) { setStatus(QString("Not logged: cannot write the local copy: ") + e.what()); return; }   // the safety copy comes first
+    if (auto_logging_) last_auto_ = LastAuto{q, rec, now_s};
     if (index_ready_) index_.add(q.call, band_for_hz(q.freq_hz), q.grid, false);                            // worked now, whether or not Wavelog takes it (counted when Wavelog reports it)
     refreshLastContacts(); for (const QString& k : worked_cache_.keys()) if (k.startsWith(QString::fromStdString(q.call).toUpper() + "|")) worked_cache_.remove(k);
     const QString line = QString("%1  %2  %3 kHz  %4").arg(QDateTime::currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss"), QString::fromStdString(q.call)).arg(q.freq_hz / 1e3, 0, 'f', 3).arg(QString::fromStdString(q.mode));
@@ -430,6 +435,46 @@ void LogPanel::logNow() {
     });
 }
 
+void LogPanel::updateRepeat(const Qso& q0) {             // the sequencer completed the same QSO again within kRepeatS: one entry, updated
+    Qso u = q0; u.time_on_utc = last_auto_.q.time_on_utc; u.time_off_utc = QDateTime::currentSecsSinceEpoch();
+    if (u.grid.empty()) u.grid = last_auto_.q.grid; if (u.name.empty()) u.name = last_auto_.q.name;
+    std::string rec; try { rec = adif_record(u); } catch (const std::exception& e) { setStatus(QString("Not updated: ") + e.what()); return; }
+    const std::string old = last_auto_.rec;
+    bool local = false, unsent = false;
+    try { local = replace_adif_record((dir_ + "/log.adi").toStdString(), old, u); } catch (...) {}
+    if (!local) { try { append_adif_file((dir_ + "/log.adi").toStdString(), u, "fireside", "1"); } catch (...) {} }   // the safety copy must hold it, even as a second line
+    try { unsent = replace_adif_record((dir_ + "/unsent.adi").toStdString(), old, u); } catch (...) {}            // never reached Wavelog: the corrected record goes later
+    last_auto_ = LastAuto{u, rec, u.time_off_utc};
+    const QString call = QString::fromStdString(u.call).toUpper(), started = QDateTime::fromSecsSinceEpoch(u.time_on_utc, Qt::UTC).toString("HH:mm");
+    const QString what = QString("%1 worked again within %2 min on %3 %4: the %5 entry is updated (sent %6, rcvd %7), not logged twice")
+                         .arg(call).arg(kRepeatS / 60).arg(QString::fromStdString(band_for_hz(u.freq_hz)), QString::fromStdString(u.mode), started, QString::fromStdString(u.rst_sent), QString::fromStdString(u.rst_rcvd));
+    const QString line = QString("%1  %2  %3 kHz  %4   [updated]").arg(QDateTime::currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss"), call).arg(u.freq_hz / 1e3, 0, 'f', 3).arg(QString::fromStdString(u.mode));
+    last_logged_ = call; last_logged_at_ = QDateTime::currentDateTimeUtc(); auto_call_.clear(); clearForm();
+    if (!configured() || unsent) { recent_->appendPlainText(line); setStatus(what + (unsent ? " (still waiting in unsent)" : "")); return; }
+    // Wavelog: the newest QSO with this call is looked up, checked (same call, started within 30 min of ours) and changed with PATCH /qso/{id}
+    auto* g = get(QString::fromStdString(wavelog_history_path(u.call)));
+    connect(g, &QNetworkReply::finished, this, [this, g, u, what, line] {
+        g->deleteLater();
+        auto fail = [this, line, what](const QString& why) { recent_->appendPlainText(line + "   [Wavelog NOT updated]"); setStatus(what + ", but Wavelog was not: " + why + ". Correct it there by hand."); };
+        if (g->error() != QNetworkReply::NoError) { fail(failure(g)); return; }
+        const QJsonArray a = QJsonDocument::fromJson(g->readAll()).object().value("data").toArray();
+        const QJsonObject e = a.isEmpty() ? QJsonObject() : a.first().toObject();
+        const QDateTime when = QDateTime::fromString(e.value("qso_date").toString(), "yyyy-MM-dd HH:mm:ss"); QDateTime w2 = when; w2.setTimeZone(QTimeZone::UTC);
+        const qint64 id = e.value("id").toVariant().toLongLong();
+        if (id <= 0 || e.value("call").toString().toUpper() != QString::fromStdString(u.call).toUpper() || !when.isValid() || std::llabs(w2.toSecsSinceEpoch() - u.time_on_utc) > 30 * 60) { fail("its newest entry for this call is not this QSO"); return; }
+        QJsonObject b; b["rst_sent"] = QString::fromStdString(u.rst_sent); b["rst_rcvd"] = QString::fromStdString(u.rst_rcvd); if (!u.grid.empty()) b["gridsquare"] = QString::fromStdString(u.grid);
+        const QDateTime on = QDateTime::fromSecsSinceEpoch(u.time_on_utc, Qt::UTC), off = QDateTime::fromSecsSinceEpoch(u.time_off_utc, Qt::UTC);
+        b["qso_date"] = on.toString("yyyy-MM-dd"); b["time_on"] = on.toString("HH:mm:ss"); b["time_off"] = off.toString("HH:mm:ss");
+        QNetworkRequest r(QUrl(QString::fromStdString(wavelog_normalise_base_url(url_->text().toStdString())) + QString(kWavelogQsoPath) + "/" + QString::number(id)));
+        r.setRawHeader("Authorization", "Bearer " + token_->text().trimmed().toUtf8()); r.setRawHeader("Accept", "application/json"); r.setHeader(QNetworkRequest::ContentTypeHeader, "application/json"); r.setTransferTimeout(10000);
+        auto* p = net_->sendCustomRequest(r, "PATCH", QJsonDocument(b).toJson(QJsonDocument::Compact));
+        connect(p, &QNetworkReply::finished, this, [this, p, line, what, fail] {
+            p->deleteLater();
+            if (p->error() != QNetworkReply::NoError) { fail(failure(p)); return; }
+            recent_->appendPlainText(line); setStatus(what + " (Wavelog too)."); refreshFromWavelog();
+        });
+    });
+}
 void LogPanel::sendUnsent() {
     QFile f(dir_ + "/unsent.adi"); if (!configured() || !f.open(QIODevice::ReadOnly)) return;
     const QByteArray all = f.readAll(); f.close(); if (!all.contains("<EOR>")) return;
@@ -543,7 +588,7 @@ void LogPanel::logAuto(const QString& call, const QString& grid, const QString& 
     if (!name.isEmpty()) name_->setText(name); else if (const auto* qi = qrz_->cached(call); qi && !qi->not_found) name_->setText(QString::fromStdString(qi->first_name));
     comment_->setText(comment);
     const qint64 now = QDateTime::currentSecsSinceEpoch(); auto_time_on_ = time_on > 0 && time_on <= now && now - time_on < 3600 ? time_on : 0;   // the QSO's start (sane values only)
-    logNow(); auto_time_on_ = 0; setStatus(QString("%1 logged automatically (sent %2, rcvd %3) - ").arg(call, sent, rcvd) + status_);
+    auto_logging_ = true; logNow(); auto_logging_ = false; auto_time_on_ = 0; setStatus(QString("%1 logged automatically (sent %2, rcvd %3) - ").arg(call, sent, rcvd) + status_);
 }
 QString LogPanel::callText() const { return call_->text(); }
 QString LogPanel::rstRcvdText() const { return rst_rcvd_->text(); }

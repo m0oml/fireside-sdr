@@ -136,7 +136,7 @@ private:
     bool ask(const QString& title, const QString& text);
     std::atomic<double> last_tx_w_{0}, unkeyed_utc_{0}, job_end_utc_{0}; std::atomic<qint64> last_tx_t_{0};
     std::function<int(double)> tx_ant_; int txAnt() const; int last_ant_ = 1;
-    struct LoadCal; std::shared_ptr<LoadCal> lc_; bool lc_fast_ = false; QString lc_report_; std::function<QString(double)> rx_ant_for_; QPushButton* load_cal_btn_ = nullptr;
+    struct LoadCal; std::shared_ptr<LoadCal> lc_; bool lc_fast_ = false; bool fm_over_ = false; QString lc_report_; std::function<QString(double)> rx_ant_for_; QPushButton* load_cal_btn_ = nullptr;
     std::function<void(const QString&, bool)> after_job_;  // called once a worker job has ended (result, safety stop): the load calibration's next step
     void lcStep(); void lcAfter(int ms); void lcFinish(const QString& why); void lcJob(const QString& what, bool pauses, std::function<QString(fireside::txc::TxControl&)> job);
     QPushButton* burst_ = nullptr; std::atomic<bool> burst_down_{false};   // FM: the 1750 Hz tone burst while held (at most 1 s per press)

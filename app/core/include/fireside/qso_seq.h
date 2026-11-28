@@ -57,7 +57,11 @@ public:
     // The QSO this gave up on (reports sent), kept for a late RR73 / 73; carried into a new Sequencer with remember().
     const std::optional<Unfinished>& unfinished() const { return unf_; }
     void remember(const std::optional<Unfinished>& u) { unf_ = u; }
-    bool resumed() const { return resumed_; }   // the last reply_to() / heard() finished a given-up QSO (73 to send, or logged at once)
+    bool resumed() const { return resumed_; }   // the last reply_to() / heard() finished a given-up QSO (73 or RR73 to send, or logged at once)
+    // Our slot is due and the current message has had all its tries: true ONCE, and the GUI sends nothing in this slot but listens to it, because the
+    // other station's answer to our last try is decoded a few seconds into it (S57LU 2026-11-28: R-04 decoded 3 s after we had given up). A heard()
+    // that moves the QSO on clears it; otherwise the next next_message() gives up.
+    bool wait_before_giving_up();
     void set_clock(std::function<int64_t()> now) { now_ = std::move(now); }   // seconds since the epoch (tests)
     Stage stage() const { return st_; }
     bool active() const { return st_ != Stage::Idle && st_ != Stage::Done && st_ != Stage::GaveUp; }
@@ -67,7 +71,7 @@ public:
     int tries() const { return tries_; }
 private:
     std::string me_, grid_, dx_, dx_grid_, sent_, rcvd_, msg_; Stage st_ = Stage::Idle; int max_tries_, tries_ = 0; bool log_due_ = false, logged_ = false, last_send_ = false, again_ = false, rr73_done_ = false; int reopened_ = 0, limit_ = 0;
-    std::optional<Unfinished> unf_; std::optional<QsoLog> late_log_; bool resumed_ = false; int64_t start_utc_ = 0; std::function<int64_t()> now_;
+    std::optional<Unfinished> unf_; std::optional<QsoLog> late_log_; bool resumed_ = false, waited_ = false; int64_t start_utc_ = 0; std::function<int64_t()> now_;
     int64_t now() const;
     bool resume(const Heard& h, bool keep_stage);
     void set(Stage s, std::string m);

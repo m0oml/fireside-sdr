@@ -203,3 +203,17 @@ TEST(seq_late_finish_by_double_click_their_73_and_the_time_limit) {
     {   seq::Sequencer s("M0OML", "IO92", 2); s.set_clock([&] { return t; }); s.reply_to(H("CQ EA7R IM66")); while (!s.next_message().empty()) {}
         CHECK(!s.unfinished()); }                                                                                  // nothing sent but our call: nothing to finish
 }
+TEST(seq_listens_one_slot_before_giving_up_and_a_late_r_report_finishes_the_qso) {   // S57LU 2026-11-28: their R-04 was decoded 3 s after we gave up
+    int64_t t = 1'800'000'000; seq::Sequencer s("M0OML", "IO92", 3); s.set_clock([&] { return t; });
+    CHECK(s.reply_to(H("M0OML S57LU JN76", -17))); for (int i = 0; i < 3; ++i) CHECK_EQ(s.next_message(), std::string("S57LU M0OML -17"));
+    CHECK(s.wait_before_giving_up()); CHECK(!s.wait_before_giving_up()); CHECK(s.active());         // once: this slot is only listened to
+    CHECK(s.heard(H("M0OML S57LU R-04", -13))); CHECK(s.stage() == seq::Stage::SentRR73);             // their answer to our last try arrives in it
+    CHECK_EQ(s.next_message(), std::string("S57LU M0OML RR73")); auto l = s.take_log(); CHECK(l && l->rst_sent == "-17" && l->rst_rcvd == "-04");
+    seq::Sequencer g("M0OML", "IO92", 2); g.set_clock([&] { return t; });                             // no answer in the listening slot: it gives up
+    g.reply_to(H("M0OML S57LU JN76", -17)); g.next_message(); g.next_message(); CHECK(g.wait_before_giving_up()); CHECK(g.next_message().empty()); CHECK(g.stage() == seq::Stage::GaveUp);
+    g.call_cq(); g.next_message(); t += 20;                                                           // their R-report after all, during the CQ
+    CHECK(g.heard(H("M0OML S57LU R-04", -13))); CHECK(g.resumed()); CHECK(g.stage() == seq::Stage::SentRR73);
+    CHECK_EQ(g.next_message(), std::string("S57LU M0OML RR73"));
+    auto l2 = g.take_log(); CHECK(l2 && l2->rst_sent == "-17" && l2->rst_rcvd == "-04" && l2->grid == "JN76");   // what we really sent, not the late message's SNR
+    seq::Sequencer c("M0OML", "IO92", 2); c.call_cq(); for (int i = 0; i < 20; ++i) { CHECK(!c.wait_before_giving_up()); if (c.next_message().empty()) break; }   // CQ never waits
+}

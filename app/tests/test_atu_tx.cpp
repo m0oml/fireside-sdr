@@ -401,6 +401,13 @@ TEST(tx_control_tune_tries_the_saved_setting_first_and_skips_the_search_when_it_
     auto u = r.tx->tune(14.336, 3.0, 2.0, {}); CHECK(u.checked_saved && !u.from_saved); CHECK_EQ(u.searches, 1); CHECK_EQ(count_full(), full0 + 1);
     CHECK(u.outcome && u.outcome->result == atu::Atu::TuneResult::Pass && u.saved); CHECK(!r.sim.keyed);
     r.sim.swr_b3 = 0; auto far = r.tx->tune(14.0, 3.0, 2.0, {}); CHECK(!far.checked_saved); CHECK_EQ(far.searches, 1);   // 336 kHz away: not tried
+    {   const double rf0 = r.sim.rev_frac; r.sim.rev_frac = 0.15;                                     // a real mismatch: our meter about SWR 2.3, the tuner still 1.00
+        auto ok = r.tx->tune(14.0, 3.0, 2.0, {}); CHECK(ok.from_saved && ok.last_swr); const double ours = ok.last_swr.value_or(1.0);   // 60 m 2026-11-28: the tuner said 1.00, ours 2.86
+        CHECK(ours > 1.8);
+        r.tx->set_load_swr(5, ours - 0.8);                                                           // our meter read far less on a good load: this is a real mismatch
+        auto no = r.tx->tune(14.0, 3.0, 2.0, {}); CHECK(no.checked_saved && !no.from_saved); CHECK(no.check_why.find("good load") != std::string::npos); CHECK_EQ(no.searches, 1);
+        r.tx->set_load_swr(5, ours); auto yes = r.tx->tune(14.0, 3.0, 2.0, {}); CHECK(yes.from_saved);   // within 0.4 of the load reading: good
+        r.tx->set_load_swr(5, 0); r.sim.rev_frac = rf0; }
 }
 TEST(tx_control_tune_searches_again_after_a_fail_up_to_three_times) {
     if (backup_image().empty()) return;

@@ -109,6 +109,9 @@ int main(int argc, char** argv) {
                 else if (p.contains("/api/v2/token")) body = "{\"data\":{\"owner\":\"M0OML\",\"scopes\":[\"qso:write\",\"lookup:read\",\"radio:write\"]}}";
                 else if (p.contains("/api/v2/station")) body = "{\"data\":[{\"id\":3,\"callsign\":\"M0OML\",\"gridsquare\":\"IO92AR\"}]}";
                 else if (p.contains("/api/v2/lookup")) body = "{\"data\":{\"dxcc\":\"FEDERAL REPUBLIC OF GERMANY\",\"call_worked\":true,\"call_worked_band\":true,\"call_worked_band_mode\":false,\"dxcc_confirmed\":true,\"callbook\":{\"name\":\"Klaus Meyer\",\"gridsquare\":\"JO62\",\"city\":\"Hamburg\",\"email\":\"secret@example.com\"}}}";
+                else if (p.contains("/api/v2/qso") && p.contains("callsign=S57LU") && rl[0] == "GET")       // the repeat-QSO check: the entry logged two minutes ago
+                    body = QString("{\"data\":[{\"id\":77,\"call\":\"S57LU\",\"band\":\"40m\",\"mode\":\"FT8\",\"qso_date\":\"%1\"}],\"meta\":{\"total\":1}}")
+                               .arg(QDateTime::currentDateTimeUtc().addSecs(-120).toString("yyyy-MM-dd HH:mm:ss")).toUtf8();
                 else if (p.contains("/api/v2/qso") && rl[0] == "GET") body = "{\"data\":[{\"qso_date\":\"2026-11-10 12:30:00\",\"band\":\"20m\",\"mode\":\"FT8\",\"submode\":null,\"name\":\"Klaus\",\"call\":\"DL2AL\",\"gridsquare\":\"JO43aa\",\"id\":7}],\"meta\":{\"total\":2,\"has_more\":false}}";
                 else if (p.contains("/api/v2/qso")) { code = 201; body = "{\"data\":{\"parsed\":1,\"imported\":1,\"skipped\":0,\"messages\":[]}}"; }
                 else if (p.contains("/api/v2/radio")) { code = 201; body = "{\"data\":{\"id\":1}}"; }
@@ -272,6 +275,16 @@ int main(int argc, char** argv) {
           for (int i = 0; i < 3; ++i) lp->pushRadioIfChanged(); QCoreApplication::processEvents(); step("after a refusal it waits a minute, not every tick", posts() == p0);
           mode = 0; lp->setRadioPush(true); step("ticking again retries at once", waitFor([&] { return lp->radioPushStatus().contains("Sent") && lp->radioPushStatus().contains("7075.000"); }));
           lp->setTxPowerSource([] { return 0.0; }); r->setDialHz(7.074e6); }
+        {   // the sequencer completes the same QSO again within 15 min (S57LU 2026-11-28): the first entry is updated, not a second one logged
+            r->setDialHz(7.074e6); const qint64 t0 = QDateTime::currentSecsSinceEpoch();
+            auto imports = [&] { return std::count_if(seen.begin(), seen.end(), [](const Seen& s) { return s.method == "POST" && s.path.contains("/api/v2/qso") && s.body.contains("S57LU"); }); };
+            lp->logAuto("S57LU", "JN76", "-13", "-04", t0 - 120); step("repeat: the first QSO is logged", waitFor([&] { return imports() == 1; }));
+            lp->logAuto("S57LU", "", "-10", "-16", t0 - 30);
+            auto patch = [&] { for (const auto& s : seen) if (s.method == "PATCH" && s.path.endsWith("/api/v2/qso/77")) return s.body; return QString(); };
+            step("repeat: the second one updates entry 77 (PATCH) with the new reports and the first start", waitFor([&] { return !patch().isEmpty(); })
+                 && patch().contains("\"rst_sent\":\"-10\"") && patch().contains("\"rst_rcvd\":\"-16\"") && patch().contains(QDateTime::fromSecsSinceEpoch(t0 - 120, Qt::UTC).toString("HH:mm:ss")));
+            step("repeat: no second import, and the status says so", imports() == 1 && waitFor([&] { return lp->status().contains("not logged twice") && lp->status().contains("Wavelog too"); }));
+        }
         mode = 1; lp->setCall("pa4ps"); waitFor([&] { return lp->workedText().contains("refused"); }); step("401 reported in lookup", lp->workedText().contains("refused"));
         lp->setCall("pa4ps"); lp->logNow(); step("refused QSO kept locally", waitFor([&] { return lp->unsentCount() == 1; }) && lp->status().contains("saved locally"));
         mode = 0; lp->sendUnsent(); step("unsent resent", waitFor([&] { return lp->unsentCount() == 0; }));

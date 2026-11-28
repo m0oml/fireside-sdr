@@ -538,7 +538,7 @@ void TransmitCard::heardLine(const QString& line) {
     }
 }
 void TransmitCard::finishLate(const QString& line, bool was_cq) {     // heard: the late RR73 / 73 of the QSO we gave up on (a CQ or nothing running)
-    if (seq_->stage() != fireside::seq::Stage::Sent73) {                                    // their 73: logged now; a CQ running carries on
+    if (seq_->stage() != fireside::seq::Stage::Sent73 && seq_->stage() != fireside::seq::Stage::SentRR73) {   // their 73: logged now; a CQ running carries on
         if (auto l = seq_->take_log()) {
             const QString c = QString::fromStdString(l->call);
             emit logQso(c, QString::fromStdString(l->grid), QString::fromStdString(l->rst_sent), QString::fromStdString(l->rst_rcvd), l->start_utc);
@@ -553,7 +553,8 @@ void TransmitCard::finishLate(const QString& line, bool was_cq) {     // heard: 
     { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - line_parity(line, ft_mode_->currentIndex() == 1)); }   // the slot after theirs
     if (QString::fromStdString(seq_->dx()) == gave_up_call_ && gave_up_hz_ > 0) ft_hz_->setValue(gave_up_hz_);   // where they were listening for us
     saveState(); ft_msg_->setText(QString::fromStdString(seq_->current())); emit qsoPartner(QString::fromStdString(seq_->dx()));
-    report(QString::fromStdString(seq_->describe()) + QString(": their RR73 came after we gave up: 73 on %1 Hz").arg(ft_hz_->value()));
+    report(QString::fromStdString(seq_->describe()) + QString(": their %1 came after we gave up: %2 on %3 Hz")
+           .arg(seq_->stage() == fireside::seq::Stage::SentRR73 ? "R-report" : "RR73", seq_->stage() == fireside::seq::Stage::SentRR73 ? "RR73" : "73").arg(ft_hz_->value()));
     if (!worker_running_ && tx_ && tx_->armed()) { ft_timer_->stop(); ft_pending_.reset(); queueSend(); }   // replaces a queued CQ (it was rendered at the CQ's audio frequency)
 }
 void TransmitCard::takeLog() {
@@ -710,7 +711,7 @@ void TransmitCard::onTune() {
         const auto& s = r.outcome->status;
         QString res = r.outcome->result == atu::Atu::TuneResult::Pass ? "PASS" : r.outcome->result == atu::Atu::TuneResult::Fail ? QString("FAIL (%1)").arg(atu::fail_text(r.outcome->fail_reason)) : "stopped";
         const QString tries = r.searches > 1 ? QString(" %1 searches.").arg(r.searches) : QString();
-        const QString chk = r.checked_saved && !r.from_saved ? QString(" The saved setting was tried first (not good enough here).") : QString();
+        const QString chk = r.checked_saved && !r.from_saved ? QString(" The saved setting was tried first (not good enough: %1).").arg(r.check_why.empty() ? QString("see the log") : QString::fromStdString(r.check_why)) : QString();
         if (r.from_saved)
             return QString("Tune PASS after %1 s: the saved setting ind %2 cap %3 %4 is good, tuner SWR %5, our meter %6 SWR %7. No search needed.").arg(r.outcome->seconds, 0, 'f', 1)
                    .arg(s.ind ? *s.ind : -1).arg(s.cap ? *s.cap : -1).arg(s.hiz && *s.hiz ? "Hi-Z" : "Lo-Z").arg(r.check_tuner_swr ? QString::number(*r.check_tuner_swr, 'f', 2) : "?")
@@ -821,6 +822,11 @@ void TransmitCard::queueSend() {
 void TransmitCard::startSend() {
     if (!ft_pending_ || !tx_ || !tx_->armed() || worker_running_) { ft_pending_.reset(); updateButtons(); return; }
     auto prep = ft_pending_; ft_pending_.reset();
+    if (seq_ && seq_->stage() != fireside::seq::Stage::Idle && seq_->wait_before_giving_up()) {   // all tries sent: listen to this slot for a late answer before giving up
+        report(QString::fromStdString(seq_->describe()) + ": no answer yet; listening to this slot for a late reply before giving up.");
+        QTimer::singleShot(3500, this, [this, g = stop_gen_] { if (g == stop_gen_ && seq_ && seq_->active() && !ft_pending_ && !worker_running_) queueSend(); });   // past this slot: the next of our parity
+        updateButtons(); return;
+    }
     if (seq_ && seq_->stage() != fireside::seq::Stage::Idle) {                                  // sequencing: the answer from the slot just heard decides what we send
         pauseReceive();                                                                      // (decodes that slot; heardLine moves the QSO on)
         const std::string next = seq_->next_message();
@@ -907,6 +913,7 @@ void TransmitCard::startVoice() {
     if (monitor_ && monitor_->isChecked()) { if (!mon_feed_) mon_feed_ = new PcAudioFeed(pc_audio_, this); PcAudioFeed* f = mon_feed_; v.monitor = [f](const float* a, size_t n) { f->push(a, n); }; }
     v.lsb = voice_mode_->currentIndex() == 2 || (voice_mode_->currentIndex() == 0 && (rx_->modeIndex() == 1 || (rx_->modeIndex() != 0 && mhz < 10.0 && !(mhz > 5.2 && mhz < 5.5))));   // Auto: as the receiver
     v.fm = voice_mode_->currentIndex() == 0 && rx_->modeIndex() == 4;                    // Auto in FM: an FM over (simplex: on the dial)
+    fm_over_ = v.fm;                                                                        // the DDS sits 11.025 kHz below the dial for it (picture and receive follow)
     if (v.fm) {
         if (rx_->repeaterShiftHz() != 0 && !(rx_->reverseButton() && rx_->reverseButton()->isChecked())) {
             report("FM: a repeater shift is set. Transmitting through a repeater (with the shift) is not in Fireside yet: set Shift to Simplex to talk on this frequency.");
@@ -984,8 +991,10 @@ void TransmitCard::tick() {
     rx_->setMeterTx(keyed);
     stop2_->setEnabled(stop_->isEnabled()); stop3_->setEnabled(stop_->isEnabled());
     if (status_->toolTip() != status_->text()) status_->setToolTip(status_->text());    // the line is clipped: the tooltip has all of it
-    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running(), cw_over_ ? txc::kCwOffsetHz : 0.0);
-    { const int b = txm::band_of(rx_->dialHz()); rx_->setTxView(keyed, cw_over_ ? txc::kCwOffsetHz : 0.0, keyed && tx_ && b >= 0 ? tx_->k_for(b) : 0.0); }   // the transmit picture: what is sent, in dBm   // a CW over: the DDS 1 kHz below the dial
+    if (fm_over_ && !worker_running_) fm_over_ = false;
+    const double below = cw_over_ ? txc::kCwOffsetHz : fm_over_ ? tx::kFmTxOffsetHz : 0.0;   // where the TX DDS sits below the dial (2026-11-28: FM was drawn 11 kHz high)
+    if (!simulated_) rx_->setTransmitting(keyed && fw_iso_duplex_running(), below);
+    { const int b = txm::band_of(rx_->dialHz()); rx_->setTxView(keyed, below, keyed && tx_ && b >= 0 ? tx_->k_for(b) : 0.0); }   // the transmit picture: what is sent, in dBm   // a CW over: the DDS 1 kHz below the dial
     rx_->setTxMute(keyed || cw_over_);                                                  // receive audio off while keyed (our own signal; it would also feed back into the mic)           // duplex: receive follows the DDS onto the dial for the over
     lamp_->setStyleSheet(keyed ? "background:#c62828;color:white;font-weight:bold;border-radius:4px;padding:2px" : "background:#3a3a3a;color:#888;border-radius:4px;padding:2px");
     txc::Progress p; bool have; { std::lock_guard<std::mutex> l(m_); p = last_; have = have_last_; }
@@ -1029,6 +1038,8 @@ void TransmitCard::loadState() {                         // worker thread, right
     if (no_settings() || !tx_) return;
     { std::ifstream in(mem_path().toStdString()); std::stringstream ss; ss << in.rdbuf(); tx_->memory() = atu::Memory::from_text(ss.str()); }
     std::ifstream in(drive_path().toStdString()); std::stringstream ss; ss << in.rdbuf(); tx_->set_all_k(txc::parse_drive_text(ss.str()));
+    QSettings lc("fireside", "loadcal");                                                     // our meter on a good load, per band (Calibrate with a load): the saved-setting check uses it
+    for (int b = 0; b < txm::kBands; ++b) { lc.beginGroup(txm::band_name(b)); tx_->set_load_swr(b, std::max(lc.value("swr_5w", 0.0).toDouble(), lc.value("swr_15w", 0.0).toDouble())); lc.endGroup(); }
 }
 void TransmitCard::saveState() {
     if (no_settings()) return;

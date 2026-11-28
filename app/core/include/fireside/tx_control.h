@@ -49,9 +49,11 @@ struct TuneResult {
     std::string pass_rejected;                                    // the tuner said "pass" but it is not trusted (why): the outcome is shown as stopped, nothing saved
     bool checked_saved = false, from_saved = false;               // the band's saved setting was tried first; it was good (no search)
     std::optional<double> check_tuner_swr;                        // the tuner's SWR on the saved setting
+    std::string check_why;                                        // why the saved setting was not taken (shown to the operator)
     int searches = 0;                                             // full searches run (at most kTuneSearches)
 };
 inline constexpr int kTuneSearches = 3;
+inline constexpr double kLoadSwrMargin = 0.4;   // the saved-setting check: our SWR at most this above the band's reading on a good load
 
 // Voice: 48 kHz mono audio in (the PC's capture, or the radio's mic input ch7 from the duplex stream).
 class IAudioIn {
@@ -207,7 +209,11 @@ public:
     CwResult cw(double dial_mhz, ICwKeys& keys, const CwOptions& c, const ProgressFn& p = {}, const LogFn& log = {});
     // No RF: put a band's stored relays back. false if nothing is stored or the tuner does not report them.
     bool restore_relays(int band, int ant = 1, const LogFn& log = {});
-    bool set_atu_relays(int ind, int cap, bool hiz, const LogFn& log = {});   // no RF: the tuner's relays set directly (0 / 0 = straight through, for a 50 ohm load)   // the relays of that band's tune on that antenna (ANT1..ANT3)
+    bool set_atu_relays(int ind, int cap, bool hiz, const LogFn& log = {});
+    // Our PA meter's SWR on a good 50 ohm load, per band (Calibrate with a load; 0 = not measured). The saved-setting check then wants our reading
+    // within kLoadSwrMargin of it: the tuner's own meter barely sees a moderate mismatch (60 m 2026-11-28: tuner 1.00..1.32 while ours read 2.86
+    // against 1.44 on the load, and overs tripped at SWR 3.0).
+    void set_load_swr(int band, double swr) { if (band >= 0 && band < txm::kBands) load_swr_[size_t(band)] = swr > 0.9 ? swr : 0; }   // no RF: the tuner's relays set directly (0 / 0 = straight through, for a 50 ohm load)   // the relays of that band's tune on that antenna (ANT1..ANT3)
     // Receive-level check with the radio's built-in signal generator (siggen.h; PowerSDR CalibrateLevel for the FLEX-5000). Holds the transmit lock for
     // the whole check, so nothing can key meanwhile; it never keys itself. The generator sits at dial + tone_hz (inside the receive passband).
     // read(): {in-passband dBFS, strongest spectrum peak's offset from the dial in Hz}, from the receiver. preamp(on): switches the receive preamp and
@@ -224,6 +230,7 @@ public:
 private:
     SendResult send_impl(double dial_mhz, FtPrepared&& f, tx::Parity parity, double power_w, const Options& o, const ProgressFn& p, const LogFn& log, double min_lead_s);
     std::optional<atu::Status> atu_report_locked();               // the same, for callers already holding op_
+    std::array<double, txm::kBands> load_swr_{};
     Flex& fx_; PcmFactory pcm_; atu::Clock clk_; std::function<double()> utc_; txs::TxCal cal_; atu::Atu atu_; atu::Memory mem_; std::map<int, double> k_;
     std::atomic<bool> armed_{false}, busy_{false}, keyed_{false}, abort_{false}, retired_{false}; std::mutex op_; std::function<void(bool, double)> key_hook_; std::function<void(const std::string&)> trip_hook_; mutable std::mutex tap_m_; std::shared_ptr<txo::IqTap> tap_;
     void note_stop(const std::string& s) { if (trip_hook_ && is_safety_stop(s)) { try { trip_hook_(s); } catch (...) {} } }

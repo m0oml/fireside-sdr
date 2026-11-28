@@ -73,6 +73,11 @@ signals:
     void activeChanged(bool open);                                            // the large log form opened / closed
 private:
     qint64 auto_time_on_ = 0;   // logAuto: the sequenced QSO's start, for formQso
+    // The last QSO the sequencer logged: the same call, band and mode completed again within kRepeatS (they missed our RR73 and called again,
+    // S57LU 2026-11-28) updates that entry instead of adding a second one (user's choice): reports, grid and end time; the start stays.
+    static constexpr qint64 kRepeatS = 15 * 60;
+    struct LastAuto { fireside::logbook::Qso q; std::string rec; qint64 at = 0; } last_auto_; bool auto_logging_ = false;
+    void updateRepeat(const fireside::logbook::Qso& q);
     void showLastRows(const QList<QStringList>& rows, const QString& source);
     QTimer* recent_timer_ = nullptr; bool wavelog_recent_ok_ = false;
     void pumpWorked();

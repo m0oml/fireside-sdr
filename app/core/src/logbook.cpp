@@ -1,3 +1,4 @@
+#include <iterator>
 #include "fireside/logbook.h"
 #include <cctype>
 #include <cmath>
@@ -145,5 +146,16 @@ void append_adif_file(const std::string& path, const Qso& q, const std::string& 
     if (fresh) f << adif_header(program, version);
     f << rec << "\n"; f.flush();
     if (!f) throw std::runtime_error("cannot write " + path);
+}
+bool replace_adif_record(const std::string& path, const std::string& old_rec, const Qso& q) {
+    const std::string rec = adif_record(q);                                   // validate before touching the file
+    std::string all; { std::ifstream in(path, std::ios::binary); if (!in) return false; all.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()); }
+    const size_t at = old_rec.empty() ? std::string::npos : all.find(old_rec);
+    if (at == std::string::npos || all.find(old_rec, at + 1) != std::string::npos) return false;
+    all.replace(at, old_rec.size(), rec);
+    const std::string tmp = path + ".tmp";
+    { std::ofstream f(tmp, std::ios::binary | std::ios::trunc); if (!f) throw std::runtime_error("cannot open " + tmp); f << all; f.flush(); if (!f) throw std::runtime_error("cannot write " + tmp); }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) throw std::runtime_error("cannot replace " + path);
+    return true;
 }
 }  // namespace fireside::logbook

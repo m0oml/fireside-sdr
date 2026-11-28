@@ -81,7 +81,7 @@ int64_t Sequencer::now() const { return now_ ? now_() : std::chrono::duration_ca
 // Their RR73 / RRR / 73 after we gave up on them: finish that QSO with its own reports. RR73 / RRR: our 73 goes out once, then it is logged.
 // 73 (we missed their RR73): logged at once, nothing sent; with keep_stage (a CQ running) the CQ carries on and only the log is due.
 bool Sequencer::resume(const Heard& h, bool keep_stage) {
-    if (!unf_ || !to_me(h) || !(h.rr73 || h.rrr || h.seventy3) || base(h.from) != base(unf_->call)) return false;
+    if (!unf_ || !to_me(h) || !(h.rr73 || h.rrr || h.seventy3 || h.r_report) || base(h.from) != base(unf_->call)) return false;
     if (now() - unf_->gave_up_utc > kLateFinishS) { unf_.reset(); return false; }
     const Unfinished u = *unf_; unf_.reset();
     if (h.seventy3) {
@@ -89,11 +89,19 @@ bool Sequencer::resume(const Heard& h, bool keep_stage) {
         if (!keep_stage) { dx_ = u.call; dx_grid_ = u.grid; sent_ = u.sent; rcvd_ = u.rcvd; start_utc_ = u.start_utc; logged_ = true; log_due_ = false; st_ = Stage::Done; msg_.clear(); tries_ = 0; }
         resumed_ = true; return true;
     }
-    dx_ = u.call; dx_grid_ = u.grid; sent_ = u.sent; rcvd_ = u.rcvd; start_utc_ = u.start_utc; logged_ = false; rr73_done_ = false; reopened_ = 0;
+    dx_ = u.call; dx_grid_ = h.grid.empty() ? u.grid : h.grid; sent_ = u.sent; rcvd_ = u.rcvd; start_utc_ = u.start_utc; logged_ = false; rr73_done_ = false; reopened_ = 0;
+    if (h.r_report) {                                                                                // their R-report (they had our report): RR73, logged with what we really sent
+        rcvd_ = h.report; set(Stage::SentRR73, dx_ + " " + me_ + " RR73"); log_due_ = true; resumed_ = true; return true; }
     set(Stage::Sent73, dx_ + " " + me_ + " 73"); last_send_ = true; log_due_ = true; resumed_ = true; return true;
 }
 bool Sequencer::to_me(const Heard& h) const { return !h.cq && base(h.to) == base(me_); }
-void Sequencer::set(Stage s, std::string m) { st_ = s; msg_ = std::move(m); tries_ = 0; again_ = false; limit_ = 0; }
+void Sequencer::set(Stage s, std::string m) { st_ = s; msg_ = std::move(m); tries_ = 0; again_ = false; limit_ = 0; waited_ = false; }
+bool Sequencer::wait_before_giving_up() {
+    if (!active() || st_ == Stage::Cq || waited_) return false;
+    if (st_ == Stage::Sent73 || (st_ == Stage::SentRR73 && tries_ >= 1)) return false;                // these end by themselves, not by giving up
+    if (tries_ < (limit_ > 0 ? limit_ : max_tries_)) return false;
+    waited_ = true; return true;
+}
 void Sequencer::stop() { st_ = Stage::Idle; msg_.clear(); tries_ = 0; }
 void Sequencer::call_cq(const std::string& text) { resumed_ = false; start_utc_ = 0; dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; rr73_done_ = false; reopened_ = 0; set(Stage::Cq, text.empty() ? "CQ " + me_ + " " + grid_ : text); }
 

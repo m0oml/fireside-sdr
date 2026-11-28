@@ -45,4 +45,7 @@ std::string wavelog_normalise_base_url(const std::string& url);                 
 
 // Local ADIF safety copy (append only; the header is written when the file is new). Throws std::runtime_error on I/O failure.
 void append_adif_file(const std::string& path, const Qso& q, const std::string& program, const std::string& version);
+// The same QSO worked again a few minutes later (they missed our RR73 and called again): its record `old_rec` (exactly as adif_record() wrote it) is
+// replaced by `q`'s, in place. False (file untouched) if the old record is not in the file exactly once. Throws std::runtime_error on I/O failure.
+bool replace_adif_record(const std::string& path, const std::string& old_rec, const Qso& q);
 }  // namespace fireside::logbook

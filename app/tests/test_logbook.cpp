@@ -1,5 +1,7 @@
 // ADIF records, band and mode mapping, call validation, the Wavelog JSON bodies, and the local ADIF safety copy.
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <unistd.h>
 #include "fireside/logbook.h"
@@ -90,4 +92,18 @@ TEST(adif_carries_tx_power_when_known) {
     CHECK(adif_record(q).find("TX_PWR") == std::string::npos);                 // unknown: left out
     q.tx_pwr_w = 4.96; CHECK(adif_record(q).find("<TX_PWR:3>5.0") != std::string::npos);
     q.tx_pwr_w = 15.2; CHECK(adif_record(q).find("<TX_PWR:2>15") != std::string::npos);
+}
+TEST(logbook_replace_adif_record_updates_one_entry_in_place) {
+    const std::string p = "/tmp/fireside_test_replace_" + std::to_string(::getpid()) + ".adi"; std::remove(p.c_str());
+    Qso a; a.call = "S57LU"; a.freq_hz = 7.074e6; a.mode = "FT8"; a.time_on_utc = 1'795'800'000; a.rst_sent = "-13"; a.rst_rcvd = "-04";
+    Qso b = a; b.call = "DK3JW"; b.time_on_utc += 60;
+    append_adif_file(p, a, "fireside", "1"); append_adif_file(p, b, "fireside", "1");
+    Qso u = a; u.rst_sent = "-10"; u.rst_rcvd = "-16"; u.grid = "JN76"; u.time_off_utc = a.time_on_utc + 300;
+    CHECK(replace_adif_record(p, adif_record(a), u));
+    std::ifstream in(p); std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(all.find(adif_record(u)) != std::string::npos); CHECK(all.find(adif_record(a)) == std::string::npos); CHECK(all.find(adif_record(b)) != std::string::npos);
+    CHECK(all.find("<CALL:5>S57LU") == all.rfind("<CALL:5>S57LU"));                                  // one S57LU entry
+    CHECK(!replace_adif_record(p, adif_record(a), u));                               // the old record is gone: nothing replaced
+    CHECK(!replace_adif_record(p + ".missing", adif_record(a), u));
+    std::remove(p.c_str());
 }

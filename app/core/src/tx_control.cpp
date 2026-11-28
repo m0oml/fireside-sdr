@@ -276,7 +276,13 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
             // The tuner's meter decides when it read power; ours (which reads high at a few watts: 1.3..2.7 where the tuner read 1.0..1.5) must still be under
             // the transmit limit. Without a usable tuner reading (none, or 0 W as seen on 60 m), our own meter must be under the threshold.
             const bool tuner_read = a.fwd_w && *a.fwd_w >= 0.5 && a.swr;
-            const bool good = r.last_swr && (tuner_read ? *a.swr <= threshold && *r.last_swr <= 3.0 : *r.last_swr <= threshold);
+            const double base = load_swr_[size_t(band)], ours_max = base > 0 ? base + kLoadSwrMargin : (tuner_read ? 3.0 : threshold);   // with a load reading: our meter judges too
+            const bool good = r.last_swr && (tuner_read ? *a.swr <= threshold && *r.last_swr <= ours_max : *r.last_swr <= ours_max);
+            if (!good) { char w[200];
+                if (!r.last_swr) std::snprintf(w, sizeof w, "our meter read no power");
+                else if (tuner_read && *a.swr > threshold) std::snprintf(w, sizeof w, "the tuner read SWR %.2f, above the threshold %.1f", *a.swr, threshold);
+                else std::snprintf(w, sizeof w, "our meter read SWR %.2f, above %.2f%s", *r.last_swr, ours_max, base > 0 ? " (this band's reading on a good load + 0.4)" : "");
+                r.check_why = w; }
             r.check_tuner_swr = tuner_read ? a.swr : std::nullopt;
             {
                 if (good) {

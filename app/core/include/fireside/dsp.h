@@ -146,6 +146,40 @@ enum class AmSideband { Both, Upper, Lower };
 struct AudioStage { virtual ~AudioStage() = default; virtual float process(float x) = 0; };
 using AudioStageFactory = std::function<std::unique_ptr<AudioStage>(double audio_rate)>;
 void set_spectral_nr_factory(AudioStageFactory f);          // nr2.cpp's enable_spectral_nr() calls this; nothing registered = DemodConfig::spectral_nr does nothing
+// FM / repeater tones. The 50 standard CTCSS tones (EIA / TIA-603), 67.0 .. 254.1 Hz, lowest first; transmit (later) and receive share the table.
+const std::vector<double>& ctcss_tones();
+// UK regional repeater tone letter (A..J) for a tone, or 0 if it is not one of them (A 67.0, B 71.9, C 77.0, D 82.5, E 88.5, F 94.8, G 103.5, H 110.9, J 118.8).
+char ctcss_uk_letter(double hz);
+// CTCSS (tone squelch) detector on demodulated FM audio. Low-passes and decimates to 1 kHz, then every 50 ms measures all 50 tones over the last
+// 0.4 s (Hann window, Goertzel). A tone is "heard" when it is the strongest of the 50 and >= 10 dB above their median, twice running (100 ms);
+// it is lost after 250 ms without that. process() returns whether `want_hz` (0 = any tone) is being heard.
+struct Biquad {                                              // direct form II transposed; coefficients normalised (a0 = 1)
+    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
+    static Biquad highpass(double fs, double f0, double q);    // RBJ cookbook
+    static Biquad lowpass(double fs, double f0, double q);
+    float run(float x) { const double y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return float(y); }
+};
+class CtcssDetector {
+public:
+    explicit CtcssDetector(double audio_rate, double want_hz = 0);
+    bool process(float a);
+    bool open() const { return open_; }
+    double heard_hz() const { return heard_hz_; }        // the tone being heard (0 = none)
+private:
+    void evaluate();
+    double want_, rate_; int decim_, phase_ = 0; double acc_ = 0; Biquad lp1_, lp2_;
+    std::vector<float> ring_, win_; size_t pos_ = 0, filled_ = 0; int since_eval_ = 0, hits_ = 0; double last_hit_s_ = -1e9, t_s_ = 0, cand_ = 0;
+    bool open_ = false; double heard_hz_ = 0;
+};
+// FM audio stages: 6th-order Butterworth high-pass at 300 Hz (keeps a CTCSS tone out of the speaker) and de-emphasis, the inverse of the
+// usual 300 Hz .. 3 kHz pre-emphasis (fireside/tx_dsp.h FmModulator): a pole at 300 Hz and a zero at 3 kHz, normalised to unity at 1 kHz.
+class FmAudio {
+public:
+    FmAudio(double audio_rate, bool subaudio_hpf, bool deemphasis);
+    float process(float x);
+private:
+    bool hpf_, de_; Biquad h1_, h2_, h3_; double de_b0_ = 1, de_b1_ = 0, de_a1_ = 0, de_x1_ = 0, de_y1_ = 0;
+};
 struct DemodConfig {
     Mode mode = Mode::USB; double input_rate = 48000; double audio_rate = 48000;   // input_rate must be an integer multiple of audio_rate
     double lo_hz = 0, hi_hz = 0;                              // passband relative to the dial; 0/0 = mode default (USB 200..2800, LSB -2800..-200, AM +-4000, CW +-250)
@@ -155,6 +189,8 @@ struct DemodConfig {
     AgcMode agc = AgcMode::Off; float agc_target = 0.25f; double agc_max_gain_db = 80.0;
     bool noise_blanker = false; float nb_threshold = 6.0f;
     double fm_deviation_hz = 5000;                            // audio = +-1 at this deviation
+    bool fm_deemphasis = true, fm_subaudio_hpf = true;         // FM only: 6 dB/oct de-emphasis, and the 300 Hz high-pass that keeps CTCSS out of the speaker
+    double ctcss_hz = 0;                                       // FM only: tone squelch, audio passes only while this CTCSS tone is heard (0 = off). With the level squelch on as well, both must be open
     AmDetector am_detector = AmDetector::Sync; AmSideband am_sideband = AmSideband::Both;   // AM only
     double sam_loop_hz = 30;                                  // synchronous AM: PLL natural frequency (Hz). Wider = faster lock, more phase noise; it pulls in +-200 Hz of mistuning
     bool noise_reduction = false, auto_notch = false;
@@ -174,6 +210,8 @@ public:
     size_t blanked() const { return nb_.blanked(); }
     double am_carrier_hz() const { return sam_freq_ * c_.audio_rate / (2 * 3.14159265358979323846); }   // synchronous AM: where the loop has the carrier, Hz from the dial
     bool am_locked() const { return sam_locked_; }            // synchronous AM: the loop holds the carrier (small phase error, carrier present)
+    double ctcss_heard_hz() const { return ctcss_ ? ctcss_->heard_hz() : 0.0; }   // FM: the CTCSS tone being heard (0 = none)
+    bool tone_open() const { return !ctcss_ || c_.ctcss_hz <= 0 || ctcss_->open(); }
 private:
     void sam_reset();
     float sam_sample(cf s);                                   // one sample of synchronous AM detection
@@ -181,6 +219,7 @@ private:
     std::unique_ptr<Notch> notch_; std::vector<std::unique_ptr<Notch>> extra_notches_; std::unique_ptr<AdaptiveLineFilter> anf_, nr_; std::unique_ptr<AudioStage> nr2_; bool squelch_open_ = true; float squelch_gain_ = 1.0f; double sq_power_ = 0;
     double cw_phase_ = 0, am_dc_ = 0, power_ = 0; cf prev_{0, 0}; bool metered_ = false;
     double sam_phase_ = 0, sam_freq_ = 0, sam_err_avg_ = 1, sam_cmag_avg_ = 0; cf sam_c_{0, 0}; bool sam_locked_ = false; double sam_kp_ = 0, sam_ki_ = 0, sam_ca_ = 0;
+    std::unique_ptr<CtcssDetector> ctcss_; std::unique_ptr<FmAudio> fm_audio_;
     std::vector<float> sam_hilbert_, sam_q_, sam_i_; size_t sam_pos_ = 0;   // Hilbert FIR on Q, and I delayed to match it (one-sideband detection)
 };
 

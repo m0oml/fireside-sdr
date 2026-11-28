@@ -197,7 +197,18 @@ public:
     int bandIndexOf(double hz) const;                   // -1 between bands
     BandMem bandMemory(int index) const { return index >= 0 && size_t(index) < band_mem_.size() ? band_mem_[size_t(index)] : BandMem{}; }
     double stepHz() const { return step_hz_; }
-    struct Memory { QString name; double hz; int mode; double width; double low = 150; };
+    struct Memory { QString name; double hz; int mode; double width; double low = 150; int fm_dev = 1; double tsq_hz = 0, ttone_hz = 0, shift_hz = 0; };   // FM: deviation (0 narrow, 1 wide), tone squelch, transmit tone, repeater shift
+    // FM and repeaters. The transmit tone goes with FM overs (TransmitCard); the shift is not used for transmit yet.
+    QComboBox* fmDeviationBox() const { return fm_dev_; }       // 0 narrow +-2.5 kHz, 1 wide +-5 kHz
+    QComboBox* repeaterBox() const { return fm_rpt_; }
+    QPushButton* reverseButton() const { return fm_rev_; }
+    double toneSquelchHz() const;  void setToneSquelchHz(double hz);   // 0 = off
+    double txToneHz() const;       void setTxToneHz(double hz);
+    double repeaterShiftHz() const;  void setRepeaterShiftHz(double hz); // the repeater input minus its output; 0 = simplex
+    double ctcssHeardHz() const;                                 // the CTCSS tone the receiver hears (0 = none)
+    struct RepeaterChannel { QString name; double out_hz, shift_hz; };
+    static const std::vector<RepeaterChannel>& ukRepeaterChannels();  // UK band plan: 10 m RH1-RH8 (-100 kHz), 6 m 50.71-50.89 (+500 kHz), the FM calling channels
+    bool selectRepeater(int index);                              // FM, dial on the output, its shift; reverse off
     int saveMemory(const QString& name);                // current frequency, mode and filter; returns its index
     bool recallMemory(int index);
     void deleteMemory(int index);
@@ -241,6 +252,7 @@ signals:
     void rateRequested(unsigned rate);                  // the Source card's 48 / 96 / 192 buttons: MainWindow hands it to the Radio tab (starts the radio if needed, one confirmation, then the stream at that rate)
     void stopRadioRequested();                           // the Source card's Stop radio button
     void dialChanged(double hz);
+    void modeChanged(int index);                       // 0 USB, 1 LSB, 2 AM, 3 CW, 4 FM (the Transmit card shows the FM controls)
     // WSPR: a two-minute slot heard LIVE was decoded (date yymmdd, hhmm, the dial in MHz, one formatted line per spot; ok false: the decoder failed, why in error)
     void wsprSlot(const QString& date, const QString& hhmm, double dial_mhz, const QStringList& lines, bool ok, const QString& error);
     void wsprCall(const QString& call);                 // WSPR: a station spotted (after its slot's decode): looked up on QRZ like a CQ caller; the answer goes on its line
@@ -276,5 +288,7 @@ private:
     void applySettings(); void updateStatus(); void adopt(std::unique_ptr<fireside::IqSource> s, bool nineKhz, bool live = false); void rebuildFilterButtons();
     QFrame* card(const QString& title, QLayout* body);
     void syncFilterEdits(); void cutsEdited(); void syncNotchBox(); void updateSpectrumNotches(); double rfToAudio(double off) const; double audioToRf(double f) const;
+    QWidget* fm_box_ = nullptr; QComboBox *fm_dev_ = nullptr, *fm_tsq_ = nullptr, *fm_ttone_ = nullptr, *fm_rpt_ = nullptr; QSpinBox* fm_shift_ = nullptr; QPushButton* fm_rev_ = nullptr; double rev_shift_hz_ = 0;
+    void buildFmControls(QVBoxLayout* col); void leaveReverse(); Memory currentMemory(const QString& name) const; void applyFmMemory(const Memory& m);
     void loadSettings(); void refreshMemoryCombo(); void rebuildDecoder(); void outputControlsChanged(); void forgetLiveDevice();
 };

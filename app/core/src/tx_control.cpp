@@ -17,6 +17,7 @@
 #include "fireside/tx_out.h"
 #include "fireside/tx_render.h"
 #include "fireside/wspr.h"
+#include "fireside/bandplan.h"
 
 namespace fireside::txc {
 constexpr double kOverGraceS = 0.15;           // FT8/FT4, voice and other programs: how long a reading may sit above a limit (two or three readings) before unkeying
@@ -101,13 +102,13 @@ std::string TxControl::lines_ready(double mhz) {
     std::shared_ptr<TxLines> l; { std::lock_guard<std::mutex> g(lines_m_); l = lines_; }
     return l ? l->for_over(mhz * 1e6) : std::string();
 }
-void TxControl::prepare(double mhz, uint32_t mode, int ant) {
+void TxControl::prepare(double mhz, uint32_t mode, int ant, int filter_lo, int filter_hi, int tx_offset) {
     if (ant < 1 || ant > 3) throw std::invalid_argument("transmit antenna must be ANT1..ANT3");
     fx_.set("RDAL_OP_SET_TX_ANT", uint32_t(ant), 0);
     fx_.set("RDAL_OP_SET_TX_DSP_MODE", mode, 0);
     fx_.set("RDAL_OP_SET_TX_FREQ_TW", double(freq_to_tw(mhz)), mhz);
-    fx_.set("RDAL_OP_SET_TX_DSP_FILTER", 200, 3100);              // as PowerSDR does
-    fx_.set("RDAL_OP_SET_TX_OFFSET", 0, 0);
+    fx_.set("RDAL_OP_SET_TX_DSP_FILTER", filter_lo, filter_hi);   // as PowerSDR does: 200..3100 (SSB, CW, data); FM +-4 / +-8 kHz
+    fx_.set("RDAL_OP_SET_TX_OFFSET", tx_offset, 0);                // 0; FM 11025 (PowerSDR's TXOsc)
     txs::write_carrier_null(fx_, cal_, mhz); fx_.sync();
     prep_ = {false, mhz, mode, ant, 0};                                        // only prepare_cw marks it reusable
 }
@@ -401,7 +402,19 @@ SendResult TxControl::send_impl(double mhz, FtPrepared&& f, tx::Parity parity, d
 }  // namespace fireside::txc
 
 namespace fireside::txc {
-VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p, const LogFn& log) { forget_prep();
+std::string fm_band_refusal(double hz, double dev) {
+    const int band = txm::band_of(hz); const std::string name = band >= 0 ? txm::band_name(band) : "";
+    if (name != "10m" && name != "6m") return "FM is only sent on 10 m and 6 m";
+    for (double e : {hz - dev - 3000.0, hz, hz + dev - 0.0 + 3000.0}) {
+        if (txm::band_of(e) != band) return "the FM signal would reach outside the band";
+        const bandplan::Segment* sg = bandplan::segment_at(e);
+        if (!sg || (sg->kind != bandplan::Kind::Fm && sg->kind != bandplan::Kind::AllModes)) return std::string("the band plan has no FM here") + (sg ? std::string(" (") + sg->usage + ")" : std::string());
+    }
+    return "";
+}
+VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p, const LogFn& log) {
+    if (v.fm) return voice_fm(mhz, in, ptt, v, p, log);
+    forget_prep();
     std::lock_guard<std::mutex> l(op_); VoiceResult r; Busy b(*this);
     auto no = [&](const std::string& w) { r.why_not = w; say(log, "voice refused: " + w); return r; };
     if (!armed_) return no("transmit is not armed");
@@ -475,6 +488,91 @@ VoiceResult TxControl::voice(double mhz, IAudioIn& in, const std::function<bool(
     r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns(); note_stop(r.stop);
     r.mean_fwd_w = n_w ? sum_w / n_w : 0; r.talk_fwd_w = n_talk ? sum_talk_w / n_talk : 0;
     char m[200]; std::snprintf(m, sizeof m, "voice %s: %s, %.1f s, max %.1f W (peak set %.0f W)", v.lsb ? "LSB" : "USB", r.stop.c_str(), r.seconds, r.max_fwd_w, peak_w); say(log, m);
+    return r;
+}
+VoiceResult TxControl::voice_fm(double mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p, const LogFn& log) {
+    forget_prep();
+    std::lock_guard<std::mutex> l(op_); VoiceResult r; Busy b(*this);
+    auto no = [&](const std::string& w) { r.why_not = w; say(log, "FM refused: " + w); return r; };
+    if (!armed_) return no("transmit is not armed");
+    if (v.fm_deviation_hz != 2500 && v.fm_deviation_hz != 5000) return no("FM deviation must be 2.5 or 5 kHz");
+    if (auto why = fm_band_refusal(mhz * 1e6, v.fm_deviation_hz); !why.empty()) return no(why);
+    const int band = txm::band_of(mhz * 1e6);
+    if (!(v.peak_w >= 1 && v.peak_w <= txs::kMaxWatts)) return no("FM power must be 1..100 W");
+    if (!(v.max_key_s > 0 && v.max_key_s <= 600)) return no("time-out must be 1..600 s");
+    if (!(v.o.rate >= 48000 && v.o.rate <= 384000)) return no("FM needs a stream rate of 48 kHz or more");
+    const double k = k_for(band); if (!(k > 1000)) return no("no measured drive level on this band: press Measure drive first");
+    const double dcap = drive_cap(band); double power_w = v.peak_w, drive = std::sqrt(power_w / k);   // constant envelope at amplitude 1: drive -> power_w
+    if (!(drive > 0)) return no("no usable drive for this power on this band");
+    if (drive > dcap) {
+        drive = dcap; power_w = std::max(1.0, dcap * dcap * k); r.limited_to_w = power_w;
+        char m[160]; std::snprintf(m, sizeof m, "%.0f W is above this band's limit: FM at %.1f W (the drive ceiling)", v.peak_w, power_w); say(log, m);
+    }
+    const double drive_max = std::min(dcap, drive * 1.4);           // the closed loop may raise the drive by at most 3 dB
+    std::unique_ptr<tx::MicChain> mic; std::unique_ptr<tx::FmModulator> fm;
+    try {
+        tx::MicChainConfig mc = v.chain.mic; mc.sample_rate = 48000; mic = std::make_unique<tx::MicChain>(mc);
+        tx::FmTxConfig fc; fc.sample_rate = 48000; fc.deviation_hz = v.fm_deviation_hz; fc.ctcss_hz = v.ctcss_hz; fm = std::make_unique<tx::FmModulator>(fc);
+    } catch (const std::exception& e) { return no(e.what()); }
+    if (v.o.tx_ant < 1 || v.o.tx_ant > 3) return no("transmit antenna must be ANT1..ANT3");
+    if (auto why = lines_ready(mhz); !why.empty()) return no(why);
+    const int filt = fm_tx_filter_hz(v.fm_deviation_hz);
+    prepare(mhz - tx::kFmTxOffsetHz / 1e6, kFmDspMode, v.o.tx_ant, -filt, filt, int(tx::kFmTxOffsetHz));   // as PowerSDR: the DDS 11.025 kHz low, the signal that far above it
+    txo::ToneSource src(v.o.rate, 8); src.set_tap(iq_tap()); src.set_cap(std::min(dcap, drive_max * 1.05)); src.set_target(drive / std::sqrt(2.0)); src.set_mirror(v.o.mirror_q);   // soft start 3 dB low
+    src.set_correction(cal_.image_gain[size_t(band)], cal_.image_phase[size_t(band)]); src.set_live(size_t(v.o.rate * 0.06));
+    std::atomic<bool> stop{false}, failed{false}, keyed_now{false}; std::string prod_err; std::atomic<double> peak_dev{0};
+    std::thread prod([&] {
+        try {
+            std::unique_ptr<dsp::RationalResampler> rs; if (v.o.rate != 48000) rs = std::make_unique<dsp::RationalResampler>(48000.0, v.o.rate);
+            std::vector<float> a(480), proc; std::vector<tx::cf> iq; std::vector<dsp::cf> up; std::vector<std::complex<float>> out; size_t burst_n = 0;
+            while (!stop) {
+                const size_t n = in.read(a.data(), a.size(), 0.05); if (n == 0) continue;
+                proc.clear(); mic->process(a.data(), n, proc);
+                bool burst = false;
+                if (keyed_now && v.burst) { bool want = false; try { want = v.burst(); } catch (...) {} if (want) { burst = burst_n < 48000; burst_n += proc.size(); } else burst_n = 0; }   // at most 1 s per press
+                if (v.monitor) { try { v.monitor(proc.data(), proc.size()); } catch (...) {} }
+                iq.clear(); fm->process(proc.data(), proc.size(), iq, burst); peak_dev = fm->peak_deviation_hz();
+                const std::complex<float>* src_p; size_t m;
+                if (rs) { up.clear(); rs->process(iq.data(), iq.size(), up); src_p = up.data(); m = up.size(); } else { out.assign(iq.begin(), iq.end()); src_p = out.data(); m = out.size(); }
+                size_t done = 0; while (done < m && !stop) { const size_t w = src.push_live(src_p + done, m - done); done += w; if (done < m) std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            }
+        } catch (const std::exception& e) { prod_err = e.what(); failed = true; }
+    });
+    struct Join { std::atomic<bool>& s; std::thread& t; ~Join() { s = true; if (t.joinable()) t.join(); } } join{stop, prod};
+    txo::Stream st(pcm_(v.o.rate), src);
+    for (int i = 0; i < 40 && src.live_queued() < size_t(v.o.rate * 0.03) && !failed; ++i) clk_.sleep(0.005);
+    if (failed) return no("audio input: " + prod_err);
+    if (st.failed()) return no("the I/Q stream failed to start");
+    if (!ptt()) { r.stop = "PTT released before keying"; return r; }
+    GateConfig gc; gc.max_key_s = v.max_key_s; gc.max_fwd_w = fwd_limit_w(power_w); gc.max_rev_w = std::max(2.0, 0.5 * power_w); gc.max_swr = 3.0;
+    gc.grace_s = kOverGraceS; gc.hard_fwd_w = hard_fwd_limit_w(power_w);
+    KeyHook kh(key_hook_, tx::kFmTxOffsetHz);                                           // the DDS 11.025 kHz below the dial for the over
+    TxGate gate(fx_, gc, clk_); gate.arm(); std::string why;
+    if (!gate.key("voice FM", gc.max_key_s, &why)) { r.unkey_failed = gate.unkey_failed(); note_stop(why); return no(why); }
+    keyed_ = true; r.keyed = true; src.set_keyed(true); keyed_now = true; const double t0 = clk_.now(); double next_trim = t0 + 0.4, last_trim = t0; drive /= std::sqrt(2.0);
+    r.drive_start = drive; double sum_w = 0; int n_w = 0;
+    while (gate.keyed()) {
+        if (abort_) { gate.unkey("aborted"); break; }
+        if (!ptt()) { gate.unkey("PTT released"); break; }
+        if (failed) { gate.unkey("audio input failed: " + prod_err); break; }
+        if (st.failed()) { gate.unkey("the I/Q stream failed"); break; }
+        txm::Reading rd;
+        try { rd = txm::read(cal_.meter, band, int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcFwd)), int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcRev))); }
+        catch (const std::exception& e) { gate.unkey(std::string("meter read failed: ") + e.what()); break; }
+        r.max_fwd_w = std::max(r.max_fwd_w, rd.fwd_w); if (clk_.now() - t0 > 3.3) { sum_w += rd.fwd_w; ++n_w; }
+        if (p) p({clk_.now() - t0, src.level(), rd});
+        gate.report(rd); gate.tick(); if (!gate.keyed()) break;
+        const double now = clk_.now();
+        if (now < t0 + 3.0) {                                                           // closed loop in the first 3 s (a constant carrier): trim towards the set power
+            if (now >= next_trim && rd.fwd_w > 0.05) { drive = std::clamp(drive * std::clamp(std::sqrt(power_w / rd.fwd_w), 0.8, 1.25), 0.0, drive_max); src.set_target(drive); next_trim = now + 0.25; ++r.trims; }
+        } else if (rd.fwd_w > 1.1 * power_w && now - last_trim >= 0.2) { drive *= 0.9; src.set_target(drive); last_trim = now; ++r.trims; }   // afterwards: only ever down
+        clk_.sleep(0.02);
+    }
+    src.set_keyed(false); gate.ensure_unkeyed(2.0); keyed_ = false; keyed_now = false;
+    r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); r.seconds = clk_.now() - t0; r.drive = drive; r.underruns = src.live_underruns(); note_stop(r.stop);
+    r.mean_fwd_w = n_w ? sum_w / n_w : 0; r.talk_fwd_w = r.mean_fwd_w; r.fm_peak_dev_hz = peak_dev.load();
+    char m[240]; std::snprintf(m, sizeof m, "voice FM: %s, %.1f s, max %.1f W, mean %.1f W (set %.0f W), peak deviation %.0f Hz%s", r.stop.c_str(), r.seconds, r.max_fwd_w, r.mean_fwd_w, power_w,
+                               r.fm_peak_dev_hz, v.ctcss_hz > 0 ? (", CTCSS " + std::to_string(v.ctcss_hz).substr(0, 5) + " Hz").c_str() : ""); say(log, m);
     return r;
 }
 }  // namespace fireside::txc

@@ -115,7 +115,7 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
         if (!att_pause_) return; endAttPause();
         if (!ft_repeat_->isChecked() || !tx_ || !tx_->armed() || worker_running_ || ft_pending_ || rx_hold_ || (seq_ && seq_->active() && seq_->stage() != fireside::seq::Stage::Cq)) return;
         report(QString("Attended CQ: calling in the %1 slot now.").arg(ft_par_->currentIndex() ? "odd" : "even")); cq_->click(); });
-    voice_mode_ = new QComboBox; voice_mode_->addItems({"Auto (as the receiver)", "USB", "LSB"}); voice_mode_->setToolTip("Sideband for voice: Auto = the receiver's USB / LSB (its Auto LSB / USB picks it per band), else USB above 10 MHz");
+    voice_mode_ = new QComboBox; voice_mode_->addItems({"Auto (as the receiver)", "USB", "LSB"}); voice_mode_->setToolTip("Voice mode: Auto = as the receiver: its USB / LSB (its Auto LSB / USB picks it per band), or FM when the receiver is in FM (10 m and 6 m, with its deviation and transmit tone). Else USB above 10 MHz");
     voice_w_ = new QDoubleSpinBox; voice_w_->setRange(1, 100); voice_w_->setDecimals(0); voice_w_->setValue(20); voice_w_->setSuffix(" W PEP"); voice_w_->setToolTip("Peak envelope power: speech peaks reach it (the processing drives them into the limiter)");
     ptt_ = new QPushButton("PTT (hold)"); ptt_->setToolTip("Hold to talk: an SSB over with the Audio tab's input and processing (time-out 3 min)");
     space_ptt_ = new QCheckBox("Space bar"); space_ptt_->setToolTip("Hold the space bar to talk (not while typing in a box)"); space_ptt_->setChecked(false);
@@ -163,7 +163,9 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     auto* rowp = new QHBoxLayout; rowp->setSpacing(8); rowp->addWidget(ft_w_); rowp->addWidget(auto_cq_); rowp->addStretch(1); rowp->addWidget(ft_repeat_); rowp->addWidget(stop_);
     ft_box_ = part({row({ft_mode_, ft_hz_, ft_clear_}), row({ft_par_, auto_seq_}), row({cq_text_, cq_}, false), row({ft_msg_, send_}, false), rowp});
     digi_part_ = new QWidget(this); { auto* v = new QVBoxLayout(digi_part_); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(6); v->addWidget(ft_box_); }   // FT8 / FT4, or the WSPR beacon (buildWspr)
-    voice_part_ = part({row({voice_mode_, voice_w_, ptt_, space_ptt_, mic_ptt_, key_ptt_})});
+    burst_ = new QPushButton("1750"); burst_->setToolTip("FM: hold to send the 1750 Hz tone burst while you transmit (older repeaters open on it). At most 1 s per press.");
+    burst_->setVisible(false); connect(burst_, &QPushButton::pressed, this, [this] { burst_down_ = true; }); connect(burst_, &QPushButton::released, this, [this] { burst_down_ = false; });
+    voice_part_ = part({row({voice_mode_, voice_w_, ptt_, burst_, space_ptt_, mic_ptt_, key_ptt_})});
     { auto* vl = qobject_cast<QVBoxLayout*>(voice_part_->layout()); if (auto* hl = qobject_cast<QHBoxLayout*>(vl->itemAt(0)->layout())) hl->insertWidget(hl->count() - 1, stop3_ = new QPushButton("Stop")); stop3_->setToolTip("Unkey now"); connect(stop3_, &QPushButton::clicked, this, [this] { stop_->click(); }); }
     if (stop3_) stop3_->setObjectName("txstop");                                            // the transmit Stops: a muted red, easy to find
     buildCw();                                                                        // the CW part (TransmitCardCw.cpp)
@@ -215,6 +217,8 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
     connect(ft_msg_, &QLineEdit::editingFinished, this, [this] { saveState(); });
     connect(radio_, &RadioPanel::runningChanged, this, &TransmitCard::onRadioRunning);
     connect(rx_, &ReceiverPanel::dialChanged, this, &TransmitCard::onDial);
+    { auto fm_controls = [this] { if (burst_) burst_->setVisible(rx_->modeIndex() == 4 && voice_mode_->currentIndex() == 0); };
+      connect(rx_, &ReceiverPanel::modeChanged, this, fm_controls); connect(voice_mode_, &QComboBox::currentIndexChanged, this, fm_controls); fm_controls(); }
     if (!no_settings()) { QSettings q("fireside", "transmit"); power_->setValue(q.value("tune_w", 3).toDouble()); thr_->setCurrentIndex(std::clamp(q.value("thr", 2).toInt(), 0, 6)); auto_restore_->setChecked(q.value("auto_restore", true).toBool()); mirror_->setChecked(q.value("mirror_q", true).toBool());
                            ft_msg_->setText(q.value("ft_msg", ft_msg_->text()).toString()); cq_text_->setText(q.value("cq_text").toString()); ft_hz_->setValue(q.value("ft_hz", 1500).toInt()); ft_w_->setValue(q.value("ft_w", 5).toDouble());
                            ft_mode_->setCurrentIndex(q.value("ft_mode", 0).toInt()); ft_par_->setCurrentIndex(q.value("ft_par", 0).toInt()); auto_seq_->setChecked(q.value("auto_seq", true).toBool()); ft_clear_->setChecked(q.value("ft_clear", true).toBool()); 
@@ -862,8 +866,18 @@ void TransmitCard::startVoice() {
     txc::VoiceOptions v; v.o.rate = simulated_ ? 48000 : txRate(); v.o.mirror_q = mirror_->isChecked(); v.o.tx_ant = txAnt(); v.peak_w = voice_w_->value(); v.chain = audio_->chainConfig(); v.max_key_s = voice_timeout_s_;
     if (monitor_ && monitor_->isChecked()) { if (!mon_feed_) mon_feed_ = new PcAudioFeed(pc_audio_, this); PcAudioFeed* f = mon_feed_; v.monitor = [f](const float* a, size_t n) { f->push(a, n); }; }
     v.lsb = voice_mode_->currentIndex() == 2 || (voice_mode_->currentIndex() == 0 && (rx_->modeIndex() == 1 || (rx_->modeIndex() != 0 && mhz < 10.0 && !(mhz > 5.2 && mhz < 5.5))));   // Auto: as the receiver
+    v.fm = voice_mode_->currentIndex() == 0 && rx_->modeIndex() == 4;                    // Auto in FM: an FM over (simplex: on the dial)
+    if (v.fm) {
+        if (rx_->repeaterShiftHz() != 0 && !(rx_->reverseButton() && rx_->reverseButton()->isChecked())) {
+            report("FM: a repeater shift is set. Transmitting through a repeater (with the shift) is not in Fireside yet: set Shift to Simplex to talk on this frequency.");
+            voice_in_.reset(); vox_over_in_.reset(); if (vin) vin->set_reading(false); return;
+        }
+        v.lsb = false; v.fm_deviation_hz = rx_->fmDeviationBox() && rx_->fmDeviationBox()->currentIndex() == 0 ? 2500 : 5000; v.ctcss_hz = rx_->txToneHz(); burst_down_ = burst_ && burst_->isDown();
+        v.burst = [this] { return burst_down_.load(); };
+    }
     if (!(v.o.rate > 0)) { report("No playback rate for transmit."); voice_in_.reset(); vox_over_in_.reset(); if (vin) vin->set_reading(false); return; }
-    run(QString("Voice %1 on %2 MHz, %3 W PEP (%4%5)").arg(v.lsb ? "LSB" : "USB").arg(mhz, 0, 'f', 4).arg(v.peak_w, 0, 'f', 0).arg(audio_->inputName()).arg(vin ? ", VOX" : ""), !fw_iso_duplex_running(),
+    const QString vmode = v.fm ? QString("FM %1 kHz%2").arg(v.fm_deviation_hz / 1000, 0, 'f', 1).arg(v.ctcss_hz > 0 ? QString(", tone %1 Hz").arg(v.ctcss_hz, 0, 'f', 1) : QString()) : QString(v.lsb ? "LSB" : "USB");
+    run(QString("Voice %1 on %2 MHz, %3 W PEP (%4%5)").arg(vmode).arg(mhz, 0, 'f', 4).arg(v.peak_w, 0, 'f', 0).arg(audio_->inputName()).arg(vin ? ", VOX" : ""), !fw_iso_duplex_running(),
         [this, mhz, v, in, vin = vin.get()](txc::TxControl& t) {
             auto r = t.voice(mhz, *in, [this, vin] { return pttActive() || (vin && vox_cur_.load() == vin && vin->on()); }, v, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });   // unticking VOX unkeys (vox_cur_)
             if (vin) {
@@ -875,6 +889,8 @@ void TransmitCard::startVoice() {
             if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
             if (!r.keyed) return QString("Voice not keyed: ") + QString::fromStdString(r.why_not.empty() ? r.stop : r.why_not);
             if (r.max_fwd_w > 0.1) { last_tx_w_ = r.max_fwd_w; last_tx_t_ = QDateTime::currentSecsSinceEpoch(); }
+            if (v.fm) return QString("FM over: %1, %2 s, %3 W (set %4 W), peak %5 W, deviation peak %6 Hz%7").arg(QString::fromStdString(r.stop)).arg(r.seconds, 0, 'f', 1).arg(r.mean_fwd_w, 0, 'f', 1).arg(v.peak_w, 0, 'f', 0)
+                                 .arg(r.max_fwd_w, 0, 'f', 1).arg(r.fm_peak_dev_hz, 0, 'f', 0).arg(r.underruns > 4800 ? QString(", audio gaps %1").arg(r.underruns) : QString());
             return QString("Voice over: %1, %2 s, peak %3 W (set %4 W PEP), average %6 W (%7 W while talking)%5").arg(QString::fromStdString(r.stop)).arg(r.seconds, 0, 'f', 1).arg(r.max_fwd_w, 0, 'f', 1).arg(v.peak_w, 0, 'f', 0)
                    .arg(r.underruns > 4800 ? QString(", audio gaps %1").arg(r.underruns) : QString()).arg(r.mean_fwd_w, 0, 'f', 1).arg(r.talk_fwd_w, 0, 'f', 1)
                    + QString(". Audio peak %1 dB (0 = set power), power trims %2%3").arg(r.iq_peak_db, 0, 'f', 1).arg(r.trims)
@@ -942,7 +958,7 @@ void TransmitCard::updateButtons() {
     measure_->setEnabled(armed && idle && band >= 0); test_->setEnabled(armed && idle && band >= 0); test_w_->setEnabled(idle); mirror_->setEnabled(idle);
     send_->setEnabled(armed && idle && band >= 0 && !ft_pending_ && !wspr_on_); cq_->setEnabled(send_->isEnabled());
     if (auto_cq_) auto_cq_->setEnabled(auto_cq_->isChecked() || (armed && band >= 0 && !wspr_on_));
-    if (wspr_beacon_) wspr_beacon_->setEnabled(wspr_on_ || (armed && idle && band >= 0 && !ft_pending_)); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_);
+    if (wspr_beacon_) wspr_beacon_->setEnabled(wspr_on_ || (armed && idle && band >= 0 && !ft_pending_)); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_); if (burst_) burst_->setVisible(rx_->modeIndex() == 4 && voice_mode_->currentIndex() == 0);
     restore_->setEnabled(armed && idle && band >= 0 && on_atu && tx_->memory().recall(band).has_value());
     if (!on_atu) { tune_->setToolTip(QString("This band transmits on ANT%1: the ATU is on ANT1 only (Antennas tab)").arg(txAnt())); }
     if (tune2_) { tune2_->setEnabled(tune_->isEnabled()); tune2_->setToolTip(tune_->toolTip()); }

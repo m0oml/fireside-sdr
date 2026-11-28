@@ -49,6 +49,7 @@ public:
     QString myGrid4();                                  // the Log tab's (Wavelog station profile) grid, else the one in our CQ, else empty (never a guess)
     void setTxAntennaSource(std::function<int(double dialHz)> f) { tx_ant_ = std::move(f); updateButtons(); }   // the Antennas tab's TX antenna for a frequency
     QPushButton* pttButton() const { return ptt_; }
+    QPushButton* burstButton() const { return burst_; }
     void setPttForTests(bool down) { ptt_btn_ = down; onPttChanged(); }
     bool eventFilter(QObject* o, QEvent* e) override;
     void armThen(std::function<void()> done);           // start-up: the EEPROM check first, then `done` (opens the receive stream); at once if not needed   // --simulate: the model gets the backup as its EEPROM and the transmit level for its PA
@@ -129,6 +130,7 @@ private:
     bool ask(const QString& title, const QString& text);
     std::atomic<double> last_tx_w_{0}, unkeyed_utc_{0}, job_end_utc_{0}; std::atomic<qint64> last_tx_t_{0};
     std::function<int(double)> tx_ant_; int txAnt() const;
+    QPushButton* burst_ = nullptr; std::atomic<bool> burst_down_{false};   // FM: the 1750 Hz tone burst while held (at most 1 s per press)
     AudioPanel* audio_ = nullptr; QComboBox* voice_mode_ = nullptr; QDoubleSpinBox* voice_w_ = nullptr; QPushButton* ptt_ = nullptr; QCheckBox *space_ptt_ = nullptr, *mic_ptt_ = nullptr, *key_ptt_ = nullptr; QTimer* ptt_poll_ = nullptr;
     std::atomic<bool> ptt_btn_{false}, ptt_key_{false}, ptt_mic_{false}, ptt_jack_{false}; std::unique_ptr<fireside::txc::IAudioIn> voice_in_;   // ptt_key_: the space bar; ptt_jack_: the CW key jack
     std::shared_ptr<fireside::txo::IqTap> tx_tap_ = std::make_shared<fireside::txo::IqTap>();   // the transmitted I/Q for the receiver's transmit picture (display only)

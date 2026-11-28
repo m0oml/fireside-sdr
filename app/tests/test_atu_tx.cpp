@@ -1145,3 +1145,70 @@ TEST(cw_key_watcher_slow_read_leaves_the_lock_free_for_others) {    // READ_PTT 
     w.stop();
     CHECK(worst < 0.1); CHECK(w.reads() > 5);
 }
+
+// ---------------------------------------------------------------- FM transmit (simplex) on the simulated radio
+TEST(fm_band_check_allows_only_the_fm_and_all_mode_segments_of_10m_and_6m) {
+    for (double hz : {29.600e6, 29.620e6, 29.690e6, 29.150e6, 28.500e6, 51.510e6, 50.750e6, 51.300e6}) { const auto why = txc::fm_band_refusal(hz, 2500); if (!why.empty()) std::printf("  %.3f: %s\n", hz / 1e6, why.c_str()); CHECK(why.empty()); }
+    for (double hz : {14.200e6, 7.100e6, 29.400e6, 29.515e6, 50.450e6, 50.310e6, 50.050e6, 28.050e6, 29.698e6}) CHECK(!txc::fm_band_refusal(hz, 2500).empty());   // HF, satellites, guard, beacons, narrow, CW, past the top
+    CHECK(txc::fm_band_refusal(29.694e6, 2500).empty()); CHECK(!txc::fm_band_refusal(29.694e6, 5000).empty()); CHECK(!txc::fm_band_refusal(29.695e6, 2500).empty());   // edges: dial +- (deviation + 3 kHz) must stay below 29.7
+    CHECK_EQ(txc::fm_tx_filter_hz(2500), 4000); CHECK_EQ(txc::fm_tx_filter_hz(5000), 8000);
+}
+TEST(fm_over_writes_powersdrs_fm_setup_holds_the_set_power_and_ptt_unkeys) {
+    if (backup_image().empty()) return;
+    const int b10 = txm::band_of(29.6e6);
+    TxRig r; std::vector<std::complex<double>> iq; std::vector<std::pair<double, size_t>> marks; r.sim.band = b10;
+    r.tx = std::make_unique<txc::TxControl>(r.fx, [&](double) { return std::unique_ptr<IPcmOut>(new CapPcm(&r.sim.level, 48000, &iq, &marks, [] { return wall_utc(); })); }, atu::real_clock());
+    r.tx->set_k(b10, 0.8 * 11150); r.tx->arm(backup_image(), backup_image());             // the band's measured level reads 1 dB low: the closed loop must fix it
+    std::vector<double> below; r.tx->set_key_hook([&](bool k, double b) { if (k) below.push_back(b); });
+    FakeMic mic; const auto t0 = std::chrono::steady_clock::now();
+    txc::VoiceOptions v; v.fm = true; v.fm_deviation_hz = 2500; v.ctcss_hz = 77.0; v.peak_w = 10;
+    auto res = r.tx->voice(29.60, mic, [&] { return std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(4500); }, v);
+    if (!res.keyed) std::printf("  FM refused: %s\n", res.why_not.c_str());
+    CHECK(res.keyed); CHECK(res.stop.find("PTT released") != std::string::npos); CHECK(!r.sim.keyed); CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(2));
+    CHECK_EQ(sent(r, "RDAL_OP_SET_TX_DSP_MODE").back().d1, 5u);                          // PowerSDR's FM set-up
+    CHECK_EQ(sent(r, "RDAL_OP_SET_TX_DSP_FILTER").back().d1, uint32_t(-4000)); CHECK_EQ(sent(r, "RDAL_OP_SET_TX_DSP_FILTER").back().d2, 4000u);
+    CHECK_EQ(sent(r, "RDAL_OP_SET_TX_OFFSET").back().d1, 11025u);
+    CHECK_EQ(sent(r, "RDAL_OP_SET_TX_FREQ_TW").back().d1, freq_to_tw(29.60 - 0.011025));  // the DDS 11.025 kHz below the dial
+    CHECK_EQ(below.size(), size_t(1)); CHECK_NEAR(below.empty() ? 0.0 : below[0], 11025.0, 1e-9);
+    std::printf("  FM: mean %.2f W, max %.2f W, %d trims, peak deviation %.0f Hz\n", res.mean_fwd_w, res.max_fwd_w, res.trims, res.fm_peak_dev_hz);
+    CHECK_NEAR(res.mean_fwd_w, 10.0, 1.0); CHECK(res.max_fwd_w <= 1.2 * 10.0); CHECK(res.fm_peak_dev_hz > 500 && res.fm_peak_dev_hz <= 2500.0 * 1.0000001);
+    CHECK(res.underruns < 48000 / 10);
+    // what went out: the carrier 11.025 kHz above the DDS (= on the dial), constant envelope, carrying the CTCSS tone our receiver decodes
+    std::vector<fireside::dsp::cf> x; for (size_t i = iq.size() - 72000; i < iq.size() - 4800; ++i) x.push_back(fireside::dsp::cf(std::conj(iq[i])));   // undo the mirror
+    double fsum = 0; for (size_t i = 1; i < x.size(); ++i) fsum += std::arg(x[i] * std::conj(x[i - 1])); const double fmean = fsum / double(x.size() - 1) * 48000 / (2 * M_PI);
+    std::printf("  carrier at %+.1f Hz from the DDS\n", fmean); CHECK_NEAR(fmean, 11025.0, 40.0);
+    for (size_t i = 0; i < x.size(); ++i) x[i] *= std::polar(1.0f, float(-2 * M_PI * 11025.0 * double(i) / 48000));
+    fireside::dsp::DemodConfig dc; dc.mode = fireside::dsp::Mode::FM; dc.fm_deviation_hz = 2500; dc.lo_hz = -8000; dc.hi_hz = 8000;
+    fireside::dsp::Demodulator d(dc); std::vector<float> a; d.process(x.data(), x.size(), a); CHECK_NEAR(d.ctcss_heard_hz(), 77.0, 0.05);
+    // the next SSB over writes the SSB set-up again (no FM leftovers)
+    r.sim.band = 5; r.tx->set_k(5, 11150); const auto t1 = std::chrono::steady_clock::now(); txc::VoiceOptions s; s.peak_w = 5;
+    auto ssb = r.tx->voice(14.20, mic, [&] { return std::chrono::steady_clock::now() - t1 < std::chrono::milliseconds(800); }, s);
+    CHECK(ssb.keyed); CHECK(!r.sim.keyed); CHECK_EQ(sent(r, "RDAL_OP_SET_TX_DSP_MODE").back().d1, 1u); CHECK_EQ(sent(r, "RDAL_OP_SET_TX_OFFSET").back().d1, 0u);
+    CHECK_EQ(sent(r, "RDAL_OP_SET_TX_DSP_FILTER").back().d1, 200u); CHECK_EQ(sent(r, "RDAL_OP_SET_TX_DSP_FILTER").back().d2, 3100u); CHECK_EQ(sent(r, "RDAL_OP_SET_TX_FREQ_TW").back().d1, freq_to_tw(14.20));
+}
+TEST(fm_refusals_time_out_and_the_1750_burst_lasts_at_most_a_second) {
+    if (backup_image().empty()) return;
+    const int b10 = txm::band_of(29.6e6);
+    { TxRig r; r.sim.band = b10; r.tx->set_k(b10, 11150); FakeMic mic; txc::VoiceOptions v; v.fm = true; v.peak_w = 10;
+      CHECK(r.tx->voice(29.6, mic, [] { return true; }, v).why_not.find("not armed") != std::string::npos);
+      r.tx->arm(backup_image(), backup_image()); r.tx->set_k(b10, 11150);
+      CHECK(r.tx->voice(14.2, mic, [] { return true; }, v).why_not.find("10 m and 6 m") != std::string::npos);
+      CHECK(r.tx->voice(29.4, mic, [] { return true; }, v).why_not.find("band plan") != std::string::npos);
+      v.peak_w = 101; CHECK(r.tx->voice(29.6, mic, [] { return true; }, v).why_not.find("1..100 W") != std::string::npos); v.peak_w = 10;
+      v.fm_deviation_hz = 3000; CHECK(!r.tx->voice(29.6, mic, [] { return true; }, v).keyed); v.fm_deviation_hz = 2500;
+      v.ctcss_hz = 20; CHECK(!r.tx->voice(29.6, mic, [] { return true; }, v).keyed); v.ctcss_hz = 0;
+      CHECK_EQ(sent(r, "RDAL_OP_SET_MOX").size(), size_t(0));
+      v.max_key_s = 0.6; auto t = r.tx->voice(29.6, mic, [] { return true; }, v); CHECK(t.keyed); CHECK(t.stop.find("time limit") != std::string::npos); CHECK(!r.sim.keyed);
+      r.sim.rev_frac = 0.6; v.max_key_s = 10; auto sw = r.tx->voice(29.6, mic, [] { return true; }, v); CHECK(sw.keyed); CHECK(txc::TxControl::is_safety_stop(sw.stop)); CHECK(!r.sim.keyed); }
+    {   // the tone burst: held for 2.5 s, sent for 1 s
+        TxRig r; std::vector<std::complex<double>> iq; std::vector<std::pair<double, size_t>> marks; r.sim.band = b10;
+        r.tx = std::make_unique<txc::TxControl>(r.fx, [&](double) { return std::unique_ptr<IPcmOut>(new CapPcm(&r.sim.level, 48000, &iq, &marks, [] { return wall_utc(); })); }, atu::real_clock());
+        r.tx->set_k(b10, 11150); r.tx->arm(backup_image(), backup_image());
+        FakeMic mic; const auto t0 = std::chrono::steady_clock::now(); txc::VoiceOptions v; v.fm = true; v.fm_deviation_hz = 5000; v.peak_w = 5; v.burst = [] { return true; };
+        auto res = r.tx->voice(29.6, mic, [&] { return std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(3000); }, v); CHECK(res.keyed);
+        std::vector<double> f; for (size_t i = 1; i < iq.size(); ++i) f.push_back(std::arg(std::conj(iq[i]) * iq[i - 1]) * 48000 / (2 * M_PI) - 11025.0);
+        int windows = 0; for (size_t o = 0; o + 4800 <= f.size(); o += 4800) { std::complex<double> s(0, 0); for (size_t i = 0; i < 4800; ++i) s += f[o + i] * std::polar(1.0, -2 * M_PI * 1750 * double(i) / 48000);
+            if (2 * std::abs(s) / 4800 > 0.4 * 5000) ++windows; }
+        std::printf("  1750 Hz burst in %d windows of 0.1 s\n", windows); CHECK(windows >= 8 && windows <= 11);
+    }
+}

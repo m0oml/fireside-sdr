@@ -152,6 +152,72 @@ double default_filter_width(Mode m) {
     return 2700;
 }
 
+// ---------------------------------------------------------------- FM: CTCSS tones, tone squelch, sub-audio high-pass and de-emphasis
+const std::vector<double>& ctcss_tones() {
+    static const std::vector<double> t = {67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5, 107.2, 110.9, 114.8, 118.8, 123.0, 127.3,
+                                          131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 159.8, 162.2, 165.5, 167.9, 171.3, 173.8, 177.3, 179.9, 183.5, 186.2, 189.9, 192.8, 196.6,
+                                          199.5, 203.5, 206.5, 210.7, 218.1, 225.7, 229.1, 233.6, 241.8, 250.3, 254.1};
+    return t;
+}
+char ctcss_uk_letter(double hz) {
+    static const std::pair<double, char> uk[] = {{67.0, 'A'}, {71.9, 'B'}, {77.0, 'C'}, {82.5, 'D'}, {88.5, 'E'}, {94.8, 'F'}, {103.5, 'G'}, {110.9, 'H'}, {118.8, 'J'}};
+    for (const auto& [f, c] : uk) if (std::fabs(f - hz) < 0.05) return c;
+    return 0;
+}
+Biquad Biquad::highpass(double fs, double f0, double q) {
+    const double w = 2 * kPi * f0 / fs, al = std::sin(w) / (2 * q), cw = std::cos(w), a0 = 1 + al; Biquad b;
+    b.b0 = (1 + cw) / 2 / a0; b.b1 = -(1 + cw) / a0; b.b2 = b.b0; b.a1 = -2 * cw / a0; b.a2 = (1 - al) / a0; return b;
+}
+Biquad Biquad::lowpass(double fs, double f0, double q) {
+    const double w = 2 * kPi * f0 / fs, al = std::sin(w) / (2 * q), cw = std::cos(w), a0 = 1 + al; Biquad b;
+    b.b0 = (1 - cw) / 2 / a0; b.b1 = (1 - cw) / a0; b.b2 = b.b0; b.a1 = -2 * cw / a0; b.a2 = (1 - al) / a0; return b;
+}
+namespace { constexpr double kCtcssWindowS = 0.4, kCtcssEvalS = 0.05, kCtcssHoldS = 0.25, kCtcssRatio = 15.85; constexpr int kCtcssHits = 3; }   // 12 dB over the median, three evaluations running
+CtcssDetector::CtcssDetector(double audio_rate, double want_hz)
+    : want_(want_hz), decim_(std::max(1, int(std::lround(audio_rate / 1000.0)))), lp1_(Biquad::lowpass(audio_rate, 320, 0.5412)), lp2_(Biquad::lowpass(audio_rate, 320, 1.3066)) {
+    rate_ = audio_rate / decim_;
+    const size_t n = size_t(std::lround(kCtcssWindowS * rate_)); ring_.assign(n, 0.0f); win_.resize(n);
+    for (size_t i = 0; i < n; ++i) win_[i] = float(0.5 - 0.5 * std::cos(2 * kPi * (double(i) + 0.5) / double(n)));
+}
+bool CtcssDetector::process(float a) {
+    acc_ += lp2_.run(lp1_.run(a));                          // low-pass (4th order, 320 Hz), then a box average over the decimation (nulls at 1 kHz multiples)
+    if (++phase_ < decim_) return open_;
+    phase_ = 0; ring_[pos_] = float(acc_ / decim_); acc_ = 0; pos_ = (pos_ + 1) % ring_.size(); if (filled_ < ring_.size()) ++filled_;
+    t_s_ += 1.0 / rate_;
+    if (++since_eval_ >= int(std::lround(kCtcssEvalS * rate_)) && filled_ == ring_.size()) { since_eval_ = 0; evaluate(); }
+    return open_;
+}
+void CtcssDetector::evaluate() {
+    const auto& tones = ctcss_tones(); const size_t n = ring_.size(); std::vector<double> pw(tones.size());
+    double total = 0; for (size_t i = 0; i < n; ++i) total += double(ring_[i]) * ring_[i];
+    for (size_t k = 0; k < tones.size(); ++k) {            // Goertzel on the windowed block, oldest sample first
+        const double c = 2 * std::cos(2 * kPi * tones[k] / rate_); double s1 = 0, s2 = 0;
+        for (size_t i = 0; i < n; ++i) { const double s0 = double(ring_[(pos_ + i) % n]) * win_[i] + c * s1 - s2; s2 = s1; s1 = s0; }
+        pw[k] = s1 * s1 + s2 * s2 - c * s1 * s2;
+    }
+    size_t best = 0; for (size_t k = 1; k < pw.size(); ++k) if (pw[k] > pw[best]) best = k;
+    std::vector<double> sorted = pw; std::nth_element(sorted.begin(), sorted.begin() + long(sorted.size() / 2), sorted.end());
+    const double median = sorted[sorted.size() / 2];
+    const bool hit = pw[best] > kCtcssRatio * median && pw[best] > 1e-6 * double(n) * double(n) && pw[best] > 1e-4 * total * double(n);   // a real tone, not silence; and a fair share of the block's energy
+    const double f = hit ? tones[best] : 0.0;
+    if (hit && f == cand_) ++hits_; else { hits_ = hit ? 1 : 0; cand_ = f; }
+    if (hits_ >= kCtcssHits) { heard_hz_ = f; last_hit_s_ = t_s_; }
+    else if (t_s_ - last_hit_s_ > kCtcssHoldS) heard_hz_ = 0;
+    open_ = heard_hz_ > 0 && (want_ <= 0 || std::fabs(heard_hz_ - want_) < 0.05);
+}
+FmAudio::FmAudio(double fs, bool hpf, bool de)
+    : hpf_(hpf), de_(de), h1_(Biquad::highpass(fs, 300, 0.5176)), h2_(Biquad::highpass(fs, 300, 0.7071)), h3_(Biquad::highpass(fs, 300, 1.9319)) {
+    const double K = 2 * fs, wz = K * std::tan(kPi * 3000 / fs), wp = K * std::tan(kPi * 300 / fs), d = 1 + K / wp;   // H(s) = (1 + s/wz) / (1 + s/wp), bilinear
+    de_b0_ = (1 + K / wz) / d; de_b1_ = (1 - K / wz) / d; de_a1_ = (1 - K / wp) / d;
+    const std::complex<double> z = std::polar(1.0, -2 * kPi * 1000 / fs), h = (de_b0_ + de_b1_ * z) / (1.0 + de_a1_ * z);
+    de_b0_ /= std::abs(h); de_b1_ /= std::abs(h);                                 // unity at 1 kHz
+}
+float FmAudio::process(float x) {
+    if (hpf_) x = h3_.run(h2_.run(h1_.run(x)));
+    if (de_) { const double y = de_b0_ * x + de_b1_ * de_x1_ - de_a1_ * de_y1_; de_x1_ = x; de_y1_ = y; x = float(y); }
+    return x;
+}
+
 namespace { std::mutex g_stage_m; AudioStageFactory g_spectral_nr; }
 void set_spectral_nr_factory(AudioStageFactory f) { std::lock_guard<std::mutex> l(g_stage_m); g_spectral_nr = std::move(f); }
 Demodulator::Demodulator(const DemodConfig& c)
@@ -180,6 +246,7 @@ Demodulator::Demodulator(const DemodConfig& c)
     if (c.noise_reduction) nr_ = std::make_unique<AdaptiveLineFilter>(AdaptiveLineFilter::Output::Prediction, 128, 16, 0.005f);   // measured: +6 dB SNR on a tone in noise, adapts in well under a second
     if (c.spectral_nr && c.mode != Mode::CW) { AudioStageFactory f; { std::lock_guard<std::mutex> l(g_stage_m); f = g_spectral_nr; } if (f) nr2_ = f(c.audio_rate); }   // voice modes only: it would smear a CW tone
     if (c.mode == Mode::AM && c.am_detector == AmDetector::Sync) sam_reset();
+    if (c.mode == Mode::FM) { ctcss_ = std::make_unique<CtcssDetector>(c.audio_rate, c.ctcss_hz); fm_audio_ = std::make_unique<FmAudio>(c.audio_rate, c.fm_subaudio_hpf, c.fm_deemphasis); }
 }
 void Demodulator::sam_reset() {
     const double wn = 2 * kPi * std::max(5.0, c_.sam_loop_hz) / c_.audio_rate, zeta = 0.707;   // second-order loop: proportional + integral path
@@ -230,7 +297,7 @@ void Demodulator::process(const cf* x, size_t n, std::vector<float>& audio) {
             case Mode::USB: case Mode::LSB: a = s.real(); break;
             case Mode::AM: { if (c_.am_detector == AmDetector::Sync) { a = sam_sample(s); break; } const double m = std::abs(s); am_dc_ += 0.0005 * (m - am_dc_); a = float(m - am_dc_); break; }
             case Mode::CW: { a = float(s.real() * std::cos(cw_phase_) - s.imag() * std::sin(cw_phase_)); cw_phase_ += step; if (cw_phase_ > kPi) cw_phase_ -= 2 * kPi; break; }
-            case Mode::FM: { a = float(std::arg(s * std::conj(prev_)) * fm_scale); prev_ = s; break; }
+            case Mode::FM: { a = float(std::arg(s * std::conj(prev_)) * fm_scale); prev_ = s; if (ctcss_) ctcss_->process(a); if (fm_audio_) a = fm_audio_->process(a); break; }
             default: a = 0;
         }
         if (notch_) a = notch_->process(a);
@@ -238,11 +305,15 @@ void Demodulator::process(const cf* x, size_t n, std::vector<float>& audio) {
         if (anf_) a = anf_->process(a);
         if (nr_) a = nr_->process(a);
         if (nr2_) a = nr2_->process(a);
-        if (c_.squelch_dbfs > -199.0) {                                     // gate on the pre-AGC level, with hysteresis and a click-free ramp
+        const bool level_sq = c_.squelch_dbfs > -199.0, tone_sq = ctcss_ && c_.ctcss_hz > 0;
+        if (level_sq) {                                                      // gate on the pre-AGC level, with hysteresis
             sq_power_ += sq_a * (p - sq_power_);                             // fast detector (10 ms): the 100 ms S-meter smoothing would hold the gate open for ~0.5 s
             const double db = 10.0 * std::log10(sq_power_ + 1e-20);
             if (squelch_open_ && db < c_.squelch_dbfs - 2.0) squelch_open_ = false; else if (!squelch_open_ && db >= c_.squelch_dbfs) squelch_open_ = true;
-            squelch_gain_ += 0.01f * ((squelch_open_ ? 1.0f : 0.0f) - squelch_gain_); a *= squelch_gain_;
+        }
+        if (level_sq || tone_sq) {                                           // both must be open (tone squelch: the wanted CTCSS tone is heard); click-free ramp
+            const bool open = (!level_sq || squelch_open_) && (!tone_sq || ctcss_->open());
+            squelch_gain_ += 0.01f * ((open ? 1.0f : 0.0f) - squelch_gain_); a *= squelch_gain_;
         }
         audio.push_back(manual ? std::tanh(a * mg * c_.gain) : a * c_.gain);              // manual gain (AGC off) is soft-limited: tanh is linear for small signals, never exceeds 1
     }

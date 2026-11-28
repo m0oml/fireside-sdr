@@ -21,6 +21,7 @@ struct RxStatus {
     bool running = false, ended = false, live = false, stream_dead = false;
     std::string error, source, decoder;                   // decoder: the active decoder's one-line status (empty if none)
     double sample_rate = 0, peak_hz = 0, peak_db = -200, signal_dbfs = -200, agc_gain_db = 0;
+    double ctcss_heard_hz = 0; bool tone_open = true;      // FM: the CTCSS tone heard (0 = none), and whether the tone squelch is open
     bool am_locked = false; double am_carrier_hz = 0;      // synchronous AM: the loop holds the carrier, and where it is (Hz from the dial)
     size_t fft_size = 0;
     uint64_t samples = 0, audio_samples = 0, frames = 0, frames_dropped = 0, audio_dropped = 0, xruns = 0;

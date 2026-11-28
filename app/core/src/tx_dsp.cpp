@@ -356,3 +356,36 @@ TxPlan plan_tx(double utc, DigiMode m, Parity p, double start_offset_s, double m
     return TxPlan{n, n.start_utc + start_offset_s, 0.0};
 }
 }  // namespace fireside::tx
+
+namespace fireside::tx {
+// ---- FM
+FmModulator::FmModulator(const FmTxConfig& c)
+    : c_(c), hp1_(Biquad::Type::HighPass, c.sample_rate, 300, 0.5412), hp2_(Biquad::Type::HighPass, c.sample_rate, 300, 1.3066),
+      lp1_(Biquad::Type::LowPass, c.sample_rate, 3000, 0.5412), lp2_(Biquad::Type::LowPass, c.sample_rate, 3000, 1.3066) {
+    if (!(c.deviation_hz >= 1000 && c.deviation_hz <= 6000)) throw std::invalid_argument("FM deviation must be 1..6 kHz");
+    if (!(std::fabs(c.offset_hz) + c.deviation_hz + 3000 <= 0.45 * c.sample_rate)) throw std::invalid_argument("FM offset leaves no room below the Nyquist frequency");
+    if (!(c.ctcss_hz == 0 || (c.ctcss_hz >= 60 && c.ctcss_hz <= 260))) throw std::invalid_argument("CTCSS tone must be 60..260 Hz (or 0 = none)");
+    if (!(c.ctcss_level >= 0 && c.ctcss_level <= 0.5) || !(c.burst_level > 0 && c.burst_level <= 1) || !(c.amplitude > 0 && c.amplitude <= 1)) throw std::invalid_argument("bad FM levels");
+    // Pre-emphasis H(s) = (1 + s/w1) / (1 + s/w2), w1 = 300 Hz, w2 = 3 kHz (bilinear, pre-warped), normalised to unity at 1 kHz.
+    const double fs = c.sample_rate, K = 2 * fs, w1 = K * std::tan(kPi * 300 / fs), w2 = K * std::tan(kPi * 3000 / fs), d = 1 + K / w2;
+    pre_b0_ = (1 + K / w1) / d; pre_b1_ = (1 - K / w1) / d; pre_a1_ = (1 - K / w2) / d;
+    const std::complex<double> z = std::polar(1.0, -2 * kPi * 1000 / fs), h = (pre_b0_ + pre_b1_ * z) / (1.0 + pre_a1_ * z);
+    pre_b0_ /= std::abs(h); pre_b1_ /= std::abs(h);
+}
+void FmModulator::process(const float* audio, size_t n, std::vector<cf>& iq, bool burst) {
+    const double fs = c_.sample_rate, tone_dev = c_.ctcss_hz > 0 ? c_.ctcss_level * c_.deviation_hz : 0.0, voice_dev = c_.deviation_hz - tone_dev;
+    for (size_t i = 0; i < n; ++i) {
+        double x = hp2_.process(hp1_.process(audio[i]));
+        if (c_.preemphasis) { const double y = pre_b0_ * x + pre_b1_ * pre_x1_ - pre_a1_ * pre_y1_; pre_x1_ = x; pre_y1_ = y; x = y; }
+        x = std::clamp(x, -1.0, 1.0);                                       // the deviation limiter
+        x = lp2_.process(lp1_.process(float(x)));                            // splatter filter (the clip's harmonics)
+        x = std::clamp(x, -1.0, 1.0);
+        if (burst) { x = c_.burst_level * std::sin(burst_ph_); burst_ph_ += 2 * kPi * c_.burst_hz / fs; if (burst_ph_ > kPi) burst_ph_ -= 2 * kPi; }
+        double f = voice_dev * x;
+        if (tone_dev > 0) { f += tone_dev * std::sin(tone_ph_); tone_ph_ += 2 * kPi * c_.ctcss_hz / fs; if (tone_ph_ > kPi) tone_ph_ -= 2 * kPi; }
+        peak_dev_ = std::max(peak_dev_, std::fabs(f));
+        phase_ += 2 * kPi * (c_.offset_hz + f) / fs; phase_ = std::remainder(phase_, 2 * kPi);
+        iq.push_back(float(c_.amplitude) * cf(float(std::cos(phase_)), float(std::sin(phase_))));
+    }
+}
+}  // namespace fireside::tx

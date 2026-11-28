@@ -176,6 +176,28 @@ private:
     MicChain mic_; SsbModulator ssb_; PeakLimiter lim_; std::vector<float> a_; std::vector<cf> b_;
 };
 
+// ---- FM -----------------------------------------------------------------------------------------------------------------------------
+// FM transmit, after PowerSDR (DttSP sdr.c / update.c): the processed mic audio (from MicChain, peaks <= its limiter's ceiling) -> 300 Hz
+// high-pass (room for the CTCSS tone) -> pre-emphasis (6 dB/octave from 300 Hz to 3 kHz, unity at 1 kHz) -> hard clip at +-1 = full voice
+// deviation -> 3 kHz splatter low-pass -> clamp. Plus the CTCSS tone (ctcss_level x deviation, as PowerSDR's 0.13) and, while burst is on, a
+// 1750 Hz tone burst instead of the voice. Instantaneous frequency = offset_hz + voice + tone; continuous phase; constant envelope `amplitude`.
+// The peak deviation can never exceed deviation_hz (voice is scaled to deviation x (1 - ctcss_level)).
+// offset_hz: where the carrier sits in the I/Q. PowerSDR transmits FM 11.025 kHz above its TX DDS (TXOsc = 11025, the DDS 11.025 kHz low).
+inline constexpr double kFmTxOffsetHz = 11025;
+struct FmTxConfig { double sample_rate = 48000, deviation_hz = 2500, offset_hz = kFmTxOffsetHz, ctcss_hz = 0, ctcss_level = 0.13, amplitude = 1.0;
+                    bool preemphasis = true; double burst_hz = 1750, burst_level = 0.6; };
+class FmModulator {
+public:
+    explicit FmModulator(const FmTxConfig& c);    // throws std::invalid_argument (deviation 1..6 kHz, |offset| + deviation + 3 kHz <= 0.45 x rate, tone 0 or 60..260 Hz, levels in [0, 0.5] / (0, 1])
+    void process(const float* audio, size_t n, std::vector<cf>& iq, bool burst = false);   // appends n samples
+    double peak_deviation_hz() const { return peak_dev_; }        // the largest |instantaneous frequency - offset| so far
+    const FmTxConfig& config() const { return c_; }
+private:
+    FmTxConfig c_; Biquad hp1_, hp2_, lp1_, lp2_; double pre_b0_ = 1, pre_b1_ = 0, pre_a1_ = 0, pre_x1_ = 0, pre_y1_ = 0; double phase_ = 0, tone_ph_ = 0, burst_ph_ = 0, peak_dev_ = 0;
+};
+// The two-sided bandwidth of an FM signal by Carson's rule: 2 x (deviation + highest audio frequency).
+inline double carson_bandwidth_hz(double deviation_hz, double audio_hz = 3000) { return 2 * (deviation_hz + audio_hz); }
+
 // ---- CW ---------------------------------------------------------------------------------------------------------------------------
 // Keying is one byte per sample (non-zero = key down). The shaper turns it into I/Q: a carrier at offset_hz from the dial (0 = on the
 // dial, which is where the receive CW mode listens: it makes the beat note itself) with raised-cosine edges of edge_ms.

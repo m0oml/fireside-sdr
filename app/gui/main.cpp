@@ -308,6 +308,22 @@ int main(int argc, char** argv) {
             step("two memories", r->memories().size() == 2); r->setModeIndex(0); r->setDialHz(3.7e6); step("recall", r->recallMemory(0) && std::fabs(r->dialHz() - 14.2e6) < 1 && r->modeIndex() == 1 && r->filterWidth() == 2400);
             step("recall CW memory", r->recallMemory(1) && r->modeIndex() == 3 && std::fabs(r->dialHz() - 7.03e6) < 1); step("bad recall", !r->recallMemory(5));
             r->saveMemory("CW 40m"); step("same name replaces", r->memories().size() == 2);
+            {   // FM and repeaters (receive side): controls only in FM, UK channels, shift, reverse, tone squelch, FM memories
+                step("FM controls hidden outside FM", !r->fmDeviationBox()->isVisibleTo(r));
+                const auto& ch = ReceiverPanel::ukRepeaterChannels(); int rh1 = -1, six = -1; for (size_t i = 0; i < ch.size(); ++i) { if (rh1 < 0 && ch[i].name.contains("RH1")) rh1 = int(i); if (six < 0 && ch[i].name.startsWith("6 m  out")) six = int(i); }
+                step("UK channels", ch.size() == 29 && rh1 >= 0 && std::fabs(ch[size_t(rh1)].out_hz - 29.62e6) < 1 && ch[size_t(rh1)].shift_hz == -100e3 && six >= 0 && std::fabs(ch[size_t(six)].out_hz - 50.71e6) < 1 && ch[size_t(six)].shift_hz == 500e3);
+                step("select RH1", r->selectRepeater(rh1) && r->modeIndex() == 4 && std::fabs(r->dialHz() - 29.62e6) < 1 && r->repeaterShiftHz() == -100e3);
+                step("FM controls shown in FM", r->fmDeviationBox()->isVisibleTo(r));
+                r->fmDeviationBox()->setCurrentIndex(0); emit r->fmDeviationBox()->activated(0); step("narrow: 2.5 kHz and a 12 kHz filter", r->options().dc.fm_deviation_hz == 2500 && r->filterWidth() == 12000);
+                r->setToneSquelchHz(77.0); step("tone squelch reaches the demodulator", std::fabs(r->options().dc.ctcss_hz - 77.0) < 1e-6);
+                r->setTxToneHz(77.0);
+                r->reverseButton()->setChecked(true); step("reverse listens on the input", std::fabs(r->dialHz() - 29.52e6) < 1);
+                r->saveMemory("GB3RH"); step("memory saved while reversed is the output", std::fabs(r->memories().back().hz - 29.62e6) < 1 && r->memories().back().shift_hz == -100e3 && std::fabs(r->memories().back().tsq_hz - 77.0) < 1e-6 && r->memories().back().fm_dev == 0);
+                r->reverseButton()->setChecked(false); step("reverse off goes back", std::fabs(r->dialHz() - 29.62e6) < 1);
+                r->selectRepeater(0); step("calling channel is simplex", r->repeaterShiftHz() == 0); r->reverseButton()->setChecked(true); step("no reverse on simplex", !r->reverseButton()->isChecked() && std::fabs(r->dialHz() - 29.6e6) < 1);
+                r->setToneSquelchHz(0); r->setRepeaterShiftHz(0); step("recall FM memory", r->recallMemory(2) && r->modeIndex() == 4 && std::fabs(r->dialHz() - 29.62e6) < 1 && r->repeaterShiftHz() == -100e3 && std::fabs(r->toneSquelchHz() - 77.0) < 1e-6 && std::fabs(r->txToneHz() - 77.0) < 1e-6);
+                r->recallMemory(1); step("back to CW", r->modeIndex() == 3 && !r->fmDeviationBox()->isVisibleTo(r));
+            }
             {   // band memory: each band goes back where it was left; a band never visited starts at its usual place (its FT8 frequency under FT8)
                 r->setDecoderIndex(0); r->setDialHz(7.155e6); r->setModeIndex(1); r->setFilterWidth(1800);
                 r->setDialHz(14.1e6); step("FT8 button on 20 m", r->selectFt(false) && std::fabs(r->dialHz() - 14.074e6) < 1 && r->decoderIndex() == 4);
@@ -338,7 +354,7 @@ int main(int argc, char** argv) {
             MainWindow w(false, false, true); auto* r = w.receiver();
             step("auto sideband off restored", !r->autoSidebandBox()->isChecked()); step("mode restored", r->modeIndex() == 1); step("agc restored", r->agcIndex() == 3); step("filter restored", r->filterWidth() == 2400); step("notches restored", r->notchesHz().size() == 3 && r->notchesHz()[1] == 900 && r->notchesHz()[2] == 2200); step("cuts and shape restored", r->cutLow() == 300 && r->cutHigh() == 2700 && r->filterShape() == 2); step("dial restored", std::fabs(r->dialHz() - 14.2e6) < 1);
             step("nr restored", r->nrBox()->isChecked()); step("notch restored", r->notchBox()->value() == 1500); step("squelch restored", r->squelchBox()->value() == -80);
-            step("memories restored", r->memories().size() == 2 && r->memories()[0].name == "20m test" && r->memories()[1].mode == 3);
+            step("memories restored", r->memories().size() == 3 && r->memories()[0].name == "20m test" && r->memories()[1].mode == 3); step("FM memory restored", r->memories()[2].mode == 4 && r->memories()[2].shift_hz == -100e3 && std::fabs(r->memories()[2].ttone_hz - 77.0) < 1e-6 && r->memories()[2].fm_dev == 0); step("FM settings restored", r->fmDeviationBox()->currentIndex() == 0 && std::fabs(r->toneSquelchHz() - 77.0) < 1e-6 && r->repeaterShiftHz() == -100e3);
             step("palette restored", r->paletteIndex() == 2 && r->waterfall()->palette() == fireside::display::Palette::Viridis);
             step("axis settling restored", r->axisSettling() == 2);
             step("writes are never remembered", !w.radio()->allowWritesBox()->isChecked()); step("NR2 restored", r->nr2Box()->isChecked());
@@ -961,6 +977,24 @@ int main(int argc, char** argv) {
                         step("releasing PTT unkeys", !w.simRadio()->keyed && count(1292) == m0 + 2 && tc->statusLabel()->text().contains("PTT released"));
                         for (int i = 0; i < 20 && rx->txViewOn(); ++i) pump(1);
                         step("unkeyed: the receive picture is back", !rx->txViewOn());
+                        {   // FM (simplex): Auto voice in FM keys an FM over with PowerSDR's FM set-up; a repeater shift refuses (transmit with shift is not in yet)
+                            auto last_d1 = [&](uint32_t code) { uint32_t v = 0xFFFFFFFFu; for (auto& wr : bus->writes) if ((fireside::sim::be_word(wr.second, 0) & 0x7FFFFFFFu) == code) v = fireside::sim::be_word(wr.second, 4); return v; };
+                            rx->setModeGroup(0); pump(2); rx->setDialHz(29.600e6); pump(5); tc->measureButton()->click(); wait_idle(20000);
+                            step("FM: drive measured on 10 m", tc->statusLabel()->text().contains("Drive measured") && !w.simRadio()->keyed);
+                            const auto& ch = ReceiverPanel::ukRepeaterChannels(); rx->selectRepeater(0); rx->setTxToneHz(77.0); pump(3);
+                            step("FM: the 1750 button shows in FM", tc->burstButton() && tc->burstButton()->isVisibleTo(tc) && rx->modeIndex() == 4 && ch[0].shift_hz == 0);
+                            const size_t f0 = count(1292); tc->setPttForTests(true); for (int i = 0; i < 300 && !w.simRadio()->keyed; ++i) pump(1);
+                            step("FM: PTT keys an FM over with its tone", w.simRadio()->keyed && tc->statusLabel()->text().startsWith("Voice FM 5.0 kHz, tone 77.0 Hz on 29.6000 MHz"));
+                            step("FM: PowerSDR's FM set-up (mode 5, offset 11025, DDS 11.025 kHz low)", last_d1(1353) == 5u && last_d1(1352) == 11025u && last_d1(1351) == uint32_t(-8000));
+                            for (int i = 0; i < 60; ++i) pump(1);
+                            tc->setPttForTests(false); for (int i = 0; i < 300 && (tc->busy() || w.simRadio()->keyed); ++i) pump(1);
+                            step("FM: releasing PTT unkeys", !w.simRadio()->keyed && count(1292) == f0 + 2 && tc->statusLabel()->text().startsWith("FM over: PTT released"));
+                            if (!tc->statusLabel()->text().startsWith("FM over")) std::printf("  (FM status: %s)\n", qPrintable(tc->statusLabel()->text()));
+                            int rh1 = 1; rx->selectRepeater(rh1); pump(3); const size_t f1 = count(1292);
+                            tc->setPttForTests(true); for (int i = 0; i < 40; ++i) pump(1); tc->setPttForTests(false); pump(5);
+                            step("FM: with a repeater shift set, PTT refuses and nothing keys", !w.simRadio()->keyed && count(1292) == f1 && tc->statusLabel()->text().contains("repeater shift"));
+                            rx->setRepeaterShiftHz(0); rx->setTxToneHz(0); rx->setModeIndex(0); rx->setDialHz(14.200e6); pump(5);
+                        }
                         {   // the CW key jack as voice PTT: only when ticked, only in the voice modes (in CW it is the Morse key)
                             QCheckBox* kj = nullptr; for (auto* c : w.findChildren<QCheckBox*>()) if (c->text() == "Key jack") kj = c;
                             auto& kc = w.simRadio()->contacts; rx->setModeGroup(0); pump(2);

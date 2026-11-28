@@ -195,7 +195,8 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
         am_det_->setToolTip("AM detector. Sync AM locks to the carrier: no distortion when the carrier fades (medium wave at night), a little quieter on weak stations. "
                             "One sideband: drops a whistle or a neighbour on the other side. Envelope: the plain detector (use it if a station has no steady carrier).");
         am_det_->setVisible(false); filter_col->addWidget(am_det_);
-        connect(am_det_, &QComboBox::activated, this, [this](int) { applySettings(); }); }
+        connect(am_det_, &QComboBox::activated, this, [this](int) { applySettings(); });
+        buildFmControls(filter_col); }
       col->addStretch(1);
       mode_card_ = card("Voice modes", col); header->addWidget(mode_card_, 0); header->addWidget(band_card_, 0); header->addWidget(signal_card_, 1); }       // after Frequency: the modes of the chosen group, then the bands
     { auto* col = new QVBoxLayout; col->setSpacing(8); form_slot_ = col; form_card_ = card("Log QSO", col); form_card_->setVisible(false); deck->addWidget(form_card_, 6); }       // the large log form: shown only while a contact is being logged (it sits where Band and Mode are)
@@ -295,7 +296,7 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
     ui_ = new QTimer(this); ui_->setInterval(30); connect(ui_, &QTimer::timeout, this, &ReceiverPanel::refresh);
     connect(play_, &QPushButton::toggled, this, [this](bool on) { setPlaying(on); });
     connect(bands_, &QButtonGroup::idClicked, this, [this](int i) { recallBand(i); });
-    connect(modes_, &QButtonGroup::idToggled, this, [this](int, bool on) { if (!on) return; filter_width_ = dsp::default_filter_width(static_cast<dsp::Mode>(modeIndex())); filter_low_ = 150; rebuildFilterButtons(); syncGroup(); settingsChanged(); });
+    connect(modes_, &QButtonGroup::idToggled, this, [this](int, bool on) { if (!on) return; filter_width_ = dsp::default_filter_width(static_cast<dsp::Mode>(modeIndex())); if (modeIndex() == 4 && fm_dev_ && fm_dev_->currentIndex() == 0) filter_width_ = 12000; filter_low_ = 150; rebuildFilterButtons(); syncGroup(); settingsChanged(); emit modeChanged(modeIndex()); });
     connect(grp_mode_, &QButtonGroup::idClicked, this, [this](int g) { chooseGroup(g); });
     connect(cut_lo_, &QSpinBox::editingFinished, this, [this] { cutsEdited(); }); connect(cut_hi_, &QSpinBox::editingFinished, this, [this] { cutsEdited(); });
     connect(shape_box_, &QComboBox::activated, this, [this](int i) { setFilterShape(i); });
@@ -448,6 +449,8 @@ RxOptions ReceiverPanel::options() const {
     { static const double frac[] = {0.2, 0.1, 0.04}, floor_hz[] = {250, 150, 80}; o.dc.edge_fraction = frac[filter_shape_]; o.dc.edge_floor_hz = floor_hz[filter_shape_]; }
     { const int a = am_det_ ? am_det_->currentIndex() : 0; o.dc.am_detector = a == 3 ? dsp::AmDetector::Envelope : dsp::AmDetector::Sync;
       o.dc.am_sideband = a == 1 ? dsp::AmSideband::Lower : a == 2 ? dsp::AmSideband::Upper : dsp::AmSideband::Both; if (am_det_) am_det_->setVisible(modeIndex() == 2); }
+    if (fm_dev_) { o.dc.fm_deviation_hz = fm_dev_->currentIndex() == 0 ? 2500.0 : 5000.0; o.dc.ctcss_hz = toneSquelchHz(); }
+    if (fm_box_) fm_box_->setVisible(modeIndex() == 4);
     if (decoderIndex() == 1) o.dc.cw_pitch_hz = double(dec_tone_->value());              // the CW demodulator and the Morse decoder must agree on the pitch
     return o;
 }
@@ -656,6 +659,12 @@ void ReceiverPanel::updateStatus() {
                                                     .arg(QString::fromStdString(display::format_mhz(dialHz() + peak_hz_)), 13).arg(st.agc_gain_db, 6, 'f', 1);
     if (modeIndex() == 2 && am_det_ && am_det_->currentIndex() != 3 && st.fft_size && !st.source.empty())
         s += st.am_locked ? QString("   |   Sync AM locked, carrier %1 Hz").arg(st.am_carrier_hz, 6, 'f', 0) : QString("   |   Sync AM: no carrier lock");
+    if (modeIndex() == 4 && st.fft_size && !st.source.empty()) {
+        auto tone = [](double hz) { const char l = dsp::ctcss_uk_letter(hz); return QString::number(hz, 'f', 1) + " Hz" + (l ? QString(" (%1)").arg(l) : QString()); };
+        s += "   |   FM: " + (st.ctcss_heard_hz > 0 ? "tone " + tone(st.ctcss_heard_hz) : QString("no tone"));
+        if (toneSquelchHz() > 0 && !st.tone_open) s += ", tone squelch shut (wants " + tone(toneSquelchHz()) + ")";
+        if (fm_rev_ && fm_rev_->isChecked()) s += ", REVERSE: listening on the input";
+    }
     if (rec_ && rec_->recording()) s += (s.isEmpty() ? "" : "   |   ") + rec_->recordingText();
     if (!rx_ant_text_.isEmpty()) s += (s.isEmpty() ? "" : "   |   ") + QString("RX %1").arg(rx_ant_text_ == "RX1IN" ? QString("RX1 IN") : rx_ant_text_);
     if (!heard_note_.isEmpty()) s += (s.isEmpty() ? "" : "   |   ") + heard_note_;
@@ -712,27 +721,90 @@ bool ReceiverPanel::recallBand(int i) {
     recalling_ = false; band_recall_ = false; noteBand(); syncFtButtons(); updateStatus(); return true;
 }
 int ReceiverPanel::saveMemory(const QString& name) {
-    for (size_t i = 0; i < memories_.size(); ++i) if (memories_[i].name == name) { memories_[i] = {name, dialHz(), modeIndex(), filter_width_, filter_low_}; refreshMemoryCombo(); mem_combo_->setCurrentIndex(int(i)); return int(i); }
-    memories_.push_back({name, dialHz(), modeIndex(), filter_width_, filter_low_}); refreshMemoryCombo(); mem_combo_->setCurrentIndex(int(memories_.size()) - 1); return int(memories_.size()) - 1;
+    for (size_t i = 0; i < memories_.size(); ++i) if (memories_[i].name == name) { memories_[i] = currentMemory(name); refreshMemoryCombo(); mem_combo_->setCurrentIndex(int(i)); return int(i); }
+    memories_.push_back(currentMemory(name)); refreshMemoryCombo(); mem_combo_->setCurrentIndex(int(memories_.size()) - 1); return int(memories_.size()) - 1;
 }
 bool ReceiverPanel::recallMemory(int i) {
     if (i < 0 || i >= int(memories_.size())) return false;
-    const Memory m = memories_[size_t(i)]; recalling_ = true; setModeIndex(m.mode); filter_low_ = m.low; setFilterWidth(m.width); setDialHz(m.hz); recalling_ = false; noteBand(); return true;   // the memory's mode wins over Auto LSB / USB       // mode first: it resets the filter to the mode's default
+    const Memory m = memories_[size_t(i)]; leaveReverse(); recalling_ = true; if (m.mode == 4) applyFmMemory(m); setModeIndex(m.mode); filter_low_ = m.low; setFilterWidth(m.width); setDialHz(m.hz); recalling_ = false; noteBand(); return true;   // the memory's mode wins over Auto LSB / USB       // mode first: it resets the filter to the mode's default
 }
 void ReceiverPanel::deleteMemory(int i) { if (i >= 0 && i < int(memories_.size())) { memories_.erase(memories_.begin() + i); refreshMemoryCombo(); } }
 void ReceiverPanel::refreshMemoryCombo() {
     QSignalBlocker b(mem_combo_); mem_combo_->clear();
-    for (const auto& m : memories_) mem_combo_->addItem(QString("%1   (%2 MHz %3)").arg(m.name).arg(m.hz / 1e6, 0, 'f', 4).arg(kModeNames[m.mode]));
+    for (const auto& m : memories_) {
+        QString extra; if (m.mode == 4) { if (m.shift_hz != 0) extra += QString(" %1%2 kHz").arg(m.shift_hz > 0 ? "+" : "").arg(m.shift_hz / 1e3, 0, 'f', 0); if (m.ttone_hz > 0) extra += QString(" T%1").arg(m.ttone_hz, 0, 'f', 1); if (m.tsq_hz > 0) extra += QString(" TSQ%1").arg(m.tsq_hz, 0, 'f', 1); }
+        mem_combo_->addItem(QString("%1   (%2 MHz %3%4)").arg(m.name).arg(m.hz / 1e6, 0, 'f', 4).arg(kModeNames[m.mode]).arg(extra));
+    }
 }
 static bool settings_disabled() { return qEnvironmentVariableIsSet("FIRESIDE_NO_SETTINGS"); }
+// ---------------------------------------------------------------- FM and repeaters (receive side)
+const std::vector<ReceiverPanel::RepeaterChannel>& ReceiverPanel::ukRepeaterChannels() {
+    static const std::vector<RepeaterChannel> ch = [] {
+        std::vector<RepeaterChannel> v;
+        v.push_back({"10 m FM calling 29.600 (simplex)", 29.600e6, 0});
+        for (int i = 0; i < 8; ++i) { const double out = 29.620e6 + 10e3 * i; v.push_back({QString("10 m RH%1  out %2  in %3").arg(i + 1).arg(out / 1e6, 0, 'f', 3).arg((out - 100e3) / 1e6, 0, 'f', 3), out, -100e3}); }
+        v.push_back({"6 m FM calling 51.510 (simplex)", 51.510e6, 0});
+        for (int i = 0; i < 19; ++i) { const double out = 50.710e6 + 10e3 * i; v.push_back({QString("6 m  out %1  in %2").arg(out / 1e6, 0, 'f', 3).arg((out + 500e3) / 1e6, 0, 'f', 3), out, 500e3}); }
+        return v;
+    }();
+    return ch;
+}
+void ReceiverPanel::buildFmControls(QVBoxLayout* col) {
+    fm_box_ = new QWidget; auto* g = new QGridLayout(fm_box_); g->setContentsMargins(0, 4, 0, 0); g->setHorizontalSpacing(6); g->setVerticalSpacing(6);
+    fm_dev_ = new QComboBox; fm_dev_->addItems({"Narrow ±2.5 kHz", "Wide ±5 kHz"}); fm_dev_->setCurrentIndex(1);
+    fm_dev_->setToolTip("FM deviation the receiver expects: narrow for 12.5 kHz channels (most UK 10 m and 6 m repeaters), wide for 25 kHz. It sets the audio level and the filter (12 / 15 kHz).");
+    auto tones = [](QComboBox* c, const QString& off) { c->addItem(off, 0.0); for (double hz : dsp::ctcss_tones()) { const char l = dsp::ctcss_uk_letter(hz); c->addItem(QString::number(hz, 'f', 1) + " Hz" + (l ? QString("  (UK %1)").arg(l) : QString()), hz); } };
+    fm_tsq_ = new QComboBox; tones(fm_tsq_, "Tone squelch off"); fm_tsq_->setToolTip("Tone squelch (CTCSS decode): you only hear a signal carrying this tone, e.g. the repeater, not noise or other users. The status line shows the tone being heard. Works with the level squelch: both must open.");
+    fm_ttone_ = new QComboBox; tones(fm_ttone_, "No transmit tone"); fm_ttone_->setToolTip("The CTCSS tone sent with every FM over (opens a repeater, or a station using tone squelch). Stored with the memories.");
+    fm_shift_ = new QSpinBox; fm_shift_->setRange(-1000, 1000); fm_shift_->setSingleStep(100); fm_shift_->setSuffix(" kHz"); fm_shift_->setPrefix("Shift "); fm_shift_->setSpecialValueText("Simplex");
+    fm_shift_->setToolTip("Repeater shift: its input minus its output (UK: 10 m -100 kHz, 6 m +500 kHz). Used by Reverse. Transmitting through a repeater (with the shift) is not in Fireside yet: FM transmit refuses while a shift is set, except in Reverse (on the input).");
+    fm_rpt_ = new QComboBox; fm_rpt_->addItem("Repeater channel…"); for (const auto& c : ukRepeaterChannels()) fm_rpt_->addItem(c.name);
+    fm_rpt_->setToolTip("UK band plan FM channels: tunes to the repeater output in FM and sets the shift. Set the repeater's tone yourself (it depends on the repeater).");
+    fm_rev_ = new QPushButton("Reverse"); fm_rev_->setCheckable(true); fm_rev_->setToolTip("Listen on the repeater input (dial + shift): hear whether you could work the other station direct. Click again to go back.");
+    g->addWidget(fm_dev_, 0, 0); g->addWidget(fm_tsq_, 0, 1); g->addWidget(fm_rpt_, 1, 0, 1, 2); g->addWidget(fm_shift_, 2, 0); g->addWidget(fm_ttone_, 2, 1); g->addWidget(fm_rev_, 3, 0);
+    fm_box_->setVisible(false); col->addWidget(fm_box_);
+    connect(fm_dev_, &QComboBox::activated, this, [this](int i) { if (modeIndex() == 4) setFilterWidth(i == 0 ? 12000 : 15000); else settingsChanged(); });
+    connect(fm_tsq_, &QComboBox::activated, this, [this](int) { settingsChanged(); });
+    connect(fm_rpt_, &QComboBox::activated, this, [this](int i) { if (i > 0) selectRepeater(i - 1); QSignalBlocker b(fm_rpt_); fm_rpt_->setCurrentIndex(0); });
+    connect(fm_shift_, &QSpinBox::valueChanged, this, [this](int) { leaveReverse(); });
+    connect(fm_rev_, &QPushButton::toggled, this, [this](bool on) {
+        if (on) { const double sh = repeaterShiftHz(); if (sh == 0) { QSignalBlocker b(fm_rev_); fm_rev_->setChecked(false); note_ = "Reverse needs a repeater shift"; updateStatus(); return; }
+                  rev_shift_hz_ = sh; setDialHz(dialHz() + sh); }
+        else { setDialHz(dialHz() - rev_shift_hz_); rev_shift_hz_ = 0; }
+        updateStatus();
+    });
+}
+void ReceiverPanel::leaveReverse() { if (fm_rev_ && fm_rev_->isChecked()) fm_rev_->setChecked(false); }   // back to the output
+double ReceiverPanel::toneSquelchHz() const { return fm_tsq_ ? fm_tsq_->currentData().toDouble() : 0.0; }
+double ReceiverPanel::txToneHz() const { return fm_ttone_ ? fm_ttone_->currentData().toDouble() : 0.0; }
+static void pick_tone(QComboBox* c, double hz) { int best = 0; for (int i = 1; i < c->count(); ++i) if (std::fabs(c->itemData(i).toDouble() - hz) < 0.05) best = i; c->setCurrentIndex(best); }
+void ReceiverPanel::setToneSquelchHz(double hz) { pick_tone(fm_tsq_, hz); if (!restoring_) settingsChanged(); }
+void ReceiverPanel::setTxToneHz(double hz) { pick_tone(fm_ttone_, hz); }
+double ReceiverPanel::repeaterShiftHz() const { return fm_shift_ ? fm_shift_->value() * 1e3 : 0.0; }
+void ReceiverPanel::setRepeaterShiftHz(double hz) { fm_shift_->setValue(int(std::lround(hz / 1e3))); }
+double ReceiverPanel::ctcssHeardHz() const { return engine_.status().ctcss_heard_hz; }
+bool ReceiverPanel::selectRepeater(int i) {
+    const auto& ch = ukRepeaterChannels(); if (i < 0 || size_t(i) >= ch.size()) return false;
+    leaveReverse(); setModeIndex(4); setRepeaterShiftHz(ch[size_t(i)].shift_hz); setDialHz(ch[size_t(i)].out_hz); return true;
+}
+ReceiverPanel::Memory ReceiverPanel::currentMemory(const QString& name) const {
+    Memory m{name, dialHz(), modeIndex(), filter_width_, filter_low_};
+    if (fm_rev_ && fm_rev_->isChecked()) m.hz -= rev_shift_hz_;                     // a memory is the repeater output, even when saved while reversed
+    m.fm_dev = fm_dev_ ? fm_dev_->currentIndex() : 1; m.tsq_hz = toneSquelchHz(); m.ttone_hz = txToneHz(); m.shift_hz = repeaterShiftHz(); return m;
+}
+void ReceiverPanel::applyFmMemory(const Memory& m) {
+    QSignalBlocker b1(fm_dev_), b2(fm_tsq_); fm_dev_->setCurrentIndex(std::clamp(m.fm_dev, 0, 1)); pick_tone(fm_tsq_, m.tsq_hz); setTxToneHz(m.ttone_hz); setRepeaterShiftHz(m.shift_hz);
+}
+
 void ReceiverPanel::saveSettings() {
     if (settings_disabled()) return;
     QSettings q("fireside", "receiver");
     q.setValue("dial_hz", dialHz()); q.setValue("mode", modeIndex()); q.setValue("agc", agcIndex()); q.setValue("manual_gain_db", gain_->value()); q.setValue("filter", filter_width_); q.setValue("filter_low", filter_low_); q.setValue("shape", filter_shape_); q.setValue("step", steps_->checkedId());
     q.setValue("nb", nb_->isChecked()); q.setValue("nr", nr_->isChecked()); q.setValue("nr2", nr2_->isChecked()); q.setValue("anf", anf_->isChecked()); q.setValue("mirror_live", mirror_live_); q.setValue("mirror_file", mirror_file_); if (loop_) q.setValue("loop", loop_->isChecked());
     q.setValue("notch", notch_->value()); { QStringList nl; for (double f : notch_list_) nl << QString::number(f); q.setValue("notches", nl.join(",")); } q.setValue("squelch", squelch_->value()); q.setValue("decoder", decoderIndex()); q.setValue("decoder_tone", dec_tone_->value()); q.setValue("my_call", my_call_->text()); q.setValue("am_detector", am_det_->currentIndex()); q.setValue("palette", palette_->currentIndex()); q.setValue("axis_settle", settle_->currentIndex()); q.setValue("tx_open", transmitOpen()); q.setValue("floor", floor_->value()); q.setValue("bandplan", bandplan_->isChecked()); q.setValue("spectrum_avg", avg_->currentIndex()); q.setValue("volume", volume_->value()); q.setValue("muted", mute_->isChecked()); if (auto_sb_) q.setValue("auto_sideband", auto_sb_->isChecked());
+    q.setValue("fm_deviation", fm_dev_->currentIndex()); q.setValue("fm_tone_squelch_hz", toneSquelchHz()); q.setValue("fm_tx_tone_hz", txToneHz()); q.setValue("fm_shift_hz", repeaterShiftHz());
     if (if_ && if_->isEnabled()) q.setValue("if_index", if_->currentIndex());                // not while a radio session holds it locked (9 kHz)
-    q.beginWriteArray("memories"); for (size_t i = 0; i < memories_.size(); ++i) { q.setArrayIndex(int(i)); q.setValue("name", memories_[i].name); q.setValue("hz", memories_[i].hz); q.setValue("mode", memories_[i].mode); q.setValue("width", memories_[i].width); q.setValue("low", memories_[i].low); } q.endArray();
+    q.beginWriteArray("memories"); for (size_t i = 0; i < memories_.size(); ++i) { q.setArrayIndex(int(i)); q.setValue("name", memories_[i].name); q.setValue("hz", memories_[i].hz); q.setValue("mode", memories_[i].mode); q.setValue("width", memories_[i].width); q.setValue("low", memories_[i].low); q.setValue("fm_dev", memories_[i].fm_dev); q.setValue("tsq_hz", memories_[i].tsq_hz); q.setValue("ttone_hz", memories_[i].ttone_hz); q.setValue("shift_hz", memories_[i].shift_hz); } q.endArray();
     q.beginWriteArray("band_memory"); int k = 0;
     for (size_t i = 0; i < band_mem_.size() && i < std::size(kBands); ++i) { const BandMem& m = band_mem_[i]; if (!m.set) continue;
         q.setArrayIndex(k++); q.setValue("band", kBands[i].name); q.setValue("hz", m.hz); q.setValue("mode", m.mode); q.setValue("width", m.width); q.setValue("low", m.low); q.setValue("decoder", m.decoder); }
@@ -745,6 +817,8 @@ void ReceiverPanel::loadSettings() {
     if (q.contains("filter")) filter_width_ = q.value("filter").toDouble();
     if (q.contains("filter_low")) filter_low_ = q.value("filter_low").toDouble();
     am_det_->setCurrentIndex(std::clamp(q.value("am_detector", 0).toInt(), 0, 3));
+    { QSignalBlocker b1(fm_dev_), b2(fm_tsq_), b3(fm_ttone_), b4(fm_shift_); fm_dev_->setCurrentIndex(std::clamp(q.value("fm_deviation", 1).toInt(), 0, 1));
+      setToneSquelchHz(q.value("fm_tone_squelch_hz", 0.0).toDouble()); setTxToneHz(q.value("fm_tx_tone_hz", 0.0).toDouble()); setRepeaterShiftHz(q.value("fm_shift_hz", 0.0).toDouble()); }
     if (q.contains("shape")) { filter_shape_ = std::clamp(q.value("shape").toInt(), 0, 2); QSignalBlocker b(shape_box_); shape_box_->setCurrentIndex(filter_shape_); }
     rebuildFilterButtons();
     gain_->setValue(std::clamp(q.value("manual_gain_db", 60).toInt(), 0, 100)); setAgcIndex(std::clamp(q.value("agc", 2).toInt(), 0, 3));
@@ -758,7 +832,8 @@ void ReceiverPanel::loadSettings() {
     my_call_->setText(q.value("my_call").toString().trimmed().toUpper()); if (auto_sb_) auto_sb_->setChecked(q.value("auto_sideband", true).toBool());                                      // before the decoder below is rebuilt with it
     if (q.contains("decoder") && q.value("decoder").toInt() > 0) { setDecoderIndex(q.value("decoder").toInt()); dec_tone_->setValue(q.value("decoder_tone", dec_tone_->value()).toInt()); rebuildDecoder(); }
     memories_.clear(); const int n = q.beginReadArray("memories");
-    for (int i = 0; i < n; ++i) { q.setArrayIndex(i); memories_.push_back({q.value("name").toString(), q.value("hz").toDouble(), std::clamp(q.value("mode").toInt(), 0, 4), q.value("width").toDouble(), q.value("low", 150.0).toDouble()}); }
+    for (int i = 0; i < n; ++i) { q.setArrayIndex(i); memories_.push_back({q.value("name").toString(), q.value("hz").toDouble(), std::clamp(q.value("mode").toInt(), 0, 4), q.value("width").toDouble(), q.value("low", 150.0).toDouble(),
+                                                              std::clamp(q.value("fm_dev", 1).toInt(), 0, 1), q.value("tsq_hz", 0.0).toDouble(), q.value("ttone_hz", 0.0).toDouble(), q.value("shift_hz", 0.0).toDouble()}); }
     q.endArray(); refreshMemoryCombo();
     { const int nb = q.beginReadArray("band_memory");
       for (int i = 0; i < nb; ++i) { q.setArrayIndex(i); const QString name = q.value("band").toString();

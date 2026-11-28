@@ -67,7 +67,7 @@ size_t RxEngine::process_locked(size_t n) {
     std::lock_guard<std::mutex> dl(d_);
     if (dec_) { text_ += decoded; if (text_.size() > 200000) text_.erase(0, text_.size() - 100000); st_.decoder = dstatus; }
     st_.samples += got; st_.audio_samples += audio.size();
-    st_.signal_dbfs = chain_->signal_dbfs(); st_.agc_gain_db = chain_->demod().agc_gain_db(); st_.am_locked = chain_->demod().am_locked(); st_.am_carrier_hz = chain_->demod().am_carrier_hz();
+    st_.signal_dbfs = chain_->signal_dbfs(); st_.agc_gain_db = chain_->demod().agc_gain_db(); st_.am_locked = chain_->demod().am_locked(); st_.am_carrier_hz = chain_->demod().am_carrier_hz(); st_.ctcss_heard_hz = chain_->demod().ctcss_heard_hz(); st_.tone_open = chain_->demod().tone_open();
     for (float a : audio) { if (audio_.size() >= opt_.max_audio) { audio_.pop_front(); ++st_.audio_dropped; } audio_.push_back(a); }
     if (auto* live = dynamic_cast<PcmIqSource*>(src_.get())) { st_.xruns = live->stats().xruns; st_.stream_dead = live->stream_dead(); }
     return got;

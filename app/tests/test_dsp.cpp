@@ -433,3 +433,77 @@ TEST(manual_gain_with_agc_off_scales_the_audio_and_is_soft_limited) {
     auto agc_on = [&](double db) { DemodConfig d = cfg(Mode::USB, AgcMode::Med); d.manual_gain_db = db; return tone_amp(run_cfg(stepped(48000, 24000, 3e-5, 3e-5), kCentred, d), 24000, 8192, 1000, 48000); };
     CHECK_NEAR(agc_on(60), agc_on(0), 1e-6); CHECK(agc_on(0) > 0.1);                                         // with an AGC on, the manual gain changes nothing and the AGC does its job
 }
+
+// ------------------------------------------------------------------ FM: CTCSS tone squelch, sub-audio high-pass, de-emphasis
+namespace {
+// FM-modulated I/Q (dial-centred, 48 kHz): a CTCSS tone (0 = none) at `tone_dev` Hz deviation, a 1 kHz "voice" tone at `voice_dev`, plus complex noise.
+std::vector<cf> fm_iq(double seconds, double ctcss_hz, double tone_dev = 650, double voice_dev = 2500, double noise = 0.0, unsigned seed = 7) {
+    const double fs = 48000; const size_t n = size_t(seconds * fs); std::vector<cf> x(n); double ph = 0; uint32_t r = seed;
+    auto rnd = [&] { r = r * 1664525u + 1013904223u; return (double(r >> 8) / double(1u << 24)) - 0.5; };
+    for (size_t i = 0; i < n; ++i) {
+        const double t = double(i) / fs, f = (ctcss_hz > 0 ? tone_dev * std::sin(2 * kPi * ctcss_hz * t) : 0.0) + voice_dev * std::sin(2 * kPi * 1000 * t);
+        ph += 2 * kPi * f / fs; x[i] = 0.5f * cf(float(std::cos(ph)), float(std::sin(ph))) + cf(float(noise * rnd()), float(noise * rnd()));
+    }
+    return x;
+}
+}  // namespace
+TEST(ctcss_table_is_the_50_standard_tones_with_uk_letters) {
+    const auto& t = ctcss_tones(); CHECK_EQ(t.size(), size_t(50)); CHECK_NEAR(t.front(), 67.0, 1e-9); CHECK_NEAR(t.back(), 254.1, 1e-9);
+    for (size_t i = 1; i < t.size(); ++i) CHECK(t[i] > t[i - 1] + 2.0);
+    CHECK_EQ(ctcss_uk_letter(67.0), 'A'); CHECK_EQ(ctcss_uk_letter(77.0), 'C'); CHECK_EQ(ctcss_uk_letter(118.8), 'J'); CHECK_EQ(ctcss_uk_letter(100.0), char(0));
+}
+TEST(ctcss_detector_names_every_tone_through_the_fm_demodulator) {
+    for (double hz : ctcss_tones()) {
+        Demodulator d(cfg(Mode::FM)); std::vector<float> a; auto x = fm_iq(1.0, hz, 650, 2500, 0.3); d.process(x.data(), x.size(), a);
+        if (std::fabs(d.ctcss_heard_hz() - hz) > 0.05) std::printf("  tone %.1f heard as %.1f\n", hz, d.ctcss_heard_hz());
+        CHECK_NEAR(d.ctcss_heard_hz(), hz, 0.05);
+    }
+}
+TEST(tone_squelch_passes_the_right_tone_and_mutes_a_neighbour_or_none) {
+    auto level = [](double sent, double want) {
+        DemodConfig c = cfg(Mode::FM); c.ctcss_hz = want; Demodulator d(c); std::vector<float> a; auto x = fm_iq(1.5, sent, 650, 2500, 0.2); d.process(x.data(), x.size(), a);
+        return tone_amp(a, 48000, 16384, 1000, 48000);
+    };
+    CHECK(level(71.9, 71.9) > 0.3);                             // 2500 / 5000 = 0.5 at 1 kHz
+    CHECK(level(69.3, 71.9) < 0.005);                           // the next tone down: stays shut
+    CHECK(level(74.4, 71.9) < 0.005);                           // and up
+    CHECK(level(0, 71.9) < 0.005);                              // no tone at all
+    CHECK(level(0, 0) > 0.3);                                   // tone squelch off: plain FM passes
+}
+TEST(tone_squelch_closes_after_the_tone_stops) {
+    DemodConfig c = cfg(Mode::FM); c.ctcss_hz = 88.5; Demodulator d(c); std::vector<float> a;
+    auto on = fm_iq(1.0, 88.5, 650, 2500, 0.2), off = fm_iq(1.0, 0, 650, 2500, 0.2, 9);
+    d.process(on.data(), on.size(), a); CHECK(d.tone_open());
+    d.process(off.data(), off.size(), a); CHECK(!d.tone_open()); CHECK_NEAR(d.ctcss_heard_hz(), 0.0, 1e-9);
+    CHECK(tone_amp(a, 84000, 12000, 1000, 48000) < 0.005);   // closed within 0.75 s (0.4 s window + 0.25 s hold): the last quarter second is muted
+}
+TEST(ctcss_detector_does_not_open_on_noise_or_speech_without_a_tone) {
+    for (unsigned seed : {1u, 2u, 3u}) {                       // open-squelch noise: no carrier at all
+        Demodulator d(cfg(Mode::FM)); std::vector<float> a; auto x = fm_iq(4.0, 0, 0, 0, 0.0, seed);
+        uint32_t r = seed; for (auto& s : x) { r = r * 1664525u + 1013904223u; const float u = float(r >> 8) / float(1u << 24) - 0.5f; r = r * 1664525u + 1013904223u; s = cf(u, float(r >> 8) / float(1u << 24) - 0.5f); }
+        bool ever = false; for (size_t o = 0; o < x.size(); o += 2400) { d.process(x.data() + o, 2400, a); ever = ever || d.ctcss_heard_hz() > 0; }
+        CHECK(!ever);
+    }
+    Demodulator d(cfg(Mode::FM)); std::vector<float> a; auto x = fm_iq(3.0, 0, 0, 3000, 0.1); bool ever = false;
+    for (size_t o = 0; o < x.size(); o += 2400) { d.process(x.data() + o, 2400, a); ever = ever || d.ctcss_heard_hz() > 0; }
+    CHECK(!ever);
+}
+TEST(fm_subaudio_high_pass_keeps_ctcss_out_of_the_speaker) {
+    auto amp = [](bool hpf, double hz) {
+        DemodConfig c = cfg(Mode::FM); c.fm_subaudio_hpf = hpf; Demodulator d(c); std::vector<float> a; auto x = fm_iq(1.5, 100.0, 650, 2500); d.process(x.data(), x.size(), a);
+        return tone_amp(a, 48000, 24000, hz, 48000);
+    };
+    const double off = amp(false, 100), on = amp(true, 100);
+    CHECK(off > 0.05); CHECK(20 * std::log10(on / off) < -30.0);
+    CHECK_NEAR(amp(true, 1000), 0.5, 0.03);                     // speech untouched at 1 kHz
+}
+TEST(fm_deemphasis_is_unity_at_1khz_and_the_inverse_of_the_pre_emphasis) {
+    auto amp = [](bool de, double hz) {
+        DemodConfig c = cfg(Mode::FM); c.fm_deemphasis = de; Demodulator d(c); std::vector<float> a; std::vector<cf> x(72000); double ph = 0;
+        for (size_t i = 0; i < x.size(); ++i) { ph += 2 * kPi * 1000 * std::sin(2 * kPi * hz * double(i) / 48000) / 48000; x[i] = 0.5f * cf(float(std::cos(ph)), float(std::sin(ph))); }
+        d.process(x.data(), x.size(), a); return tone_amp(a, 24000, 48000, hz, 48000);
+    };
+    CHECK_NEAR(amp(true, 1000) / amp(false, 1000), 1.0, 0.03);
+    CHECK_NEAR(20 * std::log10(amp(true, 2000) / amp(true, 1000)), -4.6, 0.5);    // pole 300 Hz, zero 3 kHz: -4.6 dB from 1 to 2 kHz
+    CHECK_NEAR(20 * std::log10(amp(true, 500) / amp(true, 1000)), 4.6, 0.8);      // and +4.6 dB at 500 Hz (the 300 Hz high-pass takes ~0.3 dB there)
+}

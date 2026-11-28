@@ -63,11 +63,23 @@ struct VoiceOptions {
     tx::TxChainConfig chain = tx::voice_chain_defaults();   // the whole audio processing (EQ, expander, leveler, compressor, clipper, limiters, SSB filter)
     // Monitor: called on the producer thread with what a receiver would hear of the over (the processed, SSB-filtered audio, 48 kHz). Must not block.
     std::function<void(const float* audio, size_t n)> monitor;
+    // FM (VoiceOptions::fm): a constant carrier at peak_w (1..100 W, the FLEX-5000A datasheet's "100 Watts continuous output ... continuous duty"),
+    // on the dial (simplex), only where the band plan has FM or all modes on 10 m or 6 m (fm_band_refusal). Deviation 2500 or 5000 Hz,
+    // an optional CTCSS tone, and a 1750 Hz tone burst while burst() is true (at most 1 s per press; polled on the producer thread).
+    bool fm = false; double fm_deviation_hz = 2500, ctcss_hz = 0;
+    std::function<bool()> burst;
 };
 struct VoiceResult { bool keyed = false, unkey_failed = false; std::string why_not, stop; double max_fwd_w = 0, seconds = 0, drive = 0, limited_to_w = 0; uint64_t underruns = 0;
                      int trims = 0; double drive_start = 0, iq_peak_db = -200;
-                     double mean_fwd_w = 0, talk_fwd_w = 0; };   // the PA meter's average over the whole over, and over the readings above 5 % of the set PEP (speech, not the pauses)   // diagnostics: ALC trims (10 % each), the starting drive, the processed I/Q peak vs the ceiling (0 dB = the set power)
+                     double mean_fwd_w = 0, talk_fwd_w = 0; double fm_peak_dev_hz = 0; };   // the PA meter's average over the whole over, and over the readings above 5 % of the set PEP (speech, not the pauses)   // diagnostics: ALC trims (10 % each), the starting drive, the processed I/Q peak vs the ceiling (0 dB = the set power)
 
+// Why FM may not be sent at `dial_hz` with this deviation ("" = it may): the dial must be on 10 m or 6 m and both signal edges (dial +-
+// (deviation + 3 kHz), Carson's rule) in a band plan segment for FM or all modes (bandplan.h; not beacons, satellites, CW or narrow modes).
+std::string fm_band_refusal(double dial_hz, double deviation_hz);
+// The radio set-up PowerSDR writes for FM: TX DSP mode 5, the TX DSP filter +-8 kHz at 5 kHz deviation (+-4 kHz at 2.5 kHz), the TX offset 11025
+// (and the DDS 11.025 kHz below the dial, the signal generated 11.025 kHz above it: tx::kFmTxOffsetHz).
+inline constexpr uint32_t kFmDspMode = 5;
+inline int fm_tx_filter_hz(double deviation_hz) { return deviation_hz >= 5000 ? 8000 : 4000; }
 // CW: a keyed carrier exactly ON the dial (where the receiver's CW mode listens; it makes the beat note itself). As PowerSDR does in CWU, the DDS
 // sits below the dial for the over (kCwOffsetHz) and the keyed tone is generated that far above it, through the same live ToneSource (mirror,
 // image correction, HARD clamp) as voice. Semi break-in: MOX goes on at the first key-down; the first element waits for it (it is delayed, never
@@ -213,7 +225,8 @@ private:
     struct KeyHook { const std::function<void(bool, double)>& h; explicit KeyHook(const std::function<void(bool, double)>& f, double below_hz = 0) : h(f) { if (h) h(true, below_hz); } ~KeyHook() { if (h) try { h(false, 0); } catch (...) {} } };   // declared before the TxGate: its end runs after the unkey
     std::mutex lines_m_; std::shared_ptr<TxLines> lines_;
     std::string lines_ready(double freq_mhz);                     // "" or why nothing may key (the band lines could not be set)
-    void prepare(double freq_mhz, uint32_t dsp_mode, int tx_ant); // TX antenna (1..3, else std::invalid_argument before any write), mode, DDS, filter, offset, carrier null
+    void prepare(double freq_mhz, uint32_t dsp_mode, int tx_ant, int filter_lo = 200, int filter_hi = 3100, int tx_offset = 0); // TX antenna (1..3, else std::invalid_argument before any write), mode, DDS, filter, offset, carrier null
+    VoiceResult voice_fm(double dial_mhz, IAudioIn& in, const std::function<bool()>& ptt, const VoiceOptions& v, const ProgressFn& p, const LogFn& log);
     // CW overs come one after another (semi break-in): the set-up of the last one is reused when nothing changed (same frequency, mode, antenna,
     // within kPrepReuseS, no other operation since). Every other operation and arm / disarm forget it, so they always write the full set-up.
     bool prepare_cw(double freq_mhz, int tx_ant);                  // true = the set-up was written, false = reused

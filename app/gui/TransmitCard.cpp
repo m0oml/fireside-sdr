@@ -700,7 +700,7 @@ void TransmitCard::onTune() {
     if (!tx_ || !tx_->armed()) return;
     const double mhz = rx_->dialHz() / 1e6, w = power_->value(), thr = thr_->currentData().toDouble(); const int band = txm::band_of(mhz * 1e6);
     if (band < 0) { report("The dial is outside the amateur bands."); return; }
-    if (!ask("Tune the ATU?", QString("Transmit a tune carrier on %1 MHz on ANT%3 at about %2 W first on the band's saved setting (about 2 s), then, if that is not good enough, for up to 15 s per search while the ATU searches (at most 3 searches)?\n\nListen first: is the frequency clear?").arg(mhz, 0, 'f', 4).arg(w).arg(txAnt()))) return;
+    // no confirmation (user 2026-11-28: it had become tedious); the gate's limits, Stop and the 15 s per search are unchanged
     txc::Options o; o.rate = simulated_ ? 48000 : txRate(); o.mirror_q = mirror_->isChecked(); o.tx_ant = txAnt();
     if (!(o.rate > 0)) { report("The radio's ALSA playback offers no 8-channel rate (see /proc/asound/cardN/firewire/formation)."); return; }
     run(QString("Tuning on %1 MHz on ANT%3 at %2 W").arg(mhz, 0, 'f', 4).arg(w).arg(o.tx_ant), true, [this, mhz, w, thr, o](txc::TxControl& t) {

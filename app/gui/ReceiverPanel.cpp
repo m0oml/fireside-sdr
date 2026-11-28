@@ -39,6 +39,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
+#include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QStyle>
@@ -241,11 +242,10 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
       static const unsigned kRates[3] = {48000, 96000, 192000}; static const char* const kNames[3] = {"48", "96", "192"};
       for (int i = 0; i < 3; ++i) {
           rate_btn_[i] = new QPushButton(kNames[i]); rate_btn_[i]->setCheckable(true); rate_btn_[i]->setCursor(Qt::PointingHandCursor); grp->addButton(rate_btn_[i]); rr->addWidget(rate_btn_[i]);
-          rate_btn_[i]->setToolTip(QString("%1 kHz of band. Starts the radio (receive only; asks once) and the live stream at this rate; if the radio is already running, restarts just the stream (about a second). The audio is 48 kHz at every rate.").arg(kNames[i]));
+          rate_btn_[i]->setToolTip(QString("%1 kHz of band. Starts the radio (receive only) and the live stream at this rate; if the radio is already running, switches just the stream (about a second). The audio is 48 kHz at every rate.").arg(kNames[i]));
           connect(rate_btn_[i], &QPushButton::clicked, this, [this, i] { if (kRates[i] == direct_rate_) { syncRateButtons(direct_rate_); return; } emit rateRequested(kRates[i]); syncRateButtons(direct_rate_); });   // (the button shows the stream that really runs)
       }
-      stop_radio_ = new QPushButton("Stop radio"); stop_radio_->setEnabled(false); stop_radio_->setToolTip("Stops the live stream and puts the radio in standby (MOX off, PA bias off). Standby is not power-off.");
-      connect(stop_radio_, &QPushButton::clicked, this, [this] { emit stopRadioRequested(); });
+      // no Stop radio button here (user 2026-11-28): the rates just switch; the Device tab's Stop radio, or closing Fireside, puts the radio in standby
       r1->addWidget(open); r1->addWidget(demo);
       play_ = new QPushButton("Play"); play_->setObjectName("primary"); play_->setCheckable(true); play_->setCursor(Qt::PointingHandCursor);
       { auto* cap = new QLabel("Radio: kHz of band"); cap->setObjectName("dim"); col->addWidget(cap); }
@@ -255,7 +255,7 @@ ReceiverPanel::ReceiverPanel(bool enableAudio, bool threaded, QWidget* parent) :
       rec_btn_->setToolTip("Start / stop a recording of the live stream, beginning with the last few seconds (Ctrl+Shift+R)"); rec_btn_->setEnabled(false);
       rr2->addWidget(grab_btn_, 1); rr2->addWidget(rec_btn_, 1); rr2->addWidget(recopt);
       connect(recopt, &QPushButton::clicked, this, [this] { if (rec_) rec_->showOptions(this); });
-      col->addLayout(rr); col->addWidget(stop_radio_); col->addLayout(r1); col->addWidget(play_); col->addLayout(rr2);
+      col->addLayout(rr); col->addLayout(r1); col->addWidget(play_); col->addLayout(rr2);
       connect(open, &QPushButton::clicked, this, &ReceiverPanel::openFile); connect(demo, &QPushButton::clicked, this, [this] { loadDemo(); });
       deck->addWidget(card("Source", col), 1); }
     { auto* col = new QVBoxLayout; col->setSpacing(8); mirror_ = pill("Mirror I/Q"); mirror_->setToolTip("The radio's I/Q is mirrored: ON for the live radio (comes up on by itself). Recordings keep their own setting: tick it for files captured from the radio");
@@ -513,7 +513,15 @@ bool ReceiverPanel::loadLiveDirect(unsigned rate) {
         forgetLiveDevice();                                                          // the radio-jacks output needs snd-dice, which would take the stream back: PC audio only here
         std::unique_ptr<IPcm> pcm; FwIsoOptions o; o.duplex = !qEnvironmentVariableIsSet("FIRESIDE_NO_DUPLEX"); o.out_ring_seconds = 0.04;   // duplex: transmit on our own stream, receive never pauses
         auto open = [this](unsigned r, const FwIsoOptions& op) { return direct_opener_ ? direct_opener_(r, op) : open_fw_iso_pcm(r, op); };
-        try { pcm = open(rate, o); } catch (const std::exception& e) { if (!o.duplex) throw; o.duplex = false; pcm = open(rate, o); note_ = QString("Duplex stream refused (%1): receive only; transmit will pause receive.").arg(e.what()); }
+        // A rate change on a running stream: our own stream holds the radio, so it is closed first, and the radio gets up to a second to let go
+        // (2026-11-28: opening the new rate over the old one failed with "the radio is already streaming").
+        const bool switching = direct_rate_ != 0 && engine_.status().live;
+        if (switching) closeLive();
+        if (switching && !direct_opener_) {
+            for (int i = 0; i < 10; ++i) { try { pcm = open(rate, o); break; } catch (const std::exception&) { if (i == 9) throw; QThread::msleep(100); } }
+        }
+        if (pcm) {}
+        else try { pcm = open(rate, o); } catch (const std::exception& e) { if (!o.duplex) throw; o.duplex = false; pcm = open(rate, o); note_ = QString("Duplex stream refused (%1): receive only; transmit will pause receive.").arg(e.what()); }
         adopt(std::make_unique<PcmIqSource>(std::move(pcm), 0, 1, 1024), true, true);
         live_rate_ = rate; direct_rate_ = rate; syncRateButtons(rate);
         if (fw_iso_duplex_running()) {                                                       // the radio's jacks are reachable now: offer them, and restore the last choice
@@ -527,6 +535,11 @@ bool ReceiverPanel::loadLiveDirect(unsigned rate) {
         else { note_ = QString("Direct stream %1 kHz%2").arg(rate / 1000).arg(fw_iso_duplex_running() ? ", duplex" : "");   // short: the status line is one line
                appLog("receiver", QString("Direct FireWire stream at %1 kHz%2. Audio plays on the PC; the radio-jacks output needs the ALSA capture.").arg(rate / 1000).arg(fw_iso_duplex_running() ? ", duplex: transmit keeps receive running" : "")); }
         { const std::string n = fw_iso_last_open_note(); if (!n.empty()) { note_ += QString(" Note: %1.").arg(QString::fromStdString(n)); appLog("receiver", QString::fromStdString(n)); } }
+        QTimer::singleShot(1500, this, [this, rate] {                                       // diagnostic (2026-11-28: after a rate switch the waterfall looked no wider)
+            const auto st = engine_.status();
+            appLog("receiver", QString("after the switch to %1 kHz: engine %2 Hz, %3 frames, fft %4; display span %5 Hz, view %6..%7, zoom %8")
+                   .arg(rate / 1000).arg(st.sample_rate, 0, 'f', 0).arg(st.frames).arg(st.fft_size).arg(spectrum_->spanHz(), 0, 'f', 0)
+                   .arg(spectrum_->viewLo(), 0, 'f', 3).arg(spectrum_->viewHi(), 0, 'f', 3).arg(zoomFactor(), 0, 'f', 2)); });
         updateStatus(); return playing_;
     } catch (const std::exception& e) { note_ = QString("Cannot start the direct stream: ") + e.what(); if (!wait_retry_) appLog("receiver", note_); updateStatus(); return false; }
 }
@@ -545,7 +558,7 @@ void ReceiverPanel::updateRecordButtons() {
     rec_btn_->setEnabled(av || rc); rec_btn_->setText(rc ? "Stop" : "Rec"); rec_btn_->setProperty("rec", rc); rec_btn_->style()->unpolish(rec_btn_); rec_btn_->style()->polish(rec_btn_);
 }
 void ReceiverPanel::setRxAntennaText(const QString& name) { rx_ant_text_ = name; updateStatus(); }
-void ReceiverPanel::setRadioRunning(bool on) { stop_radio_->setEnabled(on); }
+void ReceiverPanel::setRadioRunning(bool on) { if (stop_radio_) stop_radio_->setEnabled(on); }
 bool ReceiverPanel::openLiveAuto() {
     const FwIsoProbe direct = probe_fw_iso();
     if (direct.ok && !direct.busy) {

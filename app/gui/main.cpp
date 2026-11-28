@@ -639,7 +639,9 @@ int main(int argc, char** argv) {
     }
     if (smokeRadio) {                                                        // the whole radio-session path against the simulated radio, including click-to-tune
         w.show(); auto* rp = w.radio(); auto* rx = w.receiver(); auto* bus = w.simBus(); std::string failed;
-        auto step = [&](const char* name, bool good) { if (!good && failed.empty()) failed = name; };
+        QElapsedTimer smoke_t; smoke_t.start(); qint64 smoke_last = 0; const bool smoke_times = qEnvironmentVariableIsSet("FIRESIDE_SMOKE_TIMES");   // where the time goes
+        auto step = [&](const char* name, bool good) { if (!good && failed.empty()) failed = name;
+            if (smoke_times) { const qint64 now = smoke_t.elapsed(); std::fprintf(stderr, "TIME %7.1f s  +%6.1f s  %s\n", now / 1000.0, (now - smoke_last) / 1000.0, name); smoke_last = now; } };
         auto ops = [&] { std::vector<uint32_t> v; for (auto& w : bus->writes) { const uint32_t code = fireside::sim::be_word(w.second, 0) & 0x7FFFFFFFu; const fireside::OpInfo* o = fireside::find_opcode(code); if (!o || !fireside::is_read(*o)) v.push_back(code); } return v; };   // what was SENT (the sim executes lazily)
         auto pump = [&](int n) { for (int i = 0; i < n; ++i) { QApplication::processEvents(); QThread::msleep(30); } };
         step("sim bus", bus != nullptr);
@@ -907,6 +909,7 @@ int main(int argc, char** argv) {
                         {   // Calibrate with a load (2026-11-28): two bands on ANT3, receive checks, tune, drive, 5 / 15 W tones; Stop ends it; an "antenna" stops it
                             auto until = [&](const std::function<bool()>& f) { for (int i = 0; i < 9000 && !f(); ++i) pump(1); return f(); };
                             const double d0 = rx->dialHz(); w.simRadio()->pass_ind = 3; w.simRadio()->pass_cap = 2;
+                            tc->setLoadCalFastForTests(true);
                             step("load cal: starts", tc->startLoadCal(3, {5, 3}) && tc->loadCalRunning());
                             step("load cal: runs to the end", until([&] { return !tc->loadCalRunning(); }));
                             const QString rep = tc->loadCalReport();
@@ -914,14 +917,14 @@ int main(int argc, char** argv) {
                                  && rep.count("W per drive") == 2 && !w.simRadio()->keyed);
                             step("load cal: the dial is back", std::fabs(rx->dialHz() - d0) < 1);
                             w.simRadio()->pass_ind = 40; w.simRadio()->pass_cap = 30;                        // not a load: the tuner needs a lot of matching (12 m: nothing saved for ANT3 there)
-                            pump(1800); until([&] { return !tc->busy(); });                                      // the band's ATU restore after the routine
+                            pump(70); until([&] { return !tc->busy(); });                                        // the band's ATU restore after the routine (~1.5 s)
                             step("load cal: a jack that needs real matching stops it", tc->startLoadCal(3, {8}) && until([&] { return !tc->loadCalRunning(); })
                                  && tc->statusText().contains("not a load") && !w.simRadio()->keyed);
-                            w.simRadio()->pass_ind = 3; w.simRadio()->pass_cap = 2; pump(1800); until([&] { return !tc->busy(); });
+                            w.simRadio()->pass_ind = 3; w.simRadio()->pass_cap = 2; pump(70); until([&] { return !tc->busy(); });
                             QPushButton* sbl = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sbl = bt;
                             step("load cal: Stop ends it", tc->startLoadCal(3, {9, 10}) && until([&] { return tc->busy(); }) && (sbl ? (sbl->click(), true) : false)
                                  && until([&] { return !tc->loadCalRunning() && !tc->busy(); }) && tc->statusText().contains("stopped") && !w.simRadio()->keyed);
-                            pump(2000); until([&] { return !tc->busy(); });
+                            pump(70); until([&] { return !tc->busy(); });
                             step("load cal: the dial and preamp are back afterwards", std::fabs(rx->dialHz() - d0) < 1 && rp->session().preamp_on() == pre->isChecked());
                             w.simRadio()->pass_ind = 30; w.simRadio()->pass_cap = 7; rx->setDialHz(d0); pump(20);
                         }
@@ -1012,7 +1015,10 @@ int main(int argc, char** argv) {
                         for (int i = 0; i < 80; ++i) pump(1);
                         step("the power meter shows the voice over", tc->powerMeter()->text().startsWith("PEP ") && tc->powerMeter()->text().contains(" fwd "));
                         {   // the transmit picture: while keyed the spectrum shows what is sent, in dBm (10 W PEP = 40 dBm; speech sits below its peak)
+                            auto txpk = [&] { const auto& f = rx->lastTxFrameForTests(); float p = -200; for (float d : f) p = std::max(p, d); return p; };
+                            for (int i = 0; i < 100 && !(rx->txViewOn() && txpk() > 20 && txpk() < 47) && w.simRadio()->keyed; ++i) pump(1);   // under load the frame can lag a moment
                             const auto& f = rx->lastTxFrameForTests(); float pk = -200; for (float d : f) pk = std::max(pk, d);
+                            if (!(pk > 20 && pk < 47)) std::fprintf(stderr, "DEBUG txview on=%d n=%zu pk=%.1f keyed=%d\n", int(rx->txViewOn()), f.size(), pk, int(w.simRadio()->keyed));
                             step("keyed: the spectrum shows the transmitted signal in dBm", rx->txViewOn() && !f.empty() && pk > 20 && pk < 47);
                             if (!(pk > 20 && pk < 47)) std::printf("  (transmit picture peak %.1f dBm, %zu bins)\n", double(pk), f.size());
                         }
@@ -1284,20 +1290,19 @@ int main(int argc, char** argv) {
             at->lineBandBox(i80, 0)->setChecked(false); at->lineRoleBox(0)->setCurrentIndex(0); rx->setDialHz(7.1e6);
             step("back to unused: the column hides again", !at->lineBandBox(i80, 0)->isVisibleTo(at));
         }
-        {   // the Receiver's Source card: 48 / 96 / 192 buttons show the running stream, Stop radio is only usable while the radio runs
+        {   // the Receiver's Source card: 48 / 96 / 192 buttons show the running stream; no Stop radio button there (2026-11-28)
             auto btn = [&](const char* t) { for (auto* b : rx->findChildren<QPushButton*>()) if (b->text() == t) return b; return static_cast<QPushButton*>(nullptr); };
             QPushButton *b48 = btn("48"), *b96 = btn("96"), *b192 = btn("192"), *stopb = btn("Stop radio");
-            step("rate buttons and Stop radio exist on the Receiver tab", b48 && b96 && b192 && stopb && b48->isCheckable() && !btn("Live..."));
+            step("rate buttons exist on the Receiver tab, Stop radio does not", b48 && b96 && b192 && !stopb && b48->isCheckable() && !btn("Live..."));
             rx->syncRateButtons(192000); step("192 shows checked, the others not", b192->isChecked() && !b96->isChecked() && !b48->isChecked());
             rx->syncRateButtons(96000); step("switching shows only 96", b96->isChecked() && !b192->isChecked() && !b48->isChecked());
             rx->syncRateButtons(0); step("no stream: none checked", !b48->isChecked() && !b96->isChecked() && !b192->isChecked() && rx->liveRate() == 0);
-            rp->disconnectRadio(); step("Stop radio unusable while the radio is not running", !stopb->isEnabled());
+            rp->disconnectRadio();
             const size_t n0 = ops().size(); rp->allowWritesBox()->setChecked(false); step("start by the rate path (simulated, confirmed)", rp->startAtRate(192000, true) && rp->session().state() == fireside::RadioSession::State::Started && ops().size() == n0 + 5);
-            step("Stop radio usable once the radio runs", stopb->isEnabled());
             const size_t n1 = ops().size(); b96->click(); QApplication::processEvents();
             step("a rate button on a running radio writes nothing (only the stream restarts; none exists when simulated)", ops().size() == n1 && rp->session().state() == fireside::RadioSession::State::Started && rx->liveRate() == 0 && !b96->isChecked());
-            stopb->click(); QApplication::processEvents();
-            step("Stop radio button stops the radio", rp->session().state() != fireside::RadioSession::State::Started && !stopb->isEnabled());
+            rp->stopRadio(); QApplication::processEvents();
+            step("the Device tab's Stop radio stops the radio", rp->session().state() != fireside::RadioSession::State::Started);
         }
         {   // Start receiving (one click): from disconnected, from connected read-only, and when already started. The one question is skipped here (confirmed = true).
             int started_signals = 0; QObject::connect(rp, &RadioPanel::radioStarted, [&] { ++started_signals; });

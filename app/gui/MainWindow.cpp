@@ -71,7 +71,9 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
     connect(antennas_, &AntennaPanel::linesChanged, radio_, [this] { radio_->setTxLines(antennas_->lineConfig()); });
     connect(radio_, &RadioPanel::txLinesState, antennas_, &AntennaPanel::setLineStates);
     antennas_->onDial(receiver_->dialHz());
-    connect(receiver_, &ReceiverPanel::rateRequested, this, [this](unsigned rate) { radio_->startAtRate(rate, false); });
+    connect(receiver_, &ReceiverPanel::rateRequested, this, [this](unsigned rate) {           // no "Start the radio?" question (user 2026-11-28)
+        if (tx_card_ && tx_card_->busy()) { receiver_->showNote("Not while transmitting: the stream also carries the transmit audio. Change the rate after the over."); receiver_->syncRateButtons(receiver_->liveRate()); return; }
+        radio_->startAtRate(rate, true); });
     connect(receiver_, &ReceiverPanel::stopRadioRequested, this, [this] { radio_->stopRadio(); });
     auto* logbox = new QVBoxLayout; logbox->addWidget(log_);
     col->addWidget(radio_);

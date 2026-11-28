@@ -106,7 +106,7 @@ void TransmitCard::lcJob(const QString& what, bool pauses, std::function<QString
         after_job_ = nullptr;
         if (lc_ != g) return;
         if (safety || res.startsWith("UNKEY FAILED")) { lcFinish("stopped by a safety stop: " + res); return; }
-        lcAfter(800);
+        lcAfter(lc_fast_ ? 100 : 800);
     };
     run(what, pauses, std::move(job));
     if (!worker_running_) { after_job_ = nullptr; lcFinish("the transmit worker did not start"); }
@@ -141,17 +141,17 @@ void TransmitCard::lcStep() {
         rx_->setDialHz(mhz * 1e6); rx_->setModeIndex(0); rx_->setFilterWidth(2400);
         radio_->session().set_preamp(false); rx_->setPreampChecked(false);
         QTimer::singleShot(400, this, [this, g = lc_] { if (lc_ == g) radio_->requestRxAntenna(QString("ANT%1").arg(lc_->ant), "load calibration"); });   // after the Antennas tab's own switch for the band
-        L.phase = 1; lcAfter(2000); return;
+        L.phase = 1; lcAfter(lc_fast_ ? 200 : 2000); return;
     }
     case 1:                                                                     // noise floor, preamp off
-        sample(20, [this, mean_db] {
+        sample(lc_fast_ ? 3 : 20, [this, mean_db] {
             lc_->res[lc_->i].noise = mean_db() + rx_->meterOffsetDb();
             radio_->session().set_preamp(true); rx_->setPreampChecked(true);
-            lc_->phase = 2; lcAfter(1200);
+            lc_->phase = 2; lcAfter(lc_fast_ ? 200 : 1200);
         });
         return;
     case 2:                                                                     // noise floor, preamp on; then the load check
-        sample(20, [this, mean_db, bn] {
+        sample(lc_fast_ ? 3 : 20, [this, mean_db, bn] {
             auto& R = lc_->res[lc_->i];
             R.noise_pre = mean_db() + rx_->meterOffsetDb();
             radio_->session().set_preamp(false); rx_->setPreampChecked(false);
@@ -159,7 +159,7 @@ void TransmitCard::lcStep() {
             if (std::isfinite(R.noise_pre) && R.noise_pre > kLoadNoiseMaxDbm) {
                 lcFinish(QString("ANT%1 on %2 reads a noise floor of %3 dBm with the preamp on: that is an antenna (or a strong signal), not a load. Nothing was transmitted on this band")
                          .arg(lc_->ant).arg(bn).arg(R.noise_pre, 0, 'f', 1)); return; }
-            lc_->phase = 3; lcAfter(600);
+            lc_->phase = 3; lcAfter(lc_fast_ ? 100 : 600);
         });
         return;
     case 3: {                                                                   // the S-meter check with the internal generator (receive only)
@@ -229,8 +229,9 @@ void TransmitCard::lcStep() {
     case 7: case 8: {                                                           // steady tones at 5 W and 15 W: the meters on a good load
         if (!R.tx_ok) { L.phase = 9; lcAfter(100); return; }
         const int k = L.phase - 7; const double w = k == 0 ? 5.0 : 15.0; L.phase += 1; auto g = lc_;
-        lcJob(QString("Calibrate with a load: %1 tone at %2 W").arg(bn).arg(w, 0, 'f', 0), true, [this, mhz, o, w, k, progress, g](txc::TxControl& t) {
-            const auto r = t.ramp(mhz, w, o, progress, {}, 3.0);
+        const double hold = lc_fast_ ? 0.6 : 3.0;
+        lcJob(QString("Calibrate with a load: %1 tone at %2 W").arg(bn).arg(w, 0, 'f', 0), true, [this, mhz, o, w, k, progress, g, hold](txc::TxControl& t) {
+            const auto r = t.ramp(mhz, w, o, progress, {}, hold);
             double f = 0, rv = 0, sw = 0, af = 0, as = 0; int n = 0, na = 0;
             for (const auto& c : r.compare) { f += c.fwd_w; rv += c.rev_w; sw += c.swr; ++n; if (c.atu_fwd_w && c.atu_swr) { af += *c.atu_fwd_w; as += *c.atu_swr; ++na; } }
             const bool ok = r.reached && n > 0;

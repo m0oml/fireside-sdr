@@ -52,6 +52,7 @@ public:
     void onLoadCal();                                     // "Calibrate with a load...": the dialog, then the routine (TransmitCardLoadCal.cpp)
     bool startLoadCal(int ant, const std::vector<int>& bands);   // the routine without the dialog (tests): load on ANT`ant`, these bands (tx_meter.h indices)
     bool loadCalRunning() const; QString loadCalReport() const { return lc_report_; }
+    void setLoadCalFastForTests(bool on) { lc_fast_ = on; }   // short settles, 3 level readings, 0.6 s tones: the same steps, quicker
     void setRxAntennaSource(std::function<QString(double dialHz)> f) { rx_ant_for_ = std::move(f); }   // the Antennas tab's RX antenna (put back afterwards)                                // the Antennas tab changed: memory line, buttons, and this antenna's stored ATU relays (no RF)
     QPushButton* pttButton() const { return ptt_; }
     QPushButton* burstButton() const { return burst_; }
@@ -135,7 +136,7 @@ private:
     bool ask(const QString& title, const QString& text);
     std::atomic<double> last_tx_w_{0}, unkeyed_utc_{0}, job_end_utc_{0}; std::atomic<qint64> last_tx_t_{0};
     std::function<int(double)> tx_ant_; int txAnt() const; int last_ant_ = 1;
-    struct LoadCal; std::shared_ptr<LoadCal> lc_; QString lc_report_; std::function<QString(double)> rx_ant_for_; QPushButton* load_cal_btn_ = nullptr;
+    struct LoadCal; std::shared_ptr<LoadCal> lc_; bool lc_fast_ = false; QString lc_report_; std::function<QString(double)> rx_ant_for_; QPushButton* load_cal_btn_ = nullptr;
     std::function<void(const QString&, bool)> after_job_;  // called once a worker job has ended (result, safety stop): the load calibration's next step
     void lcStep(); void lcAfter(int ms); void lcFinish(const QString& why); void lcJob(const QString& what, bool pauses, std::function<QString(fireside::txc::TxControl&)> job);
     QPushButton* burst_ = nullptr; std::atomic<bool> burst_down_{false};   // FM: the 1750 Hz tone burst while held (at most 1 s per press)

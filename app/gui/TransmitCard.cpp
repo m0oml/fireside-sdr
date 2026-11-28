@@ -146,7 +146,11 @@ TransmitCard::TransmitCard(RadioPanel* radio, ReceiverPanel* rx, bool simulated,
         gen_btn_->setToolTip("Receive only: for about 10 s the receiver listens to the radio's internal signal generator (taken as -24 dBm, as PowerSDR does) instead of the antenna, "
                              "with the preamp off and then on. The result is saved for this band and the S-meter uses it. Nothing is transmitted.");
         connect(gen_btn_, &QPushButton::clicked, this, &TransmitCard::onGenCheck);
-        cal_body_ = part({row({measure_, test_, test_w_, mirror_}), row({gen_btn_})}); cal_body_->setVisible(false);
+        load_cal_btn_ = new QPushButton("Calibrate with a load...");
+        load_cal_btn_->setToolTip("Attach a 50 \u03a9 load (or a 20 dB+ power attenuator) to one antenna jack: for each band the noise floor and the S-meter (receive only), "
+                                  "then a 3 W tune, Measure drive, and 5 W / 15 W tones to record the power meter on a good load. About 45 s per band; Stop ends it.");
+        connect(load_cal_btn_, &QPushButton::clicked, this, &TransmitCard::onLoadCal);
+        cal_body_ = part({row({measure_, test_, test_w_, mirror_}), row({gen_btn_, load_cal_btn_})}); cal_body_->setVisible(false);
         connect(cal, &QPushButton::toggled, this, [this, cal](bool on) { cal_body_->setVisible(on); cal->setText(on ? QStringLiteral("Calibration  \u25BE") : QStringLiteral("Calibration  \u25B8")); tuner_dialog_->adjustSize(); });
         mem_->setWordWrap(true); mem_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         tune2_ = new QPushButton("Tune ATU"); connect(tune2_, &QPushButton::clicked, this, [this] { tune_->click(); });   // the same Tune as on the card (it asks first)
@@ -412,6 +416,7 @@ void TransmitCard::run(const QString& what, bool pauses_receive, std::function<Q
             extOverEnded(!safety);                                                                  // a program re-keyed while its last over was unkeying
             if (unkey_failed_) { unkey_failed_ = false; if (auto_confirm_ < 0) QMessageBox::critical(this, "The radio may still be transmitting",
                 "The unkey command did not get through (three tries, then 2 s of retries).\n\nPower the radio off now (front panel), then check the FireWire connection.\n\n" + res); }
+            if (after_job_) { auto f = after_job_; f(res, safety); }                                  // the load calibration: its next step (or its end after a safety stop)
         }, Qt::QueuedConnection);
     });
 }
@@ -460,9 +465,12 @@ bool TransmitCard::haveStation() {
 fireside::seq::Sequencer& TransmitCard::sequencer() {
     const QString grid = myGrid4();
     const QString me = rx_->myCall();                                                       // callers have checked haveStation(): never another station's call
-    if (!seq_ || QString::fromStdString(seq_->describe()).isEmpty())
+    if (!seq_ || QString::fromStdString(seq_->describe()).isEmpty()) {
+        const auto keep = seq_ ? seq_->unfinished() : std::optional<fireside::seq::Unfinished>{};   // a QSO given up on stays finishable by its late RR73
         seq_ = test_tries_ > 0 ? std::make_unique<fireside::seq::Sequencer>(me.toStdString(), grid.left(4).toUpper().toStdString(), test_tries_)
                                : std::make_unique<fireside::seq::Sequencer>(me.toStdString(), grid.left(4).toUpper().toStdString());
+        seq_->remember(keep);
+    }
     return *seq_;
 }
 namespace {
@@ -494,6 +502,10 @@ void TransmitCard::replyTo(const QString& line) {
     if (seq_) seq_->stop();
     auto& sq = sequencer();
     if (!sq.reply_to(h)) { report("Nothing to answer in: " + QString::fromStdString(text)); return; }
+    if (sq.resumed()) {                                                                     // the late RR73 / 73 of a QSO we gave up on
+        if (!sq.active()) { report(QString("%1: their 73 came after we gave up: the QSO is logged with its reports.").arg(QString::fromStdString(sq.dx()))); ended_for_.clear(); logged_for_.clear(); takeLog(); updateButtons(); return; }
+        if (QString::fromStdString(sq.dx()) == gave_up_call_ && gave_up_hz_ > 0) ft_hz_->setValue(gave_up_hz_);   // our 73 where they were listening for us
+    }
     { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - line_parity(line, ft_mode_->currentIndex() == 1)); }   // our slots are the other parity
     att_count_ = 0; endAttPause();                                                          // Attended CQ stays ticked: when this QSO ends, back to CQ
     ft_msg_->setText(QString::fromStdString(sq.current())); saveState(); ended_for_.clear(); logged_for_.clear(); emit qsoPartner(QString::fromStdString(sq.dx()));
@@ -508,6 +520,7 @@ void TransmitCard::heardLine(const QString& line) {
     int snr = 0; const std::string text = fireside::logbook::ftx_line_text(line.toStdString(), &snr); const auto h = fireside::seq::parse(text, snr);   // two statements: argument order is unspecified
     const bool was_cq = seq_->stage() == fireside::seq::Stage::Cq;
     if (seq_->heard(h)) {
+        if (seq_->resumed()) { finishLate(line, was_cq); return; }
         if (was_cq && seq_->stage() != fireside::seq::Stage::Cq) {                             // someone answered our CQ: afterwards, back to CQ
             from_cq_ = true; ended_for_.clear(); logged_for_.clear();                           // a new QSO, even with a station we just gave up on or worked
             if (att_pause_) {                                                                   // answered during the Attended CQ pause: reply in the slot after theirs
@@ -524,10 +537,29 @@ void TransmitCard::heardLine(const QString& line) {
             queueSend();                                                                  // they repeated their R-report after we had stopped: RR73 once more
     }
 }
+void TransmitCard::finishLate(const QString& line, bool was_cq) {     // heard: the late RR73 / 73 of the QSO we gave up on (a CQ or nothing running)
+    if (seq_->stage() != fireside::seq::Stage::Sent73) {                                    // their 73: logged now; a CQ running carries on
+        if (auto l = seq_->take_log()) {
+            const QString c = QString::fromStdString(l->call);
+            emit logQso(c, QString::fromStdString(l->grid), QString::fromStdString(l->rst_sent), QString::fromStdString(l->rst_rcvd), l->start_utc);
+            report(QString("QSO %1: their 73 came after we gave up: logged, sent %2, rcvd %3.").arg(c, QString::fromStdString(l->rst_sent), QString::fromStdString(l->rst_rcvd)));
+            emit qsoEnded(c, true);
+        }
+        return;
+    }
+    if (was_cq) from_cq_ = true;                                                            // a CQ was running: back to it afterwards
+    ended_for_.clear(); logged_for_.clear();
+    if (att_pause_) endAttPause();
+    { QSignalBlocker b(ft_par_); ft_par_->setCurrentIndex(1 - line_parity(line, ft_mode_->currentIndex() == 1)); }   // the slot after theirs
+    if (QString::fromStdString(seq_->dx()) == gave_up_call_ && gave_up_hz_ > 0) ft_hz_->setValue(gave_up_hz_);   // where they were listening for us
+    saveState(); ft_msg_->setText(QString::fromStdString(seq_->current())); emit qsoPartner(QString::fromStdString(seq_->dx()));
+    report(QString::fromStdString(seq_->describe()) + QString(": their RR73 came after we gave up: 73 on %1 Hz").arg(ft_hz_->value()));
+    if (!worker_running_ && tx_ && tx_->armed()) { ft_timer_->stop(); ft_pending_.reset(); queueSend(); }   // replaces a queued CQ (it was rendered at the CQ's audio frequency)
+}
 void TransmitCard::takeLog() {
     if (!seq_) return;
     if (auto l = seq_->take_log()) {
-        emit logQso(QString::fromStdString(l->call), QString::fromStdString(l->grid), QString::fromStdString(l->rst_sent), QString::fromStdString(l->rst_rcvd));
+        emit logQso(QString::fromStdString(l->call), QString::fromStdString(l->grid), QString::fromStdString(l->rst_sent), QString::fromStdString(l->rst_rcvd), l->start_utc);
         logged_for_ = QString::fromStdString(l->call);                                  // logged; "done" is said when the sequence really ends (RR73 repeats may follow)
     }
     noteSeqEnd();
@@ -537,6 +569,7 @@ void TransmitCard::noteSeqEnd(bool may_continue) {      // the sequence has ende
     const QString dx = QString::fromStdString(seq_->dx()); if (dx.isEmpty() || dx == ended_for_) return;
     const bool logged = dx == logged_for_;
     if (!logged && seq_->stage() != fireside::seq::Stage::GaveUp) return;                // stopped before anything was logged: nothing to announce
+    if (!logged && seq_->unfinished()) { gave_up_call_ = dx; gave_up_hz_ = ft_hz_->value(); }   // for a late RR73: our 73 goes out where they listened
     ended_for_ = dx; emit qsoEnded(dx, logged);
     if (may_continue) { follow_pending_ = true; QTimer::singleShot(300, this, [this] { autoNext(); }); }
 }
@@ -650,15 +683,15 @@ void TransmitCard::onArm(bool on) {
     QFile f(bpath); std::vector<uint8_t> backup; if (f.open(QIODevice::ReadOnly)) { const QByteArray a = f.readAll(); backup.assign(a.begin(), a.end()); }
     tx_ = s.transmit(pcmFactory()); connectTrip(); tx_->set_iq_tap(tx_tap_);
     if (!tx_) { QSignalBlocker b(arm_); arm_->setChecked(false); report("The radio is not started."); return; }
-    const int band_now = txm::band_of(rx_->dialHz()); const bool restore_now = band_now >= 0 && auto_restore_->isChecked() && txAnt() == 1;
-    run("Arming (reading the EEPROM)", false, [this, backup, band_now, restore_now](txc::TxControl& t) {
+    const int band_now = txm::band_of(rx_->dialHz()), ant_now = txAnt(); const bool restore_now = band_now >= 0 && auto_restore_->isChecked();
+    run("Arming (reading the EEPROM)", false, [this, backup, band_now, ant_now, restore_now](txc::TxControl& t) {
         // once per app run: the EEPROM is read and compared at start-up only (later arms rely on that check)
         if (eeprom_verified_) t.arm(backup, backup);
         else { t.arm_from_radio(backup, [this](const std::string& m) { const QString s = QString::fromStdString(m); QMetaObject::invokeMethod(this, [this, s] { emit message("Transmit: " + s); }, Qt::QueuedConnection); }); eeprom_verified_ = true; }
         { const auto cal = rx_level_cal(decode_eeprom(backup, "TRX")); QMetaObject::invokeMethod(this, [this, cal] { applyRxCal(cal); }, Qt::QueuedConnection); }   // the S-meter's factory table, from the image just verified
         loadState();
         QString atu;                                                                       // this band's stored ATU relays (no RF): band changes restore them, so arming does too
-        if (restore_now && t.memory().recall(band_now)) { std::string msg; t.restore_relays(band_now, [&](const std::string& m) { msg = m; }); atu = " " + QString::fromStdString(msg) + "."; }
+        if (restore_now && t.memory().recall(band_now, ant_now)) { std::string msg; t.restore_relays(band_now, ant_now, [&](const std::string& m) { msg = m; }); atu = " " + QString::fromStdString(msg) + "."; }
         return QString("Transmit ready: the EEPROM matches the backup, PA bias set.") + atu;
     });
 }
@@ -667,22 +700,29 @@ void TransmitCard::onTune() {
     if (!tx_ || !tx_->armed()) return;
     const double mhz = rx_->dialHz() / 1e6, w = power_->value(), thr = thr_->currentData().toDouble(); const int band = txm::band_of(mhz * 1e6);
     if (band < 0) { report("The dial is outside the amateur bands."); return; }
-    if (!ask("Tune the ATU?", QString("Transmit a tune carrier on %1 MHz at about %2 W for up to 15 s while the ATU searches?\n\nListen first: is the frequency clear?").arg(mhz, 0, 'f', 4).arg(w))) return;
+    if (!ask("Tune the ATU?", QString("Transmit a tune carrier on %1 MHz on ANT%3 at about %2 W first on the band's saved setting (about 2 s), then, if that is not good enough, for up to 15 s per search while the ATU searches (at most 3 searches)?\n\nListen first: is the frequency clear?").arg(mhz, 0, 'f', 4).arg(w).arg(txAnt()))) return;
     txc::Options o; o.rate = simulated_ ? 48000 : txRate(); o.mirror_q = mirror_->isChecked(); o.tx_ant = txAnt();
     if (!(o.rate > 0)) { report("The radio's ALSA playback offers no 8-channel rate (see /proc/asound/cardN/firewire/formation)."); return; }
-    run(QString("Tuning on %1 MHz at %2 W").arg(mhz, 0, 'f', 4).arg(w), true, [this, mhz, w, thr, o](txc::TxControl& t) {
+    run(QString("Tuning on %1 MHz on ANT%3 at %2 W").arg(mhz, 0, 'f', 4).arg(w).arg(o.tx_ant), true, [this, mhz, w, thr, o](txc::TxControl& t) {
         auto r = t.tune(mhz, w, thr, o, [this](const txc::Progress& p) { std::lock_guard<std::mutex> l(m_); last_ = p; have_last_ = true; });
         if (r.unkey_failed) { unkey_failed_ = true; return QString("UNKEY FAILED: ") + QString::fromStdString(r.stop); }
         if (!r.outcome) return QString("Tune refused: ") + QString::fromStdString(r.why_not);
         const auto& s = r.outcome->status;
         QString res = r.outcome->result == atu::Atu::TuneResult::Pass ? "PASS" : r.outcome->result == atu::Atu::TuneResult::Fail ? QString("FAIL (%1)").arg(atu::fail_text(r.outcome->fail_reason)) : "stopped";
+        const QString tries = r.searches > 1 ? QString(" %1 searches.").arg(r.searches) : QString();
+        const QString chk = r.checked_saved && !r.from_saved ? QString(" The saved setting was tried first (not good enough here).") : QString();
+        if (r.from_saved)
+            return QString("Tune PASS after %1 s: the saved setting ind %2 cap %3 %4 is good, tuner SWR %5, our meter %6 SWR %7. No search needed.").arg(r.outcome->seconds, 0, 'f', 1)
+                   .arg(s.ind ? *s.ind : -1).arg(s.cap ? *s.cap : -1).arg(s.hiz && *s.hiz ? "Hi-Z" : "Lo-Z").arg(r.check_tuner_swr ? QString::number(*r.check_tuner_swr, 'f', 2) : "?")
+                   .arg(fmt_w(r.last_fwd_w)).arg(r.last_swr ? QString::number(*r.last_swr, 'f', 2) : "?");
         if (r.outcome->result != atu::Atu::TuneResult::Pass)   // the tuner's own report belongs to a pass only (its last status may be from an earlier tune)
             return QString("Tune %1 after %2 s (%3). Max %4.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop)).arg(fmt_w(r.max_fwd_w))
-                   + (r.pass_rejected.empty() ? QString() : " " + QString::fromStdString(r.pass_rejected) + ".");
+                   + (r.pass_rejected.empty() ? QString() : " " + QString::fromStdString(r.pass_rejected) + ".") + tries + chk;
         res = QString("Tune %1 after %2 s (%3). Tuner: ind %4 cap %5 %6, %7, SWR %8. Max %9.").arg(res).arg(r.outcome->seconds, 0, 'f', 1).arg(QString::fromStdString(r.stop))
               .arg(s.ind ? *s.ind : -1).arg(s.cap ? *s.cap : -1).arg(s.hiz && *s.hiz ? "Hi-Z" : "Lo-Z").arg(s.fwd_w ? fmt_w(*s.fwd_w) : "?").arg(s.swr ? QString::number(*s.swr, 'f', 2) : "?").arg(fmt_w(r.max_fwd_w));
         if (r.last_fwd_w > 0.5 && r.last_swr) res += QString(" Our meter: %1, SWR %2.").arg(fmt_w(r.last_fwd_w)).arg(*r.last_swr, 0, 'f', 2);
         if (r.saved) res += " Saved for this band.";
+        res += tries + chk;
         if (r.estimated_drive) res += " (No measured drive on this band yet, so it was estimated: press Measure drive now.)";
         return res;
     });
@@ -814,9 +854,9 @@ void TransmitCard::startSend() {
 
 void TransmitCard::onRestore() {
     if (!tx_ || !tx_->armed()) return;
-    const int band = txm::band_of(rx_->dialHz());
-    run("Restoring the ATU (no RF)", false, [band](txc::TxControl& t) {
-        std::string msg; const bool ok = t.restore_relays(band, [&](const std::string& m) { msg = m; });
+    const int band = txm::band_of(rx_->dialHz()), ant = txAnt();
+    run("Restoring the ATU (no RF)", false, [band, ant](txc::TxControl& t) {
+        std::string msg; const bool ok = t.restore_relays(band, ant, [&](const std::string& m) { msg = m; });
         return QString::fromStdString(msg.empty() ? (ok ? "ATU restored" : "ATU not restored") : msg);
     });
 }
@@ -907,6 +947,7 @@ void TransmitCard::stopEverything(const QString& why) {
     ++stop_gen_; auto_hold_ = true; ft_timer_->stop(); ft_pending_.reset(); endAttPause(); if (wspr_on_) wsprOff(""); { QSignalBlocker b(ft_repeat_); ft_repeat_->setChecked(false); } follow_pending_ = false; auto_tried_.clear(); from_cq_ = false;
     if (seq_) { seq_->stop(); noteSeqEnd(false); }                                           // a logged QSO stopped during its RR73 repeats is still done
     extCancel(); if (tx_) tx_->abort(); report(why); updateButtons();
+    if (lc_) lcFinish("stopped (" + why + ")");
 }
 void TransmitCard::onDial(double hz) {
     const int band = txm::band_of(hz); if (band == last_band_) return;
@@ -917,7 +958,16 @@ void TransmitCard::onDial(double hz) {
         stopEverything("Band changed: the QSO / CQ is stopped and nothing is queued (the callers waiting on the old band are cleared).");
         rx_->clearCallers();
     }
-    if (band >= 0 && auto_restore_->isChecked() && tx_ && tx_->armed() && !worker_running_ && tx_->memory().recall(band)) onRestore();
+    if (band >= 0 && auto_restore_->isChecked() && tx_ && tx_->armed() && !worker_running_ && tx_->memory().recall(band, txAnt())) onRestore();
+    last_ant_ = txAnt();
+}
+void TransmitCard::antennaChanged() {                    // the Antennas tab changed: this band may now transmit on another jack (the ATU feeds all three)
+    const int band = txm::band_of(rx_->dialHz()), ant = txAnt(); const bool changed = ant != last_ant_; last_ant_ = ant;
+    updateMemoryLabel(); updateButtons();
+    if (!changed || band < 0 || !tx_ || !tx_->armed()) return;
+    if (worker_running_) { report(QString("Transmit antenna now ANT%1: the ATU keeps its relays until this job ends; press Restore ATU or Tune then.").arg(ant)); return; }
+    if (auto_restore_->isChecked() && tx_->memory().recall(band, ant)) onRestore();
+    else report(QString("Transmit antenna now ANT%1: no ATU setting stored for %2 on ANT%1, the tuner still holds the last one. Tune before transmitting.").arg(ant).arg(txm::band_name(band)));
 }
 
 void TransmitCard::onReceiveLost(const QString& why) {
@@ -951,29 +1001,29 @@ void TransmitCard::updateButtons() {
     auto& s = radio_->session(); const bool started = s.state() == RadioSession::State::Started && s.allow_write();
     const bool armed = tx_ && tx_->armed(), idle = !worker_running_; const int band = txm::band_of(rx_->dialHz());
     arm_->setEnabled(started && idle); arm_->setVisible(started && idle && arm_tried_ && !(tx_ && tx_->armed()));   // only to retry a failed check
-    const bool on_atu = txAnt() == 1;
-    tune_->setEnabled(armed && idle && band >= 0 && on_atu);
+    tune_->setEnabled(armed && idle && band >= 0);
     tune_->setToolTip(band >= 0 && armed && !(tx_->k_for(band) > 0) ? "No measured drive on this band yet: Tune borrows the next band's measured level (or the EEPROM table, which errs low). Press Measure drive after a good tune."
                                                                     : "Transmits a carrier (up to 15 s) while the ATU searches. Asks first: listen to the frequency.");
     measure_->setEnabled(armed && idle && band >= 0); test_->setEnabled(armed && idle && band >= 0); test_w_->setEnabled(idle); mirror_->setEnabled(idle);
     send_->setEnabled(armed && idle && band >= 0 && !ft_pending_ && !wspr_on_); cq_->setEnabled(send_->isEnabled());
     if (auto_cq_) auto_cq_->setEnabled(auto_cq_->isChecked() || (armed && band >= 0 && !wspr_on_));
     if (wspr_beacon_) wspr_beacon_->setEnabled(wspr_on_ || (armed && idle && band >= 0 && !ft_pending_)); ptt_->setEnabled(armed && band >= 0 && audio_ && !ft_pending_); if (burst_) burst_->setVisible(rx_->modeIndex() == 4 && voice_mode_->currentIndex() == 0);
-    restore_->setEnabled(armed && idle && band >= 0 && on_atu && tx_->memory().recall(band).has_value());
-    if (!on_atu) { tune_->setToolTip(QString("This band transmits on ANT%1: the ATU is on ANT1 only (Antennas tab)").arg(txAnt())); }
+    restore_->setEnabled(armed && idle && band >= 0 && tx_->memory().recall(band, txAnt()).has_value());
     if (tune2_) { tune2_->setEnabled(tune_->isEnabled()); tune2_->setToolTip(tune_->toolTip()); }
     power_->setEnabled(idle); thr_->setEnabled(idle); stop_->setEnabled(worker_running_ || ft_pending_ != nullptr || att_pause_ || wspr_on_);
     ext_allow_->setEnabled(armed || ext_allow_->isChecked());                      // can always be unticked
-    gen_btn_->setEnabled(armed && idle && band >= 0 && !ft_pending_);
+    gen_btn_->setEnabled(armed && idle && band >= 0 && !ft_pending_ && !lc_);
+    if (load_cal_btn_) load_cal_btn_->setEnabled(armed && idle && !ft_pending_ && !lc_);
 }
 void TransmitCard::updateMemoryLabel() {
     const int band = txm::band_of(rx_->dialHz());
     if (band < 0) { mem_->setText("ATU memory: (outside the amateur bands)"); return; }
     std::optional<atu::Setting> st;
-    if (tx_) st = tx_->memory().recall(band);
-    else if (!no_settings()) { std::ifstream in(mem_path().toStdString()); std::stringstream ss; ss << in.rdbuf(); st = atu::Memory::from_text(ss.str()).recall(band); }
-    mem_->setText(st ? QString("ATU %1: ind %2 cap %3 %4, SWR %5 (%6)").arg(txm::band_name(band)).arg(st->ind).arg(st->cap).arg(st->hiz ? "Hi-Z" : "Lo-Z").arg(st->swr, 0, 'f', 2).arg(QString::fromStdString(st->utc))
-                     : QString("ATU %1: nothing stored").arg(txm::band_name(band)));
+    const int ant = txAnt();
+    if (tx_) st = tx_->memory().recall(band, ant);
+    else if (!no_settings()) { std::ifstream in(mem_path().toStdString()); std::stringstream ss; ss << in.rdbuf(); st = atu::Memory::from_text(ss.str()).recall(band, ant); }
+    mem_->setText(st ? QString("ATU %1 ANT%7: ind %2 cap %3 %4, SWR %5 (%6)").arg(txm::band_name(band)).arg(st->ind).arg(st->cap).arg(st->hiz ? "Hi-Z" : "Lo-Z").arg(st->swr, 0, 'f', 2).arg(QString::fromStdString(st->utc)).arg(ant)
+                     : QString("ATU %1 ANT%2: nothing stored").arg(txm::band_name(band)).arg(ant));
 }
 void TransmitCard::loadState() {                         // worker thread, right after arming: the per-band ATU memory and drive calibrations
     if (no_settings() || !tx_) return;

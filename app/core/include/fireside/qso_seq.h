@@ -5,6 +5,8 @@
 // The same message is repeated in each of our slots until the other station moves on, at most `max_tries` times; then it gives up. No radio here:
 // the GUI renders and sends what next_message() says, in the slot parity it says. Reports: our SNR of their last message, clamped -30..+30, "-08" / "+05".
 #pragma once
+#include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,7 +33,12 @@ std::string report_text(int snr);                         // "-08", "+05" (clamp
 
 struct QsoLog {                      // what a finished QSO logs
     std::string call, grid, rst_sent, rst_rcvd;
+    int64_t start_utc = 0;           // when it started (our first message to them); 0 = unknown, log the time of logging
 };
+// A QSO given up on after the reports went out: if that station's RR73 / RRR / 73 turns up within kLateFinishS (they got through after all,
+// we only missed it in time), the QSO is finished with these reports and this start time instead of being started afresh.
+struct Unfinished { std::string call, grid, sent, rcvd; int64_t start_utc = 0, gave_up_utc = 0; };
+constexpr int64_t kLateFinishS = 600;
 
 class Sequencer {
 public:
@@ -47,6 +54,11 @@ public:
     std::string next_message();
     // When the QSO is complete enough to log (once): set after the message that completes it was handed out by next_message().
     std::optional<QsoLog> take_log();
+    // The QSO this gave up on (reports sent), kept for a late RR73 / 73; carried into a new Sequencer with remember().
+    const std::optional<Unfinished>& unfinished() const { return unf_; }
+    void remember(const std::optional<Unfinished>& u) { unf_ = u; }
+    bool resumed() const { return resumed_; }   // the last reply_to() / heard() finished a given-up QSO (73 to send, or logged at once)
+    void set_clock(std::function<int64_t()> now) { now_ = std::move(now); }   // seconds since the epoch (tests)
     Stage stage() const { return st_; }
     bool active() const { return st_ != Stage::Idle && st_ != Stage::Done && st_ != Stage::GaveUp; }
     const std::string& dx() const { return dx_; }
@@ -55,6 +67,9 @@ public:
     int tries() const { return tries_; }
 private:
     std::string me_, grid_, dx_, dx_grid_, sent_, rcvd_, msg_; Stage st_ = Stage::Idle; int max_tries_, tries_ = 0; bool log_due_ = false, logged_ = false, last_send_ = false, again_ = false, rr73_done_ = false; int reopened_ = 0, limit_ = 0;
+    std::optional<Unfinished> unf_; std::optional<QsoLog> late_log_; bool resumed_ = false; int64_t start_utc_ = 0; std::function<int64_t()> now_;
+    int64_t now() const;
+    bool resume(const Heard& h, bool keep_stage);
     void set(Stage s, std::string m);
     bool to_me(const Heard& h) const;
 };

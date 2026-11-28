@@ -20,11 +20,11 @@ void RxAntenna::disarm() { std::lock_guard<std::mutex> l(m_); armed_ = false; }
 bool RxAntenna::armed() const { std::lock_guard<std::mutex> l(m_); return armed_; }
 std::optional<RxAnt> RxAntenna::current() const { std::lock_guard<std::mutex> l(m_); if (cur_ == 0) return std::nullopt; return RxAnt(cur_); }
 std::string RxAntenna::last_error() const { std::lock_guard<std::mutex> l(m_); return err_; }
-AntResult RxAntenna::request(RxAnt a) {
+AntResult RxAntenna::request(RxAnt a, bool force) {
     const int v = int(a); if (v < 1 || v > 4) return AntResult::NotArmed;      // unreachable through the enum; kept so a bad cast can never reach the wire
     std::lock_guard<std::mutex> l(m_);
     if (!armed_) return AntResult::NotArmed;
-    if (v == cur_) return AntResult::Unchanged;
+    if (v == cur_ && !force) return AntResult::Unchanged;
     try { fx_.set("SET_RX1_ANT", double(v), 0.0); }                            // the only write in this file: d1 = 1..4, d2 = 0 (as PowerSDR's SetRX1Ant)
     catch (const std::exception& e) { armed_ = false; err_ = e.what(); return AntResult::Fault; }
     cur_ = v; return AntResult::Sent;

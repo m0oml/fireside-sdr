@@ -166,6 +166,17 @@ bool RadioPanel::startRadio(bool confirmed) {
         rx_->setDialControlsRadio(true); rx_->setPreampControlsRadio(true); rx_->lockIfOffset(true);                      // the DSP must match the DDS: no IF offset while the radio is tuned exactly to the dial
         emit rxAntennaChanged(QString::fromStdString(ant)); applyTxLines();
         emit message(QString("Radio is up on %1 MHz (%2). The dial box and clicks on the spectrum now tune the radio. Start the I/Q capture next.").arg(mhz, 0, 'f', 6).arg(QString::fromStdString(ant)));
+        // The start-up's antenna switch comes 13 ms after leaving standby and was not always taken (2026-11-28: shown ANT1, received on ANT2 until the
+        // antenna was cycled). Once the radio has settled, the antenna it is meant to be on is written again (the same reviewed write).
+        QTimer::singleShot(1500, this, [this] {
+            if (session_.state() != RadioSession::State::Started) return;
+            const auto cur = session_.rx_antenna();
+            switch (session_.reassert_rx_antenna()) {
+                case fireside::AntResult::Sent: if (cur) emit message(QString("RX antenna %1 sent again now the radio has settled.").arg(*cur == fireside::RxAnt::Rx1In ? QString("RX1 IN") : QString("ANT%1").arg(int(*cur)))); break;
+                case fireside::AntResult::Fault: report("RX antenna switch failed (mailbox fault): the radio may be on another antenna. Press Stop radio, then start again."); break;
+                default: break;
+            }
+        });
     } catch (const std::exception& e) {                                              // G11: a partial start may have taken the radio out of standby
         ok = false; report(QString("Start stopped: ") + e.what() + (session_.state() == RadioSession::State::Connected && session_.allow_write() ? " (the radio may be partly started: press Stop radio to put it back in standby)" : ""));
     }

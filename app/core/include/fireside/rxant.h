@@ -22,7 +22,8 @@ public:
     void arm(const std::string& started_with);         // call only after run_startup() succeeded; started_with = the antenna name the start-up selected ("NC" = none known). Throws SafetyError if writes are disabled
     void disarm();
     bool armed() const;
-    AntResult request(RxAnt a);                        // NotArmed until arm(); Fault disarms
+    AntResult request(RxAnt a, bool force = false);    // NotArmed until arm(); Fault disarms. force: write even if it is already the current one
+                                                       // (after power-up: the start-up's switch, 13 ms after leaving standby, was not always taken, user 2026-11-28)
     std::optional<RxAnt> current() const;              // what the radio is set to (nullopt if the start-up chose NC)
     std::string last_error() const;
 private:

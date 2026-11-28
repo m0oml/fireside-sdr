@@ -52,7 +52,7 @@ public:
     // holds another callsign (typed, or an earlier caller: the first one stays until logged or cleared) or a form is open, or the caller was logged in the last
     // 10 minutes (their RR73 / 73 after the QSO). The same caller again only updates the report they sent.
     void callerDecoded(const QString& line);
-    void logAuto(const QString& call, const QString& grid, const QString& rstSent, const QString& rstRcvd);   // a QSO the FT8 sequencer completed: logged now (Wavelog + the local copy)
+    void logAuto(const QString& call, const QString& grid, const QString& rstSent, const QString& rstRcvd, qint64 timeOnUtc = 0);   // a QSO the FT8 sequencer completed: logged now (Wavelog + the local copy)
     QString autoCall() const { return auto_call_; }
     void loadWorkedIndex();                                                   // the log from Wavelog (read-only) for the new DXCC / continent / zone / grid tags: all of it once, then only QSOs newer than the last one seen (every 10 minutes)
     QString highlightStatus() const;                                          // "Log read: 108 QSOs, 31 DXCC, 52 grids" (tests)
@@ -72,6 +72,7 @@ signals:
     void workedKnown(const QString& call, int state);                         // 0 = new callsign, 1 = worked, but not on this band and mode, 2 = already worked on this band and mode; 3..9: fireside::award::Tag (new DXCC, grid...), which outranks 0..2
     void activeChanged(bool open);                                            // the large log form opened / closed
 private:
+    qint64 auto_time_on_ = 0;   // logAuto: the sequenced QSO's start, for formQso
     void showLastRows(const QList<QStringList>& rows, const QString& source);
     QTimer* recent_timer_ = nullptr; bool wavelog_recent_ok_ = false;
     void pumpWorked();

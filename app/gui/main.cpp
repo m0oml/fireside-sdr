@@ -648,19 +648,21 @@ int main(int argc, char** argv) {
         rp->disconnectRadio(); rp->allowWritesBox()->setChecked(true);
         rx->setDialHz(7.1e6); step("connect again", rp->connectRadio()); step("start", rp->startRadio(true));
         step("reviewed start-up sequence", ops() == std::vector<uint32_t>{1219, 1247, 1320, 1278, 1347});
+        for (int i = 0; i < 400 && ops().size() < 6; ++i) pump(1);                       // 1.5 s later: the RX antenna is written again once the radio has settled (2026-11-28)
+        step("the RX antenna is sent again once the radio has settled", ops() == std::vector<uint32_t>{1219, 1247, 1320, 1278, 1347, 1278});
         QPushButton* pre = nullptr; for (auto* b : rx->findChildren<QPushButton*>()) if (b->text() == "Preamp") pre = b; step("preamp button exists", pre != nullptr);
         step("preamp button usable once the radio is started", pre && pre->isEnabled() && !pre->isChecked());
         step("IF offset locked to 9 kHz while started (DDS 9 kHz below the dial)", rx->ifBox()->currentIndex() == 0 && !rx->ifBox()->isEnabled());
         { const std::string f0 = "/tmp/fireside_smoke_if0_" + std::to_string(::getpid()) + ".wav"; std::vector<float> z(2 * 4800, 0.0f); fireside::dsp::write_wav_f32(f0, 48000, 2, z);
           rx->loadFile(QString::fromStdString(f0)); rx->setPlaying(false); std::remove(f0.c_str()); }      // G1: a new source that wants IF 0 (a file) must not unlock or change it
-        step("IF lock survives a new source", rx->ifBox()->currentIndex() == 0 && !rx->ifBox()->isEnabled() && ops().size() == 5);
+        step("IF lock survives a new source", rx->ifBox()->currentIndex() == 0 && !rx->ifBox()->isEnabled() && ops().size() == 6);
         rx->loadDemo(); rx->setPlaying(false);
         std::string shot; for (int i = 2; i + 1 < argc; ++i) if (!std::strcmp(argv[i], "--screenshot")) shot = argv[i + 1];
         if (!shot.empty()) { w.resize(1040, 780); w.showRadio(); pump(3); w.grab().save(QString::fromStdString(shot)); w.showReceiver(); pump(2); }
         const double before = rx->dialHz(); rx->setDialHz(14.074e6); pump(5);               // the dial box tunes the radio now
-        step("dial retunes the radio", rx->dialHz() == 14.074e6 && ops().size() == 6 && ops().back() == 1347);
+        step("dial retunes the radio", rx->dialHz() == 14.074e6 && ops().size() == 7 && ops().back() == 1347);
         rx->setDialHz(14.075e6); rx->setDialHz(14.076e6); rx->setDialHz(14.077e6); pump(10);   // a spinning knob: never a write per step
-        const size_t after_spin = ops().size(); step("spinning knob is rate limited", after_spin >= 7 && after_spin <= 8);
+        const size_t after_spin = ops().size(); step("spinning knob is rate limited", after_spin >= 8 && after_spin <= 9);
         { const size_t n = ops().size(); pre->click(); pump(3);
           step("preamp ON is exactly one SET_TRX_PREAMP write", ops().size() == n + 1 && ops().back() == 1247 && rp->session().preamp_on());
           pre->click(); pump(3); step("preamp off is one more", ops().size() == n + 2 && ops().back() == 1247 && !rp->session().preamp_on());
@@ -787,7 +789,7 @@ int main(int argc, char** argv) {
                             tc->parityBox()->setCurrentIndex(int(i2 % 2)); tc->messageBox()->setText("CQ M0OML IO91"); rep->setChecked(true);
                             const size_t m4 = count(1292); tc->sendButton()->click(); pump(2);
                             step("repeat: no question, the status says attended CQ", tc->sendQueued() && tc->statusLabel()->text().contains("attended CQ"));
-                            for (int i = 0; i < 900 && !(count(1292) >= m4 + 2 && !tc->busy()); ++i) pump(1);
+                            for (int i = 0; i < 2500 && !(count(1292) >= m4 + 2 && !tc->busy()); ++i) pump(1);   // the slot can be ~10 s away, then 12.6 s of over
                             for (int i = 0; i < 50 && !tc->sendQueued(); ++i) pump(1);
                             step("repeat: after the over the next slot of that parity is queued", count(1292) == m4 + 2 && tc->sendQueued() && !w.simRadio()->keyed
                                  && tc->statusLabel()->text().contains(tc->parityBox()->currentIndex() ? "odd" : "even"));
@@ -900,6 +902,47 @@ int main(int argc, char** argv) {
                             step("give-up twice: no reply again, and CQ still carries on", until([&] { return tc->qsoText().startsWith("Calling CQ"); }));
                             QPushButton* sb4 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb4 = bt;
                             if (sb4) sb4->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
+                            tc->setMaxTriesForTests(0);
+                        }
+                        {   // Calibrate with a load (2026-11-28): two bands on ANT3, receive checks, tune, drive, 5 / 15 W tones; Stop ends it; an "antenna" stops it
+                            auto until = [&](const std::function<bool()>& f) { for (int i = 0; i < 9000 && !f(); ++i) pump(1); return f(); };
+                            const double d0 = rx->dialHz(); w.simRadio()->pass_ind = 3; w.simRadio()->pass_cap = 2;
+                            step("load cal: starts", tc->startLoadCal(3, {5, 3}) && tc->loadCalRunning());
+                            step("load cal: runs to the end", until([&] { return !tc->loadCalRunning(); }));
+                            const QString rep = tc->loadCalReport();
+                            step("load cal: both bands done, drive and tones recorded", tc->statusText().contains("done on 2 band") && rep.contains("20m") && rep.contains("40m")
+                                 && rep.count("W per drive") == 2 && !w.simRadio()->keyed);
+                            step("load cal: the dial is back", std::fabs(rx->dialHz() - d0) < 1);
+                            w.simRadio()->pass_ind = 40; w.simRadio()->pass_cap = 30;                        // not a load: the tuner needs a lot of matching (12 m: nothing saved for ANT3 there)
+                            pump(1800); until([&] { return !tc->busy(); });                                      // the band's ATU restore after the routine
+                            step("load cal: a jack that needs real matching stops it", tc->startLoadCal(3, {8}) && until([&] { return !tc->loadCalRunning(); })
+                                 && tc->statusText().contains("not a load") && !w.simRadio()->keyed);
+                            w.simRadio()->pass_ind = 3; w.simRadio()->pass_cap = 2; pump(1800); until([&] { return !tc->busy(); });
+                            QPushButton* sbl = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sbl = bt;
+                            step("load cal: Stop ends it", tc->startLoadCal(3, {9, 10}) && until([&] { return tc->busy(); }) && (sbl ? (sbl->click(), true) : false)
+                                 && until([&] { return !tc->loadCalRunning() && !tc->busy(); }) && tc->statusText().contains("stopped") && !w.simRadio()->keyed);
+                            pump(2000); until([&] { return !tc->busy(); });
+                            step("load cal: the dial and preamp are back afterwards", std::fabs(rx->dialHz() - d0) < 1 && rp->session().preamp_on() == pre->isChecked());
+                            w.simRadio()->pass_ind = 30; w.simRadio()->pass_cap = 7; rx->setDialHz(d0); pump(20);
+                        }
+                        {   // a late RR73 after giving up (OD5ZZ 2026-11-28): 73 on the QSO's audio frequency, logged with its reports and start time, then CQ again
+                            tc->autoSeqBox()->setChecked(true); tc->setMaxTriesForTests(2); tc->attendedBox()->setChecked(true);
+                            auto until = [&](const std::function<bool()>& f) { for (int i = 0; i < 6000 && !f(); ++i) pump(1); return f(); };
+                            QString lg; qint64 lg_on = 0; QObject sc; QObject::connect(tc, &TransmitCard::logQso, &sc, [&](const QString& c, const QString& g, const QString& a, const QString& b, qint64 on) { lg = c + "|" + g + "|" + a + "|" + b; lg_on = on; });
+                            tc->ftHzBox()->setValue(1200); tc->cqButton()->click(); pump(2);
+                            step("late RR73: CQ goes out", until([&] { return tc->busy(); }));
+                            rx->addDecodedText(label(wall()) + " -10  0.1 1200 ~  M0OML OD5ZZ KM74\n"); pump(2);
+                            step("late RR73: their answer gets our report", tc->messageText().startsWith("OD5ZZ M0OML -"));
+                            const qint64 t_start = QDateTime::currentSecsSinceEpoch(); const int qso_hz = tc->ftHzBox()->value();   // (the CQ may have moved clear of others first)
+                            step("late RR73: no reply, it gives up and calls CQ again", until([&] { return tc->qsoText().startsWith("Calling CQ"); }));
+                            tc->ftHzBox()->setValue(qso_hz == 2050 ? 2150 : 2050);                             // the CQ moved again, clear of others
+                            rx->addDecodedText(label(wall()) + " -12  0.1 1200 ~  M0OML OD5ZZ RR73\n"); pump(2);
+                            step("late RR73: 73 is queued on the QSO's audio frequency", tc->messageText() == "OD5ZZ M0OML 73" && tc->ftHzBox()->value() == qso_hz && tc->qsoText().contains("sent 73"));
+                            step("late RR73: logged with the reports, grid and the QSO's start", until([&] { return !lg.isEmpty(); }) && lg.startsWith("OD5ZZ|KM74|-") && lg.endsWith("|")
+                                 && lg_on > 0 && lg_on <= t_start + 20 && QDateTime::currentSecsSinceEpoch() - lg_on > 25);
+                            step("late RR73: then CQ again", until([&] { return tc->qsoText().startsWith("Calling CQ"); }));
+                            QPushButton* sb6 = nullptr; for (auto* bt : tc->digitalPart()->findChildren<QPushButton*>()) if (bt->text() == "Stop") sb6 = bt;
+                            if (sb6) sb6->click(); for (int i = 0; i < 300 && tc->busy(); ++i) pump(1); pump(10);
                             tc->setMaxTriesForTests(0);
                         }
                         {   // Attended CQ: a call we started that gives up goes back to CQ; after the block of calls a pause and the other slot; an answer in the pause; a typed message

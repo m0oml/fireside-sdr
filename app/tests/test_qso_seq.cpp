@@ -171,3 +171,35 @@ TEST(seq_directed_cq_goes_out_as_typed_and_is_answered_as_usual) {
     CHECK(s.heard(H("M0OML JA1ABC PM95", -18))); CHECK_EQ(s.dx(), std::string("JA1ABC")); CHECK_EQ(s.next_message(), std::string("JA1ABC M0OML -18"));
     s.stop(); s.call_cq(); CHECK_EQ(s.next_message(), std::string("CQ M0OML IO92"));                                   // empty: the plain CQ
 }
+TEST(seq_late_rr73_after_giving_up_finishes_the_qso_with_its_reports) {   // OD5ZZ 2026-11-28: R-15 six times, gave up, CQ, then their RR73
+    int64_t t = 1'800'000'000; seq::Sequencer s("M0OML", "IO92", 3); s.set_clock([&] { return t; });
+    CHECK(s.reply_to(H("CQ OD5ZZ KM74", -14))); CHECK_EQ(s.next_message(), std::string("OD5ZZ M0OML IO92"));
+    const int64_t start = t; t += 150;
+    CHECK(s.heard(H("M0OML OD5ZZ -06", -15))); for (int i = 0; i < 3; ++i) { CHECK_EQ(s.next_message(), std::string("OD5ZZ M0OML R-15")); t += 30; }
+    CHECK(s.next_message().empty()); CHECK(s.stage() == seq::Stage::GaveUp); CHECK(s.unfinished() && s.unfinished()->rcvd == "-06");
+    s.call_cq(); CHECK_EQ(s.next_message(), std::string("CQ M0OML IO92")); t += 15;
+    CHECK(s.heard(H("M0OML OD5ZZ RR73"))); CHECK(s.resumed()); CHECK(s.stage() == seq::Stage::Sent73);
+    CHECK_EQ(s.next_message(), std::string("OD5ZZ M0OML 73"));
+    auto l = s.take_log(); CHECK(l); CHECK_EQ(l->rst_sent, std::string("-15")); CHECK_EQ(l->rst_rcvd, std::string("-06")); CHECK_EQ(l->grid, std::string("KM74")); CHECK_EQ(l->start_utc, start);
+    CHECK(!s.unfinished()); CHECK(!s.take_log());
+    CHECK(!s.heard(H("M0OML OD5ZZ RR73")));                                                     // used once
+}
+TEST(seq_late_finish_by_double_click_their_73_and_the_time_limit) {
+    int64_t t = 1'800'000'000; auto gave_up = [&](seq::Sequencer& s) {
+        s.set_clock([&] { return t; }); s.reply_to(H("M0OML SV1EKI KM18", -9)); while (!s.next_message().empty()) {} };
+    {   seq::Sequencer s("M0OML", "IO92", 2); gave_up(s); CHECK(s.unfinished() && s.unfinished()->sent == "-09" && s.unfinished()->rcvd.empty());
+        seq::Sequencer n("M0OML", "IO92"); n.set_clock([&] { return t; }); n.remember(s.unfinished());   // the GUI starts a new sequencer for a double-click
+        CHECK(n.reply_to(H("M0OML SV1EKI RRR"))); CHECK(n.resumed()); CHECK_EQ(n.next_message(), std::string("SV1EKI M0OML 73"));
+        auto l = n.take_log(); CHECK(l && l->call == "SV1EKI" && l->rst_sent == "-09" && l->start_utc > 0); }
+    {   seq::Sequencer s("M0OML", "IO92", 2); gave_up(s); s.call_cq(); s.next_message();
+        CHECK(s.heard(H("M0OML SV1EKI 73"))); CHECK(s.resumed()); CHECK(s.stage() == seq::Stage::Cq);       // their 73: logged at once, the CQ carries on
+        auto l = s.take_log(); CHECK(l && l->call == "SV1EKI" && l->rst_sent == "-09"); CHECK_EQ(s.next_message(), std::string("CQ M0OML IO92")); }
+    {   seq::Sequencer s("M0OML", "IO92", 2); gave_up(s); s.call_cq(); t += seq::kLateFinishS + 1;
+        CHECK(!s.heard(H("M0OML SV1EKI RR73"))); CHECK(s.stage() == seq::Stage::Cq); CHECK(!s.take_log()); }      // too late: ignored as before
+    {   seq::Sequencer s("M0OML", "IO92", 2); gave_up(s); s.call_cq();
+        CHECK(!s.heard(H("M0OML DL2AL RR73"))); CHECK(s.stage() == seq::Stage::Cq);                                // someone else's RR73: not ours
+        CHECK(s.heard(H("M0OML SV1EKI KM18", -9))); CHECK(!s.resumed()); CHECK(!s.unfinished());                  // they call afresh: a new QSO
+        CHECK_EQ(s.next_message(), std::string("SV1EKI M0OML -09")); }
+    {   seq::Sequencer s("M0OML", "IO92", 2); s.set_clock([&] { return t; }); s.reply_to(H("CQ EA7R IM66")); while (!s.next_message().empty()) {}
+        CHECK(!s.unfinished()); }                                                                                  // nothing sent but our call: nothing to finish
+}

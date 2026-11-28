@@ -206,7 +206,7 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     const int band = txm::band_of(mhz * 1e6);
     if (band < 0) { r.why_not = "outside the amateur bands"; return r; }
     if (!(power_w >= 1) || power_w > 15) { r.why_not = "tune power must be 1..15 W"; return r; }
-    if (o.tx_ant != 1) { r.why_not = "the ATU is on ANT1 only: this band transmits on ANT" + std::to_string(o.tx_ant); return r; }
+    if (o.tx_ant < 1 || o.tx_ant > 3) { r.why_not = "transmit antenna must be ANT1..ANT3"; return r; }   // the ATU sits in front of the antenna relays (service manual, user 2026-11-28)
     if (!atu::threshold_request(threshold)) { r.why_not = "the tuner only knows thresholds 1.1, 1.3, 1.5, 1.7, 2.0, 2.5, 3.0"; return r; }
     // The drive: this band's measured level if there is one; otherwise the EEPROM power table, which on 20 m gave ~5 dB LESS than the power it names
     // (so a first tune on a new band errs low; the tuner says "no RF" if it is too little). A measurement needs a match, so the first tune comes first.
@@ -218,7 +218,7 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     else if (r.estimated_drive) say(log, std::string("no measured drive on ") + txm::band_name(band) + ": using the EEPROM power table (errs low); press Measure drive after a good tune");
     if (drive > dcap) { r.why_not = "the drive for this power is above the tune ceiling (30 W)"; return r; }
     if (auto why = lines_ready(mhz); !why.empty()) { r.why_not = why; return r; }
-    prepare(mhz, 1, 1);                                           // tune: ANT1 (the ATU's)
+    prepare(mhz, 1, o.tx_ant);                                    // the band's transmit antenna: set before keying, never while keyed
     atu_.drain(); atu_.init(); clk_.sleep(1.5); atu_.drain();                  // relays settle (two runs keyed straight after a reset saw an open-like load)
     auto rep = atu_report_locked();
     if (!rep || !rep->ind || !rep->cap || !rep->hiz) { r.why_not = "the tuner did not report its relays: not keying"; return r; }
@@ -228,17 +228,98 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
     if (st.failed()) { r.why_not = "the I/Q stream failed to start"; return r; }
     GateConfig gc; gc.max_key_s = 15.0; gc.max_fwd_w = 30.0; gc.max_rev_w = 20.0; gc.max_swr = 1e9;   // fixed limits while the tuner searches (see firesidekey / analysis)
     KeyHook kh(key_hook_);
-    TxGate gate(fx_, gc, clk_); gate.arm(); TuneMeter meter;
+    TuneMeter meter;
     const double t0 = clk_.now();
     if (abort_) { r.why_not = "stopped before keying"; return r; }
     auto ready = [&] { return !st.failed() && !abort_; };
-    auto carrier = [&](bool on) { src.set_keyed(on); keyed_ = on; };
-    auto poll = [&](const txm::Reading& rd) { if (p) p({clk_.now() - t0, src.level(), rd}); if (abort_) gate.unkey("aborted"); else if (st.failed()) gate.unkey("the I/Q stream failed"); };
-    r.outcome = run_atu_tune(gate, atu_, cal_.meter, band, threshold, true, 1, ready, &meter, &r.why_not, carrier, poll);
-    if (!r.outcome && abort_) r.why_not = "stopped before keying";
-    for (auto& x : meter.readings) { if (x.fwd_w > 0.5) { r.last_fwd_w = x.fwd_w; r.last_swr = x.swr; } }
-    gate.ensure_unkeyed(2.0);
-    r.max_fwd_w = meter.max_fwd_w; r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); keyed_ = false; note_stop(r.stop);
+    const std::function<void(bool)> carrier = [&](bool on) { src.set_keyed(on); keyed_ = on; };
+    // 1. The saved setting first (user 2026-11-28: on 40 m five full searches failed in a row, the sixth found ind 21 cap 64, next to the saved 21 / 66 at SWR 1.00).
+    //    Relays back (no RF), the same tune carrier for ~1.6 s, our meter and the tuner's own read; good on both: that is the tune, no search.
+    const auto sv = mem_.recall(band, o.tx_ant);                  // this antenna's own: the tuner's memory is per frequency, ours per antenna too
+    if (sv && sv->freq_hz > 0 && std::fabs(sv->freq_hz - mhz * 1e6) <= std::max(30e3, 0.01 * mhz * 1e6)) {
+        r.checked_saved = true;
+        if (atu_.set_relays(sv->ind, sv->cap, sv->hiz)) {
+            GateConfig cg = gc; cg.max_key_s = 4.0;
+            TxGate g(fx_, cg, clk_); g.arm(); std::string why; double swr_sum = 0; int n_swr = 0;
+            // The carrier in the set-up prepare() wrote (USB, as Measure drive and the test tone use): no radio writes beyond the key itself.
+            struct Restore { TxGate& g; const std::function<void(bool)>& c; ~Restore() { try { c(false); } catch (...) {} try { g.unkey("check finished"); } catch (...) {} } };
+            {   Restore rs{g, carrier};
+                if (g.key("ATU check", cg.max_key_s, &why)) {
+                    carrier(true); const double c0 = clk_.now(); bool asked = false;
+                    while (g.keyed()) {
+                        if (abort_) { g.unkey("aborted"); break; }
+                        if (st.failed()) { g.unkey("the I/Q stream failed"); break; }
+                        txm::Reading rd;
+                        try { const int af = int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcFwd)), ar = int(fx_.get("RDAL_OP_READ_PA_ADC", txm::kAdcRev)); rd = txm::read(cal_.meter, band, af, ar); }
+                        catch (const std::exception& e) { g.unkey(std::string("PA meter read failed: ") + e.what()); break; }
+                        meter.max_fwd_w = std::max(meter.max_fwd_w, rd.fwd_w); g.report(rd); g.tick(); if (!g.keyed()) break;
+                        if (p) p({clk_.now() - t0, src.level(), rd});
+                        const double e = clk_.now() - c0;
+                        if (e >= 0.8 && rd.fwd_w > 0.5 && rd.swr) { swr_sum += *rd.swr; ++n_swr; r.last_fwd_w = rd.fwd_w; }
+                        if (e >= 0.8 && !asked) { try { atu_.drain(); atu_.clear_meter(); atu_.send(atu::FWD_PWR); atu_.send(atu::REV_PWR); atu_.send(atu::SWR); } catch (const std::exception&) {} asked = true; }
+                        else if (asked) { try { atu_.poll(5); } catch (const std::exception&) {} }
+                        if (e >= 1.6) { g.unkey("check finished"); break; }
+                        clk_.sleep(0.05);
+                    }
+                }
+            }
+            g.ensure_unkeyed(2.0); keyed_ = false;
+            const std::string cstop = g.last_unkey_reason();
+            if (g.unkey_failed()) { r.unkey_failed = true; r.stop = cstop; note_stop(cstop); return r; }
+            if (cstop != "check finished") {                                                      // a safety stop, Stop, or a failed key: no search after it
+                r.stop = why.empty() ? cstop : why; r.max_fwd_w = meter.max_fwd_w; note_stop(r.stop);
+                atu::Atu::TuneOutcome oc; oc.result = atu::Atu::TuneResult::Timeout; oc.seconds = clk_.now() - t0; r.outcome = oc; return r;
+            }
+            for (int i = 0; i < 8; ++i) { try { if (!atu_.poll(20)) break; } catch (const std::exception&) { break; } }   // reports that came in late
+            const auto& a = atu_.status();
+            if (n_swr > 0) r.last_swr = swr_sum / n_swr;
+            // The tuner's meter decides when it read power; ours (which reads high at a few watts: 1.3..2.7 where the tuner read 1.0..1.5) must still be under
+            // the transmit limit. Without a usable tuner reading (none, or 0 W as seen on 60 m), our own meter must be under the threshold.
+            const bool tuner_read = a.fwd_w && *a.fwd_w >= 0.5 && a.swr;
+            const bool good = r.last_swr && (tuner_read ? *a.swr <= threshold && *r.last_swr <= 3.0 : *r.last_swr <= threshold);
+            r.check_tuner_swr = tuner_read ? a.swr : std::nullopt;
+            {
+                if (good) {
+                    atu::Atu::TuneOutcome oc; oc.result = atu::Atu::TuneResult::Pass; oc.seconds = clk_.now() - t0; oc.status = a;
+                    oc.status.ind = sv->ind; oc.status.cap = sv->cap; oc.status.hiz = sv->hiz ? 1 : 0;
+                    r.outcome = oc; r.stop = "the saved setting is good"; r.from_saved = true; r.max_fwd_w = meter.max_fwd_w;
+                    char m[200]; std::snprintf(m, sizeof m, "tune: saved setting ind %d cap %d %s is good: tuner SWR %s, ours %.2f: no search", sv->ind, sv->cap, sv->hiz ? "Hi-Z" : "Lo-Z",
+                                               a.swr ? std::to_string(*a.swr).substr(0, 4).c_str() : "-", r.last_swr.value_or(0)); say(log, m);
+                    return r;
+                }
+            }
+            char m[200]; std::snprintf(m, sizeof m, "tune: saved setting not good enough here (tuner SWR %s, ours %s): searching", a.swr ? std::to_string(*a.swr).substr(0, 4).c_str() : "-",
+                                       r.last_swr ? std::to_string(*r.last_swr).substr(0, 4).c_str() : "-"); say(log, m);
+        } else say(log, "tune: the tuner did not confirm the saved relays: searching");
+        r.last_fwd_w = 0; r.last_swr.reset();
+        atu_.drain(); atu_.init(); clk_.sleep(1.5); atu_.drain();                                  // the search starts as it always has
+        auto rep2 = atu_report_locked();
+        if (!rep2 || !rep2->ind || !rep2->cap || !rep2->hiz) { r.why_not = "the tuner did not report its relays: not keying"; r.outcome.reset(); return r; }
+        if (abort_) { r.why_not = "stopped before keying"; return r; }
+    }
+    // 2. The full search, up to kTuneSearches times: a fail to reach the threshold is often followed by a pass (seen on 20, 40, 60 and 80 m). Only the
+    //    tuner's own "could not bring the SWR below the threshold" is retried; no RF, a safety stop, Stop or our limits end it.
+    for (int attempt = 1; ; ++attempt) {
+        TxGate gate(fx_, gc, clk_); gate.arm(); TuneMeter am;
+        auto poll = [&](const txm::Reading& rd) { if (p) p({clk_.now() - t0, src.level(), rd}); if (abort_) gate.unkey("aborted"); else if (st.failed()) gate.unkey("the I/Q stream failed"); };
+        r.why_not.clear();
+        r.outcome = run_atu_tune(gate, atu_, cal_.meter, band, threshold, true, 1, ready, &am, &r.why_not, carrier, poll);
+        if (!r.outcome && abort_) r.why_not = "stopped before keying";
+        r.last_fwd_w = 0; r.last_swr.reset();
+        for (auto& x : am.readings) { if (x.fwd_w > 0.5) { r.last_fwd_w = x.fwd_w; r.last_swr = x.swr; } }
+        gate.ensure_unkeyed(2.0);
+        meter.max_fwd_w = std::max(meter.max_fwd_w, am.max_fwd_w);
+        r.stop = gate.last_unkey_reason(); r.unkey_failed = gate.unkey_failed(); keyed_ = false; note_stop(r.stop); r.searches = attempt;
+        const bool retry = r.outcome && r.outcome->result == atu::Atu::TuneResult::Fail && r.outcome->fail_reason == uint8_t(atu::Fail::SwrTooHigh)
+                           && r.stop == "tune finished" && !r.unkey_failed && !abort_ && !st.failed() && attempt < kTuneSearches;
+        if (!retry) break;
+        say(log, "tune: search " + std::to_string(attempt) + " of " + std::to_string(kTuneSearches) + " could not bring the SWR below the threshold: searching again");
+        atu_.drain(); atu_.init(); clk_.sleep(1.5); atu_.drain();                                  // as a fresh press of Tune (those passed on the second or third go)
+        auto rep3 = atu_report_locked();
+        if (!rep3 || !rep3->ind || !rep3->cap || !rep3->hiz || abort_) break;
+    }
+    if (r.outcome) r.outcome->seconds = clk_.now() - t0;
+    r.max_fwd_w = meter.max_fwd_w;
     // A pass only counts when the tuner finished by itself ("tune finished") and reports a usable SWR. A "pass" read after our own limit cut the
     // carrier (the key-down time limit, a power limit, Stop) is not a match: seen 2026-11-21 on 12 m (15 s limit, SWR 1022 stored).
     if (r.outcome && r.outcome->result == atu::Atu::TuneResult::Pass) {
@@ -254,7 +335,7 @@ TuneResult TxControl::tune(double mhz, double power_w, double threshold, const O
         const auto& s = r.outcome->status; atu::Setting set; set.ind = *s.ind; set.cap = *s.cap; set.hiz = *s.hiz != 0;
         set.swr = s.swr ? *s.swr : 0; set.fwd_w = s.fwd_w ? *s.fwd_w : 0; set.freq_hz = mhz * 1e6;
         char ts[32]; std::time_t t = std::time(nullptr); std::strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t)); set.utc = ts;
-        mem_.store(band, set); r.saved = set;
+        mem_.store(band, set, o.tx_ant); r.saved = set;
     }
     char m[200]; std::snprintf(m, sizeof m, "tune: %s (%s), max %.1f W", !r.outcome ? "refused" : r.outcome->result == atu::Atu::TuneResult::Pass ? "PASS" :
                                r.outcome->result == atu::Atu::TuneResult::Fail ? "FAIL" : "stopped", r.stop.c_str(), r.max_fwd_w); say(log, m);
@@ -268,12 +349,20 @@ std::optional<atu::Status> TxControl::atu_report() {              // never along
     return atu_report_locked();
 }
 
-bool TxControl::restore_relays(int band, const LogFn& log) { forget_prep();
+bool TxControl::set_atu_relays(int ind, int cap, bool hiz, const LogFn& log) { forget_prep();
     std::lock_guard<std::mutex> l(op_);
     if (!armed_) { say(log, "transmit is not armed"); return false; }
-    auto s = mem_.recall(band); if (!s) { say(log, std::string("nothing stored for ") + txm::band_name(band)); return false; }
+    if (ind < 0 || ind > 127 || cap < 0 || cap > 127) { say(log, "relay values must be 0..127"); return false; }
+    const bool ok = atu_.set_relays(ind, cap, hiz);
+    char m[120]; std::snprintf(m, sizeof m, "ATU relays ind %d cap %d %s %s", ind, cap, hiz ? "Hi-Z" : "Lo-Z", ok ? "set (no RF)" : "NOT confirmed by the tuner"); say(log, m);
+    return ok;
+}
+bool TxControl::restore_relays(int band, int ant, const LogFn& log) { forget_prep();
+    std::lock_guard<std::mutex> l(op_);
+    if (!armed_) { say(log, "transmit is not armed"); return false; }
+    auto s = mem_.recall(band, ant); if (!s) { say(log, std::string("nothing stored for ") + txm::band_name(band) + " ANT" + std::to_string(ant)); return false; }
     const bool ok = atu_.set_relays(s->ind, s->cap, s->hiz);
-    char m[200]; std::snprintf(m, sizeof m, "ATU %s: ind %d cap %d %s %s", txm::band_name(band), s->ind, s->cap, s->hiz ? "Hi-Z" : "Lo-Z", ok ? "restored (no RF)" : "NOT confirmed by the tuner");
+    char m[200]; std::snprintf(m, sizeof m, "ATU %s ANT%d: ind %d cap %d %s %s", txm::band_name(band), ant, s->ind, s->cap, s->hiz ? "Hi-Z" : "Lo-Z", ok ? "restored (no RF)" : "NOT confirmed by the tuner");
     std::string msg = m;
     if (!ok) { const auto& st = atu_.status(); char b[120]; std::snprintf(b, sizeof b, " (it reports ind %s cap %s %s)", st.ind ? std::to_string(*st.ind).c_str() : "?", st.cap ? std::to_string(*st.cap).c_str() : "?", st.hiz ? (*st.hiz ? "Hi-Z" : "Lo-Z") : "?"); msg += b; }
     say(log, msg);

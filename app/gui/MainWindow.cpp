@@ -122,6 +122,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
             g->addWidget(tx_card_->atuPart(), 2, 0, 1, 6);   // Tune ATU and the Tuner settings button (the rest is in a window)   // the tuner lives with the antennas
             receiver_->setAntennaWidget(w);
             tx_card_->setTxAntennaSource([this](double hz) { return antennas_->txAntennaFor(hz); });
+            tx_card_->setRxAntennaSource([this](double hz) { return antennas_->antennaFor(hz); });
             connect(rxg, &QButtonGroup::idClicked, this, [this, rxg](int id) { antennas_->setAntennaForDial(receiver_->dialHz(), rxg->button(id)->property("ant").toString()); });
             connect(txg, &QButtonGroup::idClicked, this, [this](int id) { antennas_->setTxAntennaForDial(receiver_->dialHz(), id); });
             auto redraw = [this, rxg, txg, note] {
@@ -131,7 +132,7 @@ MainWindow::MainWindow(bool enableAudio, bool threaded, bool simulate, QWidget* 
                 const QString a = antennas_->activeAntenna(); const int tx = antennas_->txAntennaFor(receiver_->dialHz());
                 note->setText(tx == 1 ? "via the ATU" : "no ATU"); note->setToolTip(QString("%1%2").arg(tx == 1 ? "TX through the ATU" : "TX without the ATU").arg(a.isEmpty() ? QString() : "   RX now: " + (a == "RX1IN" ? QString("RX1 IN") : a)));
             };
-            connect(antennas_, &AntennaPanel::choiceChanged, this, redraw); connect(antennas_, &AntennaPanel::choiceChanged, tx_card_, [this] { tx_card_->refreshButtons(); });
+            connect(antennas_, &AntennaPanel::choiceChanged, this, redraw); connect(antennas_, &AntennaPanel::choiceChanged, tx_card_, [this] { tx_card_->antennaChanged(); });
             connect(receiver_, &ReceiverPanel::dialChanged, this, redraw); redraw();
         }
         tx_card_->setAudioPanel(audio_panel_);

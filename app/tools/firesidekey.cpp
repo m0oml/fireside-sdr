@@ -102,7 +102,11 @@ int main(int argc, char** argv) {
 
         if (cmd == "atu-report" || cmd == "atu-relays") {
             atu::Atu a(fx); a.drain();
-            if (cmd == "atu-report") { a.request_update(); print_status(a.status()); return 0; }
+            if (cmd == "atu-report") {                                 // no RF: relays, antenna and the tuner's firmware version (reports only)
+                a.request_update(); print_status(a.status());
+                a.send(atu::VERSION); for (int i = 0; i < 20 && !a.status().version; ++i) a.poll(100);
+                char b[64]; std::snprintf(b, sizeof b, "tuner firmware version: %s", a.status().version ? std::to_string(*a.status().version).substr(0, 4).c_str() : "no answer"); say(b);
+                return 0; }
             if (rest.size() != 3) { usage(); return 2; }
             const int ind = std::stoi(rest[0]), cap = std::stoi(rest[1]); const bool hiz = std::stoi(rest[2]) != 0;
             a.request_update(); say("before:"); print_status(a.status());

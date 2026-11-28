@@ -1,6 +1,7 @@
 #include "fireside/qso_seq.h"
 #include "fireside/dxcc.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cctype>
@@ -76,15 +77,33 @@ Heard parse(const std::string& text, int snr) {
 }
 
 Sequencer::Sequencer(std::string my_call, std::string my_grid4, int max_tries) : me_(upper(std::move(my_call))), grid_(upper(std::move(my_grid4)).substr(0, 4)), max_tries_(max_tries) {}
+int64_t Sequencer::now() const { return now_ ? now_() : std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+// Their RR73 / RRR / 73 after we gave up on them: finish that QSO with its own reports. RR73 / RRR: our 73 goes out once, then it is logged.
+// 73 (we missed their RR73): logged at once, nothing sent; with keep_stage (a CQ running) the CQ carries on and only the log is due.
+bool Sequencer::resume(const Heard& h, bool keep_stage) {
+    if (!unf_ || !to_me(h) || !(h.rr73 || h.rrr || h.seventy3) || base(h.from) != base(unf_->call)) return false;
+    if (now() - unf_->gave_up_utc > kLateFinishS) { unf_.reset(); return false; }
+    const Unfinished u = *unf_; unf_.reset();
+    if (h.seventy3) {
+        late_log_ = QsoLog{u.call, u.grid, u.sent, u.rcvd, u.start_utc};
+        if (!keep_stage) { dx_ = u.call; dx_grid_ = u.grid; sent_ = u.sent; rcvd_ = u.rcvd; start_utc_ = u.start_utc; logged_ = true; log_due_ = false; st_ = Stage::Done; msg_.clear(); tries_ = 0; }
+        resumed_ = true; return true;
+    }
+    dx_ = u.call; dx_grid_ = u.grid; sent_ = u.sent; rcvd_ = u.rcvd; start_utc_ = u.start_utc; logged_ = false; rr73_done_ = false; reopened_ = 0;
+    set(Stage::Sent73, dx_ + " " + me_ + " 73"); last_send_ = true; log_due_ = true; resumed_ = true; return true;
+}
 bool Sequencer::to_me(const Heard& h) const { return !h.cq && base(h.to) == base(me_); }
 void Sequencer::set(Stage s, std::string m) { st_ = s; msg_ = std::move(m); tries_ = 0; again_ = false; limit_ = 0; }
 void Sequencer::stop() { st_ = Stage::Idle; msg_.clear(); tries_ = 0; }
-void Sequencer::call_cq(const std::string& text) { dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; rr73_done_ = false; reopened_ = 0; set(Stage::Cq, text.empty() ? "CQ " + me_ + " " + grid_ : text); }
+void Sequencer::call_cq(const std::string& text) { resumed_ = false; start_utc_ = 0; dx_.clear(); dx_grid_.clear(); sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; rr73_done_ = false; reopened_ = 0; set(Stage::Cq, text.empty() ? "CQ " + me_ + " " + grid_ : text); }
 
 bool Sequencer::reply_to(const Heard& h) {
     if (!h.ok || h.from.empty() || base(h.from) == base(me_)) return false;
+    resumed_ = false;
+    if (resume(h, false)) return true;                                                                // a double-click on the late RR73 / 73 of a QSO we gave up on
     if (to_me(h) && h.seventy3) return false;                                                         // their 73: nothing to answer (checked before any state changes)
-    dx_ = h.from; dx_grid_ = h.grid; sent_.clear(); rcvd_.clear(); logged_ = false; log_due_ = false; last_send_ = false; rr73_done_ = false; reopened_ = 0;
+    if (unf_ && base(unf_->call) == base(h.from)) unf_.reset();                                      // working them afresh
+    dx_ = h.from; dx_grid_ = h.grid; sent_.clear(); rcvd_.clear(); start_utc_ = 0; logged_ = false; log_due_ = false; last_send_ = false; rr73_done_ = false; reopened_ = 0;
     const std::string pre = dx_ + " " + me_ + " ";
     if (h.cq || !to_me(h)) { set(Stage::CalledDx, pre + grid_); return true; }                     // their CQ, or they are working someone else: call them
     if (h.rr73 || h.rrr) { set(Stage::Sent73, pre + "73"); last_send_ = true; log_due_ = true; return true; }   // late double-click: finish politely
@@ -95,6 +114,8 @@ bool Sequencer::reply_to(const Heard& h) {
 
 bool Sequencer::heard(const Heard& h) {
     if (!h.ok || !to_me(h)) return false;
+    resumed_ = false;
+    if ((st_ == Stage::Cq || !active()) && resume(h, st_ == Stage::Cq)) return true;               // a late RR73 / 73 from the QSO we gave up on
     if (st_ == Stage::Cq) {                                                                          // someone answered our CQ (a grid or a report): they become DX
         if (h.rr73 || h.rrr || h.seventy3) return false;                                             // a late RR73/73 from an earlier QSO is not an answer to the CQ
         if (!decode::callsign_prefix_known(h.from)) return false;                                     // a callsign no country uses: a false decode, never answered by itself
@@ -138,14 +159,19 @@ std::string Sequencer::next_message() {
         if (!again_) { st_ = Stage::Done; rr73_done_ = true; msg_.clear(); return ""; }
         again_ = false; if (tries_ >= max_tries_) { st_ = Stage::Done; rr73_done_ = true; msg_.clear(); return ""; }
     }
-    if (tries_ >= (st_ == Stage::Cq ? std::max(12, max_tries_) : (limit_ > 0 ? limit_ : max_tries_))) { st_ = Stage::GaveUp; return ""; }   // CQ: up to 12 overs (6 min of FT8, like WSJT-X's watchdog)
+    if (tries_ >= (st_ == Stage::Cq ? std::max(12, max_tries_) : (limit_ > 0 ? limit_ : max_tries_))) {
+        if (st_ != Stage::Cq && !dx_.empty() && !sent_.empty() && !logged_) unf_ = Unfinished{dx_, dx_grid_, sent_, rcvd_, start_utc_, now()};   // our report went out: a late RR73 may still come
+        st_ = Stage::GaveUp; return "";
+    }
+    if (st_ != Stage::Cq && !dx_.empty() && start_utc_ == 0) start_utc_ = now();                  // the QSO starts with our first message to them   // CQ: up to 12 overs (6 min of FT8, like WSJT-X's watchdog)
     ++tries_;
     return msg_;
 }
 std::optional<QsoLog> Sequencer::take_log() {
+    if (late_log_) { auto l = std::move(late_log_); late_log_.reset(); return l; }               // a given-up QSO their 73 completed
     if (!log_due_ || logged_ || dx_.empty()) return std::nullopt;
     if (st_ != Stage::Done && tries_ == 0) return std::nullopt;                                     // not sent yet
-    logged_ = true; log_due_ = false; return QsoLog{dx_, dx_grid_, sent_, rcvd_};
+    logged_ = true; log_due_ = false; return QsoLog{dx_, dx_grid_, sent_, rcvd_, start_utc_};
 }
 std::string Sequencer::describe() const {
     if (st_ == Stage::Idle) return "";

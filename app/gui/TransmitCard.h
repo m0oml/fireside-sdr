@@ -47,7 +47,12 @@ public:
     void refreshButtons() { updateButtons(); }
     bool haveStation();                                  // your callsign and locator are known; if not, says so (nothing is sent)
     QString myGrid4();                                  // the Log tab's (Wavelog station profile) grid, else the one in our CQ, else empty (never a guess)
-    void setTxAntennaSource(std::function<int(double dialHz)> f) { tx_ant_ = std::move(f); updateButtons(); }   // the Antennas tab's TX antenna for a frequency
+    void setTxAntennaSource(std::function<int(double dialHz)> f) { tx_ant_ = std::move(f); last_ant_ = txAnt(); updateButtons(); }   // the Antennas tab's TX antenna for a frequency
+    void antennaChanged();
+    void onLoadCal();                                     // "Calibrate with a load...": the dialog, then the routine (TransmitCardLoadCal.cpp)
+    bool startLoadCal(int ant, const std::vector<int>& bands);   // the routine without the dialog (tests): load on ANT`ant`, these bands (tx_meter.h indices)
+    bool loadCalRunning() const; QString loadCalReport() const { return lc_report_; }
+    void setRxAntennaSource(std::function<QString(double dialHz)> f) { rx_ant_for_ = std::move(f); }   // the Antennas tab's RX antenna (put back afterwards)                                // the Antennas tab changed: memory line, buttons, and this antenna's stored ATU relays (no RF)
     QPushButton* pttButton() const { return ptt_; }
     QPushButton* burstButton() const { return burst_; }
     void setPttForTests(bool down) { ptt_btn_ = down; onPttChanged(); }
@@ -114,7 +119,7 @@ signals:
     void safetyTrip(const QString& reason);               // an over ended on a safety limit or failure (SWR, power, time limit, meter / stream / audio failure ...): shown in red by the window
     void qsoPartner(const QString& call);                // the station the sequencer is working ("" = none)
     void txSent(const QString& utcLabel, int audioHz, const QString& message);   // an over starts
-    void logQso(const QString& call, const QString& grid, const QString& rstSent, const QString& rstRcvd);   // a QSO the sequencer completed
+    void logQso(const QString& call, const QString& grid, const QString& rstSent, const QString& rstRcvd, qint64 timeOnUtc);   // a QSO the sequencer completed; timeOnUtc 0 = now
     void qsoEnded(const QString& call, bool done);      // the sequence with call ended: done (completed, logged) or gave up
 private slots:
     void onArm(bool on); void onTune(); void onMeasure(); void onRestore(); void onTestTone(); void onSend(); void tick();
@@ -129,7 +134,10 @@ private:
     std::mutex m_; fireside::txc::Progress last_; bool have_last_ = false; int last_band_ = -1; unsigned paused_rate_ = 0; bool paused_live_ = false; std::atomic<bool> unkey_failed_{false}; std::atomic<bool> job_tripped_{false};   // set by the core's trip hook (worker thread) during the running job
     bool ask(const QString& title, const QString& text);
     std::atomic<double> last_tx_w_{0}, unkeyed_utc_{0}, job_end_utc_{0}; std::atomic<qint64> last_tx_t_{0};
-    std::function<int(double)> tx_ant_; int txAnt() const;
+    std::function<int(double)> tx_ant_; int txAnt() const; int last_ant_ = 1;
+    struct LoadCal; std::shared_ptr<LoadCal> lc_; QString lc_report_; std::function<QString(double)> rx_ant_for_; QPushButton* load_cal_btn_ = nullptr;
+    std::function<void(const QString&, bool)> after_job_;  // called once a worker job has ended (result, safety stop): the load calibration's next step
+    void lcStep(); void lcAfter(int ms); void lcFinish(const QString& why); void lcJob(const QString& what, bool pauses, std::function<QString(fireside::txc::TxControl&)> job);
     QPushButton* burst_ = nullptr; std::atomic<bool> burst_down_{false};   // FM: the 1750 Hz tone burst while held (at most 1 s per press)
     AudioPanel* audio_ = nullptr; QComboBox* voice_mode_ = nullptr; QDoubleSpinBox* voice_w_ = nullptr; QPushButton* ptt_ = nullptr; QCheckBox *space_ptt_ = nullptr, *mic_ptt_ = nullptr, *key_ptt_ = nullptr; QTimer* ptt_poll_ = nullptr;
     std::atomic<bool> ptt_btn_{false}, ptt_key_{false}, ptt_mic_{false}, ptt_jack_{false}; std::unique_ptr<fireside::txc::IAudioIn> voice_in_;   // ptt_key_: the space bar; ptt_jack_: the CW key jack
@@ -148,7 +156,7 @@ private:
     void extCancel();                                                              // Stop, untick, radio stop, close: release and drop any held re-key
     void extOverEnded(bool may_restart);                                           // GUI thread, from run()'s completion of the program's over
     bool extActive() const; bool requestExt(int client, bool on); void extHeartbeat(int client);
-    std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; QLineEdit* cq_text_ = nullptr; QString cq_auto_; QPushButton* auto_cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_; void noteSeqEnd(bool may_continue = true); void autoNext(); QSet<QString> auto_tried_; bool auto_reply_ = false, from_cq_ = false, follow_pending_ = false; QPushButton *tune2_ = nullptr, *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
+    std::function<void()> after_arm_; bool auto_arm_ = true, arm_tried_ = false; int stop_gen_ = 0; QPushButton* cq_ = nullptr; QLineEdit* cq_text_ = nullptr; QString cq_auto_; QPushButton* auto_cq_ = nullptr; PowerMeter* pm_ = nullptr; fireside::RxLevelCal rx_cal_; QPushButton* gen_btn_ = nullptr; QString ended_for_, logged_for_, gave_up_call_; int gave_up_hz_ = 0; void finishLate(const QString& line, bool was_cq); void noteSeqEnd(bool may_continue = true); void autoNext(); QSet<QString> auto_tried_; bool auto_reply_ = false, from_cq_ = false, follow_pending_ = false; QPushButton *tune2_ = nullptr, *stop2_ = nullptr, *stop3_ = nullptr, *tuner_btn_ = nullptr; QDialog* tuner_dialog_ = nullptr; QWidget *key_part_ = nullptr, *atu_part_ = nullptr, *cal_part_ = nullptr, *cal_body_ = nullptr, *digi_part_ = nullptr, *voice_part_ = nullptr, *ext_part_ = nullptr;
     QString odd_call_; qint64 odd_call_ms_ = 0;
     // Attended CQ (the box that was "Repeat"): kAttCalls calls in one slot parity, then kAttPauseSlots or more silent slots (to the next slot of the
     // other parity), then CQ again in that other parity. A message typed by hand is sent kAttCalls times, then back to CQ; a QSO that ends goes back to CQ.

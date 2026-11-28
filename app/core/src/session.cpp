@@ -100,6 +100,12 @@ AntResult RadioSession::set_rx_antenna(RxAnt a) {
     std::shared_ptr<RxAntenna> r; { std::lock_guard<std::mutex> l(m_); if (state_ != State::Started) return AntResult::NotArmed; r = rxant_; }
     return r->request(a);
 }
+AntResult RadioSession::reassert_rx_antenna() {
+    std::shared_ptr<RxAntenna> r; { std::lock_guard<std::mutex> l(m_); if (state_ != State::Started) return AntResult::NotArmed; r = rxant_; }
+    if (!r) return AntResult::NotArmed;
+    const auto cur = r->current(); if (!cur) return AntResult::NotArmed;
+    return r->request(*cur, true);
+}
 std::optional<RxAnt> RadioSession::rx_antenna() const { std::lock_guard<std::mutex> l(m_); return rxant_ ? rxant_->current() : std::nullopt; }
 void RadioSession::configure_tx_lines(const LineConfig& c) {
     std::shared_ptr<TxLines> t; { std::lock_guard<std::mutex> l(m_); line_cfg_ = c; t = lines_; }

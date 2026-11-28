@@ -239,6 +239,10 @@ TEST(atu_memory_round_trips_and_skips_damaged_lines) {
     auto r = back.recall(5); CHECK(r); CHECK_EQ(r->ind, 30); CHECK_EQ(r->cap, 7); CHECK(r->hiz); CHECK_NEAR(r->fwd_w, 10.6, 1e-9); CHECK_EQ(r->utc, std::string("2026-11-18T23:15:23Z"));
     CHECK(!back.recall(3)->hiz); CHECK(back.recall(3)->utc.empty()); CHECK(!back.recall(0));
     back.forget(5); CHECK(!back.recall(5));
+    atu::Memory a; a.store(5, s); atu::Setting u = s; u.ind = 44; a.store(5, u, 2); a.store(5, u, 4); CHECK_EQ(a.all().size(), size_t(2));   // per antenna; ANT4 ignored
+    const std::string at = a.to_text(); CHECK(at.find("band=20m ant=2 ind=44") != std::string::npos); CHECK(at.find("band=20m ind=30") != std::string::npos);
+    auto ab = atu::Memory::from_text(at + "band=20m ant=5 ind=1 cap=1 hiz=0\n", &bad); CHECK_EQ(bad, 1);
+    CHECK_EQ(ab.recall(5)->ind, 30); CHECK_EQ(ab.recall(5, 1)->ind, 30); CHECK_EQ(ab.recall(5, 2)->ind, 44); CHECK(!ab.recall(5, 3));   // an old file's lines are ANT1
 }
 
 // ---------------------------------------------------------------- stage 3 pieces: bias / carrier null from the EEPROM, the I/Q output
@@ -380,6 +384,37 @@ TEST(tx_control_tune_passes_saves_the_band_and_aborts_on_request) {
     TxRig a; a.tx->arm(backup_image(), backup_image()); a.sim.silent = true; std::atomic<int> polls{0};   // abort from the GUI thread while keyed
     auto ab = a.tx->tune(14.336, 3.0, 1.5, {}, [&](const txc::Progress&) { if (++polls == 5) a.tx->abort(); });
     CHECK(ab.outcome && ab.outcome->result != atu::Atu::TuneResult::Pass); CHECK(ab.stop.find("abort") != std::string::npos); CHECK(!a.sim.keyed);
+}
+TEST(tx_control_tune_tries_the_saved_setting_first_and_skips_the_search_when_it_is_good) {   // 40 m 2026-11-27: five failed searches beside a good saved setting
+    if (backup_image().empty()) return;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); r.sim.tune_time_polls = 30;
+    auto first = r.tx->tune(14.336, 3.0, 2.0, {}); CHECK(first.outcome && first.outcome->result == atu::Atu::TuneResult::Pass); CHECK(!first.checked_saved); CHECK_EQ(first.searches, 1);
+    auto count_full = [&] { return std::count(r.sim.requests.begin(), r.sim.requests.end(), uint8_t(atu::FULL_TUNE)); };
+    const auto full0 = count_full(); r.sim.ind = 3; r.sim.cap = 3;                                  // the relays moved since (another band)
+    std::vector<std::string> said; auto t = r.tx->tune(14.300, 3.0, 2.0, {}, {}, [&](const std::string& m) { said.push_back(m); });   // 36 kHz away: the saved setting is tried
+    CHECK(t.checked_saved && t.from_saved); CHECK(t.outcome && t.outcome->result == atu::Atu::TuneResult::Pass); CHECK_EQ(t.searches, 0);
+    CHECK_EQ(count_full(), full0);                                                                   // no search at all
+    CHECK_EQ(r.sim.ind, 30); CHECK_EQ(r.sim.cap, 7); CHECK(!r.sim.keyed); CHECK(t.check_tuner_swr && *t.check_tuner_swr < 1.01);
+    CHECK(t.max_fwd_w > 2.0 && t.max_fwd_w < 5.0); CHECK(t.outcome->seconds < 6.0);
+    bool named = false; for (auto& m : said) named = named || m.find("no search") != std::string::npos; CHECK(named);
+    r.sim.swr_b3 = 64;                                                                               // the saved setting reads SWR 3.0 now: search as before
+    auto u = r.tx->tune(14.336, 3.0, 2.0, {}); CHECK(u.checked_saved && !u.from_saved); CHECK_EQ(u.searches, 1); CHECK_EQ(count_full(), full0 + 1);
+    CHECK(u.outcome && u.outcome->result == atu::Atu::TuneResult::Pass && u.saved); CHECK(!r.sim.keyed);
+    r.sim.swr_b3 = 0; auto far = r.tx->tune(14.0, 3.0, 2.0, {}); CHECK(!far.checked_saved); CHECK_EQ(far.searches, 1);   // 336 kHz away: not tried
+}
+TEST(tx_control_tune_searches_again_after_a_fail_up_to_three_times) {
+    if (backup_image().empty()) return;
+    {   TxRig r; r.tx->arm(backup_image(), backup_image()); r.sim.tune_time_polls = 20; r.sim.fail_searches = 2;
+        std::vector<std::string> said; auto t = r.tx->tune(7.074, 3.0, 2.0, {}, {}, [&](const std::string& m) { said.push_back(m); });
+        CHECK(t.outcome && t.outcome->result == atu::Atu::TuneResult::Pass && t.saved); CHECK_EQ(t.searches, 3); CHECK(!r.sim.keyed);
+        int again = 0; for (auto& m : said) again += m.find("searching again") != std::string::npos; CHECK_EQ(again, 2);
+        CHECK_EQ(std::count(r.sim.requests.begin(), r.sim.requests.end(), uint8_t(atu::FULL_TUNE)), 3); }
+    {   TxRig r; r.tx->arm(backup_image(), backup_image()); r.sim.tune_time_polls = 20; r.sim.fail_searches = 5;
+        auto t = r.tx->tune(7.074, 3.0, 2.0, {}); CHECK(t.outcome && t.outcome->result == atu::Atu::TuneResult::Fail); CHECK_EQ(t.searches, 3); CHECK(!t.saved); CHECK(!r.sim.keyed);
+        CHECK_EQ(r.sim.fail_searches, 2); }                                                          // three searches, no more
+    {   TxRig r; r.tx->arm(backup_image(), backup_image()); r.sim.silent = true; std::atomic<int> polls{0};   // Stop during a search: never searched again
+        auto t = r.tx->tune(7.074, 3.0, 2.0, {}, [&](const txc::Progress&) { if (++polls == 5) r.tx->abort(); });
+        CHECK_EQ(t.searches, 1); CHECK(t.stop.find("abort") != std::string::npos); CHECK(!r.sim.keyed); }
 }
 TEST(drive_calibration_has_no_default_and_round_trips_as_text) {
     FakeDiceBus bus; flex_defaults(bus); PalMailbox mb(bus, ByteOrder::Big, 1.0, 0); Flex fx(mb); txc::TxControl t(fx, [](double) { return std::unique_ptr<IPcmOut>(); });
@@ -840,12 +875,19 @@ TEST(safety_stops_are_told_to_the_trip_hook_and_normal_ends_are_not) {
     r.sim.pa_from_level = false; r.sim.adc_fwd = 966; r.sim.adc_rev = 238;                                         // the fixed reading is far above a 2 W target
     auto bad = r.tx->ramp(14.10, 2.0, o); CHECK(!bad.reached); CHECK_EQ(trips.size(), size_t(1)); CHECK(trips[0].find("above") != std::string::npos); CHECK(!r.sim.keyed);
 }
-TEST(tx_antenna_per_over_and_the_atu_only_on_ant1) {
+TEST(tx_antenna_per_over_and_the_atu_tunes_each_antenna_with_its_own_memory) {   // the ATU sits in front of the antenna relays (user 2026-11-28)
     if (backup_image().empty()) return;
-    TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o; o.tx_ant = 2;
+    TxRig r; r.tx->arm(backup_image(), backup_image()); txc::Options o; o.tx_ant = 2; r.sim.tune_time_polls = 20;
     auto res = r.tx->ramp(14.10, 2.0, o); CHECK(res.reached);
     const auto ant = sent(r, "RDAL_OP_SET_TX_ANT"); CHECK(!ant.empty()); CHECK_EQ(ant.back().d1, 2u);   // the over went out on ANT2
-    CHECK(r.tx->tune(14.10, 3.0, 1.5, o).why_not.find("ATU is on ANT1") != std::string::npos);          // the ATU cannot tune ANT2
+    txc::Options o1; auto t1 = r.tx->tune(14.10, 3.0, 1.5, o1); CHECK(t1.saved); CHECK(r.tx->memory().recall(5, 1)); CHECK(!r.tx->memory().recall(5, 2));
+    auto t2 = r.tx->tune(14.10, 3.0, 1.5, o); CHECK(t2.why_not.empty()); CHECK(t2.outcome && t2.outcome->result == atu::Atu::TuneResult::Pass);
+    CHECK(!t2.checked_saved);                                                                        // ANT1's setting is never tried on ANT2: a full search
+    const auto ant2 = sent(r, "RDAL_OP_SET_TX_ANT"); CHECK_EQ(ant2.back().d1, 2u); CHECK(!r.sim.keyed);  // tuned on ANT2
+    CHECK(t2.saved && r.tx->memory().recall(5, 2)); CHECK(r.tx->memory().recall(5, 1));              // stored for ANT2, ANT1's kept
+    r.tx->memory().store(5, atu::Setting{11, 22, false}, 2); r.sim.ind = 0; r.sim.cap = 0;
+    CHECK(r.tx->restore_relays(5, 2)); CHECK_EQ(r.sim.ind, 11); CHECK_EQ(r.sim.cap, 22);             // each antenna's own relays, no RF
+    CHECK(!r.tx->restore_relays(5, 3));                                                              // nothing stored for ANT3
     o.tx_ant = 4; CHECK(!r.tx->ramp(14.10, 2.0, o).reached); o.tx_ant = 0; CHECK(!r.tx->ramp(14.10, 2.0, o).reached);   // RX1 IN / nothing: refused
 }
 TEST(band_lines_are_set_and_settled_before_every_key_down_and_a_fault_refuses_the_over) {

@@ -36,7 +36,7 @@ void RadioModel::on_send(uint32_t d1) {
         case atu::ALL_UPDATE: report(false); break;
         case atu::FWD_PWR: q.push_back(res(atu::R_FWDPWR, 0x01, 0x2C)); break;             // the tuner's own meter: 3.00 W
         case atu::REV_PWR: q.push_back(res(atu::R_REVPWR, 0x00, 0x01)); break;             // 0.01 W
-        case atu::SWR: q.push_back(res(atu::R_SWR, 0x00, 0x00)); break;
+        case atu::SWR: q.push_back(res(atu::R_SWR, 0x00, uint8_t(swr_b3))); break;
         case atu::FULL_TUNE: case atu::MEM_TUNE: tune_polls = 0; full = req == atu::FULL_TUNE; q.push_back(res(atu::R_ACTIVE)); break;
         default: if (req >= atu::SWR11 && req <= atu::SWR30) { thr = req - atu::SWR11; q.push_back(res(atu::R_SWRTHRESH, uint8_t(thr))); } break;
     }
@@ -50,8 +50,9 @@ uint32_t RadioModel::next() {
     if (tune_polls >= 0 && !silent && ++tune_polls >= tune_time_polls) {
         tune_polls = -1;
         if (!keyed) q.push_back(res(atu::R_TUNEFAIL, 0));
+        else if (fail_searches > 0) { --fail_searches; q.push_back(res(atu::R_TUNEFAIL, 2)); }
         else if (best_swr > atu::kThresholds[thr] && !pass_regardless) q.push_back(res(atu::R_TUNEFAIL, 2));
-        else { ind = 30; cap = 7; hiz = 1; q.push_back(res(atu::R_TUNEPASS)); report(true); }
+        else { ind = pass_ind; cap = pass_cap; hiz = 1; q.push_back(res(atu::R_TUNEPASS)); report(true); }
     }
     if (q.empty()) return 0x00FFFFFFu;
     uint32_t w = q.front(); q.pop_front(); return (w & 0x00FFFFFFu) | uint32_t(q.size() > 255 ? 255 : q.size()) << 24;

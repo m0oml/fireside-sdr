@@ -47,6 +47,7 @@ public:
     PreampResult set_preamp(bool on);                               // receive preamp on/off through RxPreamp (SET_TRX_PREAMP 0/1 only); NotArmed unless Started
     bool preamp_on() const;
     AntResult set_rx_antenna(RxAnt a);                              // switch the receive antenna through RxAntenna (SET_RX1_ANT 1..4 only); NotArmed unless Started; Unchanged writes nothing
+    AntResult reassert_rx_antenna();                    // the current RX antenna written again (once the radio has settled after power-up); NotArmed without one
     std::optional<RxAnt> rx_antenna() const;                        // what the radio is set to now (the start-up's choice until changed)
     // The rear TX lines as band switches (txlines.h). The table is kept across restarts; while Started the lines follow apply_tx_lines(dial) and every
     // over sets them first. shutdown() switches every used line off; disconnect() writes nothing.

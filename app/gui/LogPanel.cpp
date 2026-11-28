@@ -378,6 +378,7 @@ void LogPanel::lookupNow() {
 
 Qso LogPanel::formQso() const {
     Qso q; q.call = call_->text().trimmed().toStdString(); q.freq_hz = rx_->dialHz(); q.mode = currentMode().toStdString(); q.time_on_utc = QDateTime::currentSecsSinceEpoch();
+    if (auto_time_on_ > 0) { q.time_off_utc = q.time_on_utc; q.time_on_utc = auto_time_on_; }   // a sequenced QSO: from its first message to now
     q.rst_sent = rst_sent_->text().trimmed().toStdString(); q.rst_rcvd = rst_rcvd_->text().trimmed().toStdString(); q.name = name_->text().trimmed().toStdString(); q.grid = grid_->text().trimmed().toStdString();
     q.comment = comment_->text().trimmed().toStdString(); q.station_callsign = my_call_->text().toStdString(); q.my_grid = my_grid_->text().toStdString(); q.tx_pwr_w = tx_pwr_ ? tx_pwr_() : 0.0; return q;
 }
@@ -534,14 +535,15 @@ void LogPanel::callerDecoded(const QString& line) {
     if (cur == from) { if (!m.report.empty() && m.to == my_call_->text().toUpper().toStdString()) rst_rcvd_->setText(QString::fromStdString(m.report)); return; }   // the same caller again: only their report
     auto_call_ = from; fillFromDecode(line); setStatus(QString("%1 is calling you: looked up (Enter to log)").arg(from));
 }
-void LogPanel::logAuto(const QString& call, const QString& grid, const QString& sent, const QString& rcvd) {
+void LogPanel::logAuto(const QString& call, const QString& grid, const QString& sent, const QString& rcvd, qint64 time_on) {
     const bool same = call_->text().trimmed().toUpper() == call.toUpper();
     const QString name = same ? name_->text() : QString(), comment = same ? comment_->text() : QString();
     if (form_open_) closeForm();
     clearForm(); call_->setText(call.toUpper()); grid_->setText(grid); rst_sent_->setText(sent); rst_rcvd_->setText(rcvd);
     if (!name.isEmpty()) name_->setText(name); else if (const auto* qi = qrz_->cached(call); qi && !qi->not_found) name_->setText(QString::fromStdString(qi->first_name));
     comment_->setText(comment);
-    logNow(); setStatus(QString("%1 logged automatically (sent %2, rcvd %3) - ").arg(call, sent, rcvd) + status_);
+    const qint64 now = QDateTime::currentSecsSinceEpoch(); auto_time_on_ = time_on > 0 && time_on <= now && now - time_on < 3600 ? time_on : 0;   // the QSO's start (sane values only)
+    logNow(); auto_time_on_ = 0; setStatus(QString("%1 logged automatically (sent %2, rcvd %3) - ").arg(call, sent, rcvd) + status_);
 }
 QString LogPanel::callText() const { return call_->text(); }
 QString LogPanel::rstRcvdText() const { return rst_rcvd_->text(); }

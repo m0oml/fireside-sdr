@@ -47,7 +47,11 @@ struct TuneResult {
     bool unkey_failed = false;                                    // SET_MOX 0 never got through: the radio may still be keyed
     bool estimated_drive = false;                                 // no measured level on this band: the EEPROM table's drive was used
     std::string pass_rejected;                                    // the tuner said "pass" but it is not trusted (why): the outcome is shown as stopped, nothing saved
+    bool checked_saved = false, from_saved = false;               // the band's saved setting was tried first; it was good (no search)
+    std::optional<double> check_tuner_swr;                        // the tuner's SWR on the saved setting
+    int searches = 0;                                             // full searches run (at most kTuneSearches)
 };
+inline constexpr int kTuneSearches = 3;
 
 // Voice: 48 kHz mono audio in (the PC's capture, or the radio's mic input ch7 from the duplex stream).
 class IAudioIn {
@@ -202,7 +206,8 @@ public:
     // time-out. Refused without a measured drive level on the band.
     CwResult cw(double dial_mhz, ICwKeys& keys, const CwOptions& c, const ProgressFn& p = {}, const LogFn& log = {});
     // No RF: put a band's stored relays back. false if nothing is stored or the tuner does not report them.
-    bool restore_relays(int band, const LogFn& log = {});
+    bool restore_relays(int band, int ant = 1, const LogFn& log = {});
+    bool set_atu_relays(int ind, int cap, bool hiz, const LogFn& log = {});   // no RF: the tuner's relays set directly (0 / 0 = straight through, for a 50 ohm load)   // the relays of that band's tune on that antenna (ANT1..ANT3)
     // Receive-level check with the radio's built-in signal generator (siggen.h; PowerSDR CalibrateLevel for the FLEX-5000). Holds the transmit lock for
     // the whole check, so nothing can key meanwhile; it never keys itself. The generator sits at dial + tone_hz (inside the receive passband).
     // read(): {in-passband dBFS, strongest spectrum peak's offset from the dial in Hz}, from the receiver. preamp(on): switches the receive preamp and

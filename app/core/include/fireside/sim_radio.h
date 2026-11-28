@@ -17,6 +17,9 @@ struct RadioModel {
     double best_swr = 1.0;                         // what this antenna can be tuned to
     int tune_time_polls = 60;                      // result polls until the tune finishes
     bool silent = false;                           // never answers a tune
+    int swr_b3 = 0;                                // the tuner's SWR report on request (b3: 0 = 1.00, 28 = ~2.0, 64 = 3.0)
+    int fail_searches = 0;
+    int pass_ind = 30, pass_cap = 7;               // the relays a passing search ends on (a 50 ohm load needs only a few steps)                         // this many full searches fail ("could not bring the SWR below the threshold") before one passes
     bool pass_regardless = false; int pass_swr_b3 = 0;   // a tuner that reports PASS even when it found no match, with this SWR byte (255 = SWR ~1022, seen on 12 m 2026-11-21)
     int pass_fwd_cw = 0x0424;                      // the tuner's forward power report after a tune, in 0.01 W (10.60 W; 0 = read without power, seen on 60 m 2026-11-25)
     std::vector<uint8_t> requests;

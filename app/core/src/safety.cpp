@@ -27,7 +27,9 @@ bool atu_request_reviewed(uint32_t d1, uint32_t d2) {
     const uint32_t req = d1 >> 8, b2 = d1 & 0xFF;
     switch (req) {
         case 0: case 1: case 2: case 3: case 4:                  // no-op, inductor up/down, capacitor up/down
-        case 8: case 9: case 10:                                 // Hi-Z, Lo-Z, antenna 1 (the FLEX-5000 uses antenna 1 only: REQ_ANT2 = 11 is refused)
+        case 8: case 9: case 10:                                 // Hi-Z, Lo-Z, the tuner's own "antenna 1". Its antenna 1 / 2 are bypass / through the tuner on the newer
+                                                                 // ATU, not the radio's jacks; PowerSDR sends them only to that model. This radio has the older one (ATU rev
+                                                                 // 0xFFFFFFFF, tuner firmware 2.00, read 2026-11-28), so REQ_ANT2 = 11 stays refused (never needed).
         case 40: case 41: case 44: case 45:                      // report all, version, standby, active
         case 59: case 60: case 61: case 62: case 64:             // auto tune OFF, report fwd / rev / SWR, live updates off
             // not allowed (unused, least privilege): 46 manual store (writes the tuner's memory), 58 auto tune ON (the tuner would retune by itself during
